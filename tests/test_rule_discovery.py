@@ -1,0 +1,231 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from poly_strategy.rule_discovery import (
+    DiscoveredRuleSet,
+    MarketText,
+    RelationCandidate,
+    discover_rules,
+    filter_collectively_exhaustive,
+    filter_complements,
+    filter_equivalents,
+    filter_implications,
+    filter_mutual_exclusions,
+    read_market_texts,
+    write_discovered_rules,
+)
+
+
+class RuleDiscoveryTests(unittest.TestCase):
+    def test_read_market_texts_extracts_gamma_rows(self):
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "a",
+                "raw": {
+                    "question": "Will A happen?",
+                    "description": "A resolution text",
+                    "outcomes": json.dumps(["Yes", "No"]),
+                    "endDate": "2026-12-31T00:00:00Z",
+                    "category": "Politics",
+                    "slug": "will-a-happen",
+                },
+            },
+            {
+                "type": "binary_snapshot",
+                "market_id": "ignored",
+            },
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "b",
+                "raw": {
+                    "question": "Will B happen?",
+                    "description": "",
+                    "outcomes": ["Yes", "No"],
+                    "endDate": "2026-12-30T00:00:00Z",
+                },
+            },
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "bad",
+                "raw": {},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            markets = read_market_texts(path)
+
+        self.assertEqual([market.market_id for market in markets], ["a", "b"])
+        self.assertEqual(markets[0].outcomes, ["Yes", "No"])
+        self.assertEqual(markets[0].slug, "will-a-happen")
+        self.assertEqual(markets[1].slug, "will-b-happen")
+
+    def test_filter_implications_is_conservative(self):
+        candidates = [
+            RelationCandidate("implies", "a", "b", "a_implies_b", 0.97, True, [], "a implies b"),
+            RelationCandidate("implies", "c", "d", "b_implies_a", 0.98, True, [], "d implies c"),
+            RelationCandidate("implies", "a", "c", "a_implies_b", 0.40, True, [], "too low"),
+            RelationCandidate("implies", "a", "d", "a_implies_b", 0.99, True, ["ambiguous_wording"], "risky"),
+            RelationCandidate("implies", "a", "missing", "a_implies_b", 0.99, True, [], "unknown"),
+            RelationCandidate("implies", "a", "a", "a_implies_b", 0.99, True, [], "self"),
+            RelationCandidate("equivalent", "a", "b", "bidirectional", 0.99, True, [], "not traded in mvp"),
+            RelationCandidate("implies", "b", "c", "none", 0.99, True, [], "bad direction"),
+            RelationCandidate("implies", "b", "d", "a_implies_b", 0.99, False, [], "blocked"),
+        ]
+
+        implications = filter_implications(candidates, {"a", "b", "c", "d"}, min_confidence=0.95)
+
+        self.assertEqual([(rule.antecedent, rule.consequent) for rule in implications], [("a", "b"), ("d", "c")])
+
+    def test_filter_mutual_exclusions_accepts_only_clean_candidates(self):
+        candidates = [
+            RelationCandidate("mutually_exclusive", "a", "b", "none", 0.99, True, [], "a and b cannot both win"),
+            RelationCandidate("mutually_exclusive", "a", "c", "none", 0.70, True, [], "too low"),
+            RelationCandidate("mutually_exclusive", "a", "d", "none", 0.99, True, ["ambiguous_wording"], "risky"),
+            RelationCandidate("mutually_exclusive", "a", "missing", "none", 0.99, True, [], "unknown"),
+            RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "different type"),
+        ]
+
+        exclusions = filter_mutual_exclusions(candidates, {"a", "b", "c", "d"}, min_confidence=0.95)
+
+        self.assertEqual([(rule.first, rule.second) for rule in exclusions], [("a", "b")])
+
+    def test_filter_other_pair_relations_accepts_only_clean_candidates(self):
+        candidates = [
+            RelationCandidate("equivalent", "b", "a", "bidirectional", 0.99, True, [], "same event"),
+            RelationCandidate("collectively_exhaustive", "a", "c", "none", 0.99, True, [], "at least one yes"),
+            RelationCandidate("complement", "a", "d", "bidirectional", 0.99, True, [], "exactly one yes"),
+            RelationCandidate("equivalent", "a", "missing", "bidirectional", 0.99, True, [], "unknown"),
+            RelationCandidate("complement", "a", "c", "bidirectional", 0.80, True, [], "low"),
+        ]
+
+        equivalents = filter_equivalents(candidates, {"a", "b", "c", "d"}, min_confidence=0.95)
+        exhaustive = filter_collectively_exhaustive(candidates, {"a", "b", "c", "d"}, min_confidence=0.95)
+        complements = filter_complements(candidates, {"a", "b", "c", "d"}, min_confidence=0.95)
+
+        self.assertEqual([(rule.first, rule.second) for rule in equivalents], [("a", "b")])
+        self.assertEqual([(rule.first, rule.second) for rule in exhaustive], [("a", "c")])
+        self.assertEqual([(rule.first, rule.second) for rule in complements], [("a", "d")])
+
+    def test_write_discovered_rules_keeps_backtest_compatible_implications(self):
+        candidate = RelationCandidate("implies", "a", "b", "a_implies_b", 0.97, True, [], "a implies b")
+        exclusion = RelationCandidate("mutually_exclusive", "a", "c", "none", 0.99, True, [], "exclusive")
+        equivalent = RelationCandidate("equivalent", "a", "d", "bidirectional", 0.99, True, [], "same")
+        exhaustive = RelationCandidate("collectively_exhaustive", "a", "e", "none", 0.99, True, [], "at least one")
+        complement = RelationCandidate("complement", "a", "f", "bidirectional", 0.99, True, [], "exactly one")
+        ruleset = DiscoveredRuleSet(
+            generated_at="2026-05-08T00:00:00Z",
+            min_confidence=0.95,
+            candidates=[candidate, exclusion, equivalent, exhaustive, complement],
+            implications=filter_implications([candidate], {"a", "b"}, min_confidence=0.95),
+            mutual_exclusions=filter_mutual_exclusions([exclusion], {"a", "c"}, min_confidence=0.95),
+            equivalents=filter_equivalents([equivalent], {"a", "d"}, min_confidence=0.95),
+            collectively_exhaustive=filter_collectively_exhaustive([exhaustive], {"a", "e"}, min_confidence=0.95),
+            complements=filter_complements([complement], {"a", "f"}, min_confidence=0.95),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rules.json"
+            count = write_discovered_rules(path, ruleset)
+            row = json.loads(path.read_text())
+
+        self.assertEqual(count, 1)
+        self.assertEqual(row["version"], 1)
+        self.assertEqual(row["source"], "llm_discovery")
+        self.assertEqual(row["implications"][0]["antecedent"], "a")
+        self.assertEqual(row["implications"][0]["consequent"], "b")
+        self.assertEqual(row["mutually_exclusive"][0]["first"], "a")
+        self.assertEqual(row["mutually_exclusive"][0]["second"], "c")
+        self.assertEqual(row["equivalent"][0]["second"], "d")
+        self.assertEqual(row["collectively_exhaustive"][0]["second"], "e")
+        self.assertEqual(row["complement"][0]["second"], "f")
+        self.assertEqual(row["candidates"][0]["relation_type"], "implies")
+
+    def test_discover_rules_batches_markets_and_writes_output(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                ids = [market.market_id for market in markets]
+                self.calls.append(ids)
+                if ids == ["a", "b"]:
+                    return [
+                        RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "a implies b"),
+                        RelationCandidate("mutually_exclusive", "a", "b", "none", 0.99, True, [], "exclusive"),
+                        RelationCandidate("equivalent", "a", "b", "bidirectional", 0.99, True, [], "same"),
+                        RelationCandidate("collectively_exhaustive", "a", "b", "none", 0.99, True, [], "at least one"),
+                        RelationCandidate("complement", "a", "b", "bidirectional", 0.99, True, [], "exactly one"),
+                    ]
+                return []
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            client = FakeClient()
+
+            result = discover_rules(
+                raw,
+                out,
+                client,
+                batch_size=2,
+                min_confidence=0.95,
+                generated_at="2026-05-08T00:00:00Z",
+            )
+
+            written = json.loads(out.read_text())
+
+        self.assertEqual(client.calls, [["a", "b"], ["c"]])
+        self.assertEqual(result.markets_read, 3)
+        self.assertEqual(result.candidates_found, 5)
+        self.assertEqual(result.implications_written, 1)
+        self.assertEqual(result.mutual_exclusions_written, 1)
+        self.assertEqual(result.equivalents_written, 1)
+        self.assertEqual(result.collectively_exhaustive_written, 1)
+        self.assertEqual(result.complements_written, 1)
+        self.assertEqual(written["implications"][0]["antecedent"], "a")
+        self.assertEqual(written["mutually_exclusive"][0]["first"], "a")
+
+    def test_discover_rules_writes_empty_file_for_empty_input(self):
+        class FakeClient:
+            def discover_relations(self, markets):
+                raise AssertionError("client should not be called for empty input")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "empty.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("")
+
+            result = discover_rules(
+                raw,
+                out,
+                FakeClient(),
+                batch_size=20,
+                min_confidence=0.95,
+                generated_at="2026-05-08T00:00:00Z",
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.markets_read, 0)
+        self.assertEqual(result.candidates_found, 0)
+        self.assertEqual(result.implications_written, 0)
+        self.assertEqual(written["implications"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

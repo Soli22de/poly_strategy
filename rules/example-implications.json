@@ -1,0 +1,9 @@
+{
+  "implications": [
+    {
+      "antecedent": "france-wins-world-cup",
+      "consequent": "france-reaches-final"
+    }
+  ]
+}
+
