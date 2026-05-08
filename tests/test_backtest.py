@@ -104,6 +104,57 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(run.observation_count, 2)
         self.assertAlmostEqual(run.duration_seconds, 5.0)
 
+    def test_replay_ndjson_does_not_merge_distinct_opportunities_with_same_first_market(self):
+        rows = [
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "a",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.90, 100]], "bids": []},
+                "no": {"asks": [[0.30, 100]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "b",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.90, 100]], "bids": []},
+                "no": {"asks": [[0.30, 100]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "c",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.90, 100]], "bids": []},
+                "no": {"asks": [[0.30, 100]], "bids": []},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path = Path(tmp) / "snapshots.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            snapshots_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            rules_path.write_text(
+                json.dumps(
+                    {
+                        "mutually_exclusive": [
+                            {"first": "a", "second": "b"},
+                            {"first": "a", "second": "c"},
+                        ]
+                    }
+                )
+            )
+
+            result = replay_ndjson(snapshots_path, rules_path=rules_path)
+
+        pair_runs = [run for run in result.runs if run.key.startswith("mutually_exclusive:")]
+        self.assertEqual(len(pair_runs), 2)
+
     def test_load_rules_reads_implication_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rules.json"
@@ -323,6 +374,59 @@ class BacktestTests(unittest.TestCase):
         ]
         self.assertEqual(len(exclusion_opportunities), 1)
         self.assertAlmostEqual(exclusion_opportunities[0].net_edge_per_share, 0.08)
+
+    def test_replay_ndjson_scans_mutual_exclusion_basket_rules_per_timestamp_batch(self):
+        rows = [
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "a",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.60, 100]], "bids": []},
+                "no": {"asks": [[0.30, 50]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "b",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.61, 100]], "bids": []},
+                "no": {"asks": [[0.31, 50]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "c",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.62, 100]], "bids": []},
+                "no": {"asks": [[0.32, 50]], "bids": []},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path = Path(tmp) / "snapshots.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            snapshots_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            rules_path.write_text(
+                json.dumps(
+                    {
+                        "mutually_exclusive": [
+                            {"first": "a", "second": "b"},
+                            {"first": "a", "second": "c"},
+                            {"first": "b", "second": "c"},
+                        ]
+                    }
+                )
+            )
+
+            result = replay_ndjson(snapshots_path, rules_path=rules_path)
+
+        basket_opportunities = [opportunity for opportunity in result.opportunities if opportunity.kind == "mutual_exclusion_basket"]
+        self.assertEqual(len(basket_opportunities), 1)
+        self.assertAlmostEqual(basket_opportunities[0].net_edge_per_share, 1.07)
 
     def test_replay_ndjson_scans_all_pair_relation_rules_per_timestamp_batch(self):
         rows = [

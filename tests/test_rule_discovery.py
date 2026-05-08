@@ -7,6 +7,7 @@ from poly_strategy.rule_discovery import (
     DiscoveredRuleSet,
     MarketText,
     RelationCandidate,
+    deterministic_relation_candidates,
     discover_rules,
     filter_collectively_exhaustive,
     filter_complements,
@@ -64,6 +65,65 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(markets[0].outcomes, ["Yes", "No"])
         self.assertEqual(markets[0].slug, "will-a-happen")
         self.assertEqual(markets[1].slug, "will-b-happen")
+
+    def test_read_market_texts_dedupes_repeated_gamma_collections(self):
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "a",
+                "raw": {"question": "Will old A happen?", "outcomes": ["Yes", "No"]},
+            },
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "b",
+                "raw": {"question": "Will B happen?", "outcomes": ["Yes", "No"]},
+            },
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "a",
+                "raw": {"question": "Will new A happen?", "outcomes": ["Yes", "No"]},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            markets = read_market_texts(path)
+
+        self.assertEqual([market.market_id for market in markets], ["a", "b"])
+        self.assertEqual(markets[0].question, "Will new A happen?")
+
+    def test_deterministic_relation_candidates_adds_neg_risk_mutual_exclusions(self):
+        markets = [
+            MarketText("a", "A?", "", ["Yes", "No"], "", "", "", neg_risk=True, neg_risk_market_id="group"),
+            MarketText("b", "B?", "", ["Yes", "No"], "", "", "", neg_risk=True, neg_risk_market_id="group"),
+            MarketText("c", "C?", "", ["Yes", "No"], "", "", "", neg_risk=True, neg_risk_market_id="other"),
+        ]
+
+        candidates = deterministic_relation_candidates(markets)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].relation_type, "mutually_exclusive")
+        self.assertEqual((candidates[0].market_a_id, candidates[0].market_b_id), ("a", "b"))
+
+    def test_secondary_verify_candidates_blocks_fallback_based_non_mutual_relations(self):
+        from poly_strategy.rule_discovery import secondary_verify_candidates
+
+        markets = {
+            "a": MarketText("a", "Will A happen?", "If neither occurs, this market will resolve to 50-50.", ["Yes", "No"], "", "", ""),
+            "b": MarketText("b", "Will B happen?", "", ["Yes", "No"], "", "", ""),
+        }
+        candidates = [
+            RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "a implies b"),
+            RelationCandidate("mutually_exclusive", "a", "b", "none", 0.99, True, [], "a excludes b"),
+        ]
+
+        verified = secondary_verify_candidates(candidates, markets)
+
+        self.assertFalse(verified[0].trade_allowed)
+        self.assertIn("conditional_or_fallback_resolution", verified[0].risk_flags)
+        self.assertTrue(verified[1].trade_allowed)
 
     def test_filter_implications_is_conservative(self):
         candidates = [
@@ -123,6 +183,7 @@ class RuleDiscoveryTests(unittest.TestCase):
             min_confidence=0.95,
             candidates=[candidate, exclusion, equivalent, exhaustive, complement],
             implications=filter_implications([candidate], {"a", "b"}, min_confidence=0.95),
+            processed_market_ids=["a", "b", "c", "d", "e", "f"],
             mutual_exclusions=filter_mutual_exclusions([exclusion], {"a", "c"}, min_confidence=0.95),
             equivalents=filter_equivalents([equivalent], {"a", "d"}, min_confidence=0.95),
             collectively_exhaustive=filter_collectively_exhaustive([exhaustive], {"a", "e"}, min_confidence=0.95),
@@ -145,6 +206,7 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(row["collectively_exhaustive"][0]["second"], "e")
         self.assertEqual(row["complement"][0]["second"], "f")
         self.assertEqual(row["candidates"][0]["relation_type"], "implies")
+        self.assertEqual(row["processed_market_ids"], ["a", "b", "c", "d", "e", "f"])
 
     def test_discover_rules_batches_markets_and_writes_output(self):
         class FakeClient:
@@ -154,7 +216,7 @@ class RuleDiscoveryTests(unittest.TestCase):
             def discover_relations(self, markets):
                 ids = [market.market_id for market in markets]
                 self.calls.append(ids)
-                if ids == ["a", "b"]:
+                if ids[:2] == ["a", "b"]:
                     return [
                         RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "a implies b"),
                         RelationCandidate("mutually_exclusive", "a", "b", "none", 0.99, True, [], "exclusive"),
@@ -190,7 +252,7 @@ class RuleDiscoveryTests(unittest.TestCase):
 
             written = json.loads(out.read_text())
 
-        self.assertEqual(client.calls, [["a", "b"], ["c"]])
+        self.assertEqual(client.calls, [["a", "b", "c"], ["c", "a", "b"]])
         self.assertEqual(result.markets_read, 3)
         self.assertEqual(result.candidates_found, 5)
         self.assertEqual(result.implications_written, 1)
@@ -200,6 +262,189 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(result.complements_written, 1)
         self.assertEqual(written["implications"][0]["antecedent"], "a")
         self.assertEqual(written["mutually_exclusive"][0]["first"], "a")
+
+    def test_discover_rules_with_cache_only_calls_client_for_new_markets(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                self.calls.append([market.market_id for market in markets])
+                return [RelationCandidate("implies", "c", "d", "a_implies_b", 0.99, True, [], "c implies d")]
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c", "d"]
+        ]
+        cache = {
+            "version": 1,
+            "source": "llm_discovery",
+            "candidates": [
+                {
+                    "relation_type": "implies",
+                    "market_a_id": "a",
+                    "market_b_id": "b",
+                    "direction": "a_implies_b",
+                    "confidence": 0.99,
+                    "trade_allowed": True,
+                    "risk_flags": [],
+                    "reason": "a implies b",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            cache_path = Path(tmp) / "cache.json"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            cache_path.write_text(json.dumps(cache))
+            client = FakeClient()
+
+            result = discover_rules(
+                raw,
+                out,
+                client,
+                batch_size=10,
+                min_confidence=0.95,
+                cache_path=cache_path,
+                generated_at="2026-05-08T00:00:00Z",
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(client.calls, [["c", "d", "a", "b"]])
+        self.assertEqual(result.implications_written, 2)
+        self.assertEqual({(row["antecedent"], row["consequent"]) for row in written["implications"]}, {("a", "b"), ("c", "d")})
+        self.assertEqual(written["processed_market_ids"], ["a", "b", "c", "d"])
+
+    def test_discover_rules_cache_tracks_markets_with_no_relations(self):
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c"]
+        ]
+        cache = {
+            "version": 1,
+            "source": "llm_discovery",
+            "processed_market_ids": ["a", "b", "c"],
+            "candidates": [
+                {
+                    "relation_type": "implies",
+                    "market_a_id": "a",
+                    "market_b_id": "b",
+                    "direction": "a_implies_b",
+                    "confidence": 0.99,
+                    "trade_allowed": True,
+                    "risk_flags": [],
+                    "reason": "a implies b",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            cache_path = Path(tmp) / "cache.json"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            cache_path.write_text(json.dumps(cache))
+
+            result = discover_rules(
+                raw,
+                out,
+                None,
+                batch_size=10,
+                min_confidence=0.95,
+                cache_path=cache_path,
+                generated_at="2026-05-08T00:00:00Z",
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.implications_written, 1)
+        self.assertEqual(written["processed_market_ids"], ["a", "b", "c"])
+
+    def test_discover_rules_requires_client_for_uncached_markets(self):
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "a",
+                "raw": {"question": "Will a happen?", "outcomes": ["Yes", "No"]},
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            with self.assertRaises(RuntimeError):
+                discover_rules(
+                    raw,
+                    out,
+                    None,
+                    batch_size=10,
+                    min_confidence=0.95,
+                    generated_at="2026-05-08T00:00:00Z",
+                )
+
+    def test_discover_rules_cache_can_disable_old_market_context(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                self.calls.append([market.market_id for market in markets])
+                return []
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c"]
+        ]
+        cache = {
+            "candidates": [
+                {
+                    "relation_type": "implies",
+                    "market_a_id": "a",
+                    "market_b_id": "b",
+                    "direction": "a_implies_b",
+                    "confidence": 0.99,
+                    "trade_allowed": True,
+                    "risk_flags": [],
+                    "reason": "cached",
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            cache_path = Path(tmp) / "cache.json"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            cache_path.write_text(json.dumps(cache))
+            client = FakeClient()
+
+            discover_rules(
+                raw,
+                out,
+                client,
+                batch_size=10,
+                min_confidence=0.95,
+                cache_path=cache_path,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+            )
+
+        self.assertEqual(client.calls, [["c"]])
 
     def test_discover_rules_writes_empty_file_for_empty_input(self):
         class FakeClient:

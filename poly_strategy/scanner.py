@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import List
 
 from poly_strategy.fees import polymarket_taker_fee_per_share
@@ -102,6 +103,28 @@ def find_mutually_exclusive_arbs(
         if first is None or second is None:
             continue
         opportunity = _mutually_exclusive_candidate(first, second, min_net_edge)
+        if opportunity is not None:
+            opportunities.append(opportunity)
+    return opportunities
+
+
+def find_mutual_exclusion_basket_arbs(
+    snapshots: List[BinaryMarketSnapshot],
+    rules: List[MutualExclusionRule],
+    min_net_edge: float = 0.0,
+) -> List[Opportunity]:
+    by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
+    adjacency = defaultdict(set)
+    for rule in rules:
+        if rule.first_market_id in by_market_id and rule.second_market_id in by_market_id:
+            adjacency[rule.first_market_id].add(rule.second_market_id)
+            adjacency[rule.second_market_id].add(rule.first_market_id)
+
+    opportunities = []
+    for clique in _maximal_cliques(adjacency):
+        if len(clique) < 3:
+            continue
+        opportunity = _mutual_exclusion_basket_candidate(clique, by_market_id, min_net_edge)
         if opportunity is not None:
             opportunities.append(opportunity)
     return opportunities
@@ -232,6 +255,40 @@ def _mutually_exclusive_candidate(
     )
 
 
+def _mutual_exclusion_basket_candidate(
+    market_ids: List[str],
+    by_market_id: dict,
+    min_net_edge: float,
+) -> Opportunity:
+    snapshots = [by_market_id[market_id] for market_id in market_ids if market_id in by_market_id]
+    if len(snapshots) != len(market_ids):
+        return None
+
+    quantity = min(sum(level.size for level in snapshot.no.asks) for snapshot in snapshots)
+    if quantity <= 0:
+        return None
+
+    fills = [take_levels(snapshot.no.asks, quantity) for snapshot in snapshots]
+    cost_per_share = sum(
+        _buy_cost_per_share(fill.average_price, snapshot.fee_rate) for snapshot, fill in zip(snapshots, fills)
+    )
+    net_edge = (len(snapshots) - 1) - cost_per_share
+    if net_edge <= min_net_edge:
+        return None
+
+    return Opportunity(
+        kind="mutual_exclusion_basket",
+        quantity=quantity,
+        cost_per_share=cost_per_share,
+        net_edge_per_share=net_edge,
+        ts=snapshots[0].ts,
+        legs=[
+            Leg(snapshot.venue, snapshot.market_id, "NO", "buy", fill.average_price, quantity)
+            for snapshot, fill in zip(snapshots, fills)
+        ],
+    )
+
+
 def _two_leg_candidate(
     kind: str,
     first: BinaryMarketSnapshot,
@@ -267,6 +324,31 @@ def _two_leg_candidate(
             Leg(second.venue, second.market_id, second_token, "buy", second_fill.average_price, quantity),
         ],
     )
+
+
+def _maximal_cliques(adjacency) -> List[List[str]]:
+    def bronk(r, p, x, cliques):
+        if not p and not x:
+            cliques.append(sorted(r))
+            return
+
+        union = p | x
+        pivot = max(union, key=lambda node: len(adjacency.get(node, set())), default=None)
+        pivot_neighbors = adjacency.get(pivot, set()) if pivot is not None else set()
+        candidates = set(p) - pivot_neighbors
+        for vertex in list(candidates):
+            bronk(
+                r | {vertex},
+                p & adjacency.get(vertex, set()),
+                x & adjacency.get(vertex, set()),
+                cliques,
+            )
+            p.remove(vertex)
+            x.add(vertex)
+
+    cliques: List[List[str]] = []
+    bronk(set(), set(adjacency), set(), cliques)
+    return cliques
 
 
 def _cross_candidate(

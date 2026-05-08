@@ -20,6 +20,7 @@ from poly_strategy.scanner import (
     find_complement_arbs,
     find_equivalent_arbs,
     find_implication_arbs,
+    find_mutual_exclusion_basket_arbs,
     find_mutually_exclusive_arbs,
     find_yes_no_bundle_arbs,
 )
@@ -55,6 +56,7 @@ class ReplayResult:
     opportunities: List[Opportunity]
     paper_trades: List[PaperTrade]
     runs: List[OpportunityRun]
+    last_snapshot_ts: Optional[str] = None
 
     @property
     def opportunity_count(self) -> int:
@@ -99,6 +101,9 @@ def replay_ndjson(
         batch_opportunities.extend(
             find_mutually_exclusive_arbs(batch, mutual_exclusion_rules, min_net_edge=min_net_edge)
         )
+        batch_opportunities.extend(
+            find_mutual_exclusion_basket_arbs(batch, mutual_exclusion_rules, min_net_edge=min_net_edge)
+        )
         batch_opportunities.extend(find_equivalent_arbs(batch, equivalence_rules, min_net_edge=min_net_edge))
         batch_opportunities.extend(
             find_collectively_exhaustive_arbs(batch, collectively_exhaustive_rules, min_net_edge=min_net_edge)
@@ -111,6 +116,7 @@ def replay_ndjson(
         opportunities=opportunities,
         paper_trades=_paper_trades(opportunities, max_capital_per_trade),
         runs=_opportunity_runs(opportunities_by_snapshot),
+        last_snapshot_ts=snapshots[-1].ts if snapshots else None,
     )
 
 
@@ -290,8 +296,8 @@ def _run_from_active(key: str, value: Tuple[str, Optional[str], Optional[str], i
 
 
 def _opportunity_key(opportunity: Opportunity) -> str:
-    market_id = _opportunity_market_id(opportunity)
-    return f"{opportunity.kind}:{market_id}"
+    legs = "|".join(sorted(f"{leg.venue}:{leg.market_id}:{leg.token}:{leg.side}" for leg in opportunity.legs))
+    return f"{opportunity.kind}:{legs}"
 
 
 def _opportunity_market_id(opportunity: Opportunity) -> str:

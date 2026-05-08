@@ -1,6 +1,8 @@
 import json
 import os
+import time
 from typing import Callable, Iterable, List, Optional
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from poly_strategy.rule_discovery import MarketText, RelationCandidate, market_texts_to_prompt_rows
@@ -24,6 +26,10 @@ class OpenAIRuleDiscoveryClient:
         api_key: Optional[str] = None,
         timeout: float = 60.0,
         base_url: Optional[str] = None,
+        retries: int = 2,
+        max_output_tokens: Optional[int] = 4000,
+        reasoning_effort: Optional[str] = "medium",
+        verbosity: Optional[str] = None,
         transport: Optional[Callable[[dict, float], dict]] = None,
     ):
         self.model = model
@@ -32,11 +38,15 @@ class OpenAIRuleDiscoveryClient:
             raise OpenAIConfigError("OPENAI_API_KEY is required")
         self.timeout = timeout
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL
+        self.retries = max(0, retries)
+        self.max_output_tokens = max_output_tokens
+        self.reasoning_effort = reasoning_effort
+        self.verbosity = verbosity
         self._transport = transport or self._post_responses
 
     def build_payload(self, markets: Iterable[MarketText]) -> dict:
         market_rows = market_texts_to_prompt_rows(list(markets))
-        return {
+        payload = {
             "model": self.model,
             "input": [
                 {
@@ -67,10 +77,17 @@ class OpenAIRuleDiscoveryClient:
                 }
             },
         }
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        if self.verbosity:
+            payload.setdefault("text", {})["verbosity"] = self.verbosity
+        return payload
 
     def discover_relations(self, markets: Iterable[MarketText]) -> List[RelationCandidate]:
         payload = self.build_payload(list(markets))
-        response = self._transport(payload, self.timeout)
+        response = self._call_with_retries(payload)
         content = _extract_output_text(response)
         try:
             parsed = json.loads(content)
@@ -96,6 +113,18 @@ class OpenAIRuleDiscoveryClient:
         with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def _call_with_retries(self, payload: dict) -> dict:
+        last_error = None
+        for attempt in range(self.retries + 1):
+            try:
+                return self._transport(payload, self.timeout)
+            except (HTTPError, URLError, TimeoutError, ConnectionError, OSError) as exc:
+                last_error = exc
+                if attempt >= self.retries or not _is_retryable(exc):
+                    raise
+                time.sleep(min(2 ** attempt, 5))
+        raise OpenAIResponseError(str(last_error))
+
 
 _SYSTEM_PROMPT = """You identify conservative logical relations between binary prediction markets.
 
@@ -105,6 +134,17 @@ Definitions:
 - mutually_exclusive means A YES and B YES cannot both happen.
 - collectively_exhaustive means A YES or B YES must happen; they cannot both resolve NO.
 - complement means exactly one of A YES and B YES must happen.
+
+Workflow:
+- Compare every plausible high-confidence pair in the provided batch.
+- Use neg_risk_market_id, group_item_title, group_item_threshold, question, description, end_date, and outcomes.
+- Shared non-empty neg_risk_market_id with different group items is strong evidence for mutually_exclusive.
+- Winner markets for different teams in the same competition are mutually_exclusive, but not collectively_exhaustive unless every possible winner is present.
+- Range/bracket markets for the same event are mutually_exclusive when their written intervals do not overlap.
+- Use collectively_exhaustive or complement only when the written criteria guarantee at least one or exactly one YES.
+- Use implication only when one YES resolution necessarily forces the other YES resolution; set direction precisely.
+
+Safety:
 - Prefer false negatives over false positives.
 - Do not estimate real-world probabilities.
 - Do not use market prices, liquidity, popularity, or outside assumptions.
@@ -126,14 +166,14 @@ _RESPONSE_SCHEMA = {
                 "properties": {
                     "relation_type": {
                         "type": "string",
-                                "enum": [
-                                    "implies",
-                                    "equivalent",
-                                    "mutually_exclusive",
-                                    "collectively_exhaustive",
-                                    "complement",
-                                    "unknown",
-                                ],
+                        "enum": [
+                            "implies",
+                            "equivalent",
+                            "mutually_exclusive",
+                            "collectively_exhaustive",
+                            "complement",
+                            "unknown",
+                        ],
                     },
                     "market_a_id": {"type": "string"},
                     "market_b_id": {"type": "string"},
@@ -233,3 +273,11 @@ def _candidate_from_row(row: dict) -> RelationCandidate:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise OpenAIResponseError("OpenAI relation candidate is invalid") from exc
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+    if isinstance(exc, (URLError, TimeoutError, ConnectionError, OSError)):
+        return True
+    return False

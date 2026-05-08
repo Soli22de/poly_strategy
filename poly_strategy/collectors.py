@@ -88,7 +88,68 @@ def collect_polymarket_binary_snapshots(
         book_params = urlencode({"token_id": token_id})
         return _fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{book_params}", timeout, proxy=proxy)
 
-    rows = binary_snapshot_rows_from_gamma_markets(markets, fetch_book)
+    rows = binary_snapshot_rows_from_gamma_markets(markets, fetch_book, ts=_utc_now())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    return len(rows)
+
+
+def collect_polymarket_binary_snapshots_for_rules(
+    path: Path,
+    gamma_path: Path,
+    rules_path: Path,
+    timeout: float,
+    proxy: Optional[str] = None,
+) -> int:
+    markets = raw_gamma_markets_from_ndjson(gamma_path)
+    market_ids = market_ids_from_rule_file(rules_path)
+
+    def fetch_book(token_id: str) -> dict:
+        book_params = urlencode({"token_id": token_id})
+        return _fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{book_params}", timeout, proxy=proxy)
+
+    return collect_polymarket_binary_snapshots_for_markets(path, markets, market_ids, fetch_book, ts=_utc_now())
+
+
+def collect_polymarket_binary_snapshots_for_rules_loop(
+    path: Path,
+    gamma_path: Path,
+    rules_path: Path,
+    timeout: float,
+    proxy: Optional[str],
+    interval_seconds: float,
+    iterations: int,
+    collect_once: Callable[[Path, Path, Path, float, Optional[str]], int] = collect_polymarket_binary_snapshots_for_rules,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    if iterations < 1:
+        raise ValueError("iterations must be at least 1")
+    if interval_seconds < 0:
+        raise ValueError("interval_seconds must be non-negative")
+
+    total = 0
+    for index in range(iterations):
+        total += collect_once(path, gamma_path, rules_path, timeout, proxy)
+        if index < iterations - 1 and interval_seconds > 0:
+            sleep(interval_seconds)
+    return total
+
+
+def collect_polymarket_binary_snapshots_for_markets(
+    path: Path,
+    markets: Iterable[dict],
+    market_ids: Iterable[str],
+    book_fetcher: Callable[[str], dict],
+    ts: Optional[str] = None,
+) -> int:
+    wanted = {str(market_id) for market_id in market_ids}
+    rows = binary_snapshot_rows_from_gamma_markets(
+        (market for market in markets if str(market.get("id") or market.get("conditionId")) in wanted),
+        book_fetcher,
+        ts=ts or _utc_now(),
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         for row in rows:
@@ -122,8 +183,10 @@ def collect_polymarket_binary_snapshots_loop(
 def binary_snapshot_rows_from_gamma_markets(
     markets: Iterable[dict],
     book_fetcher: Callable[[str], dict],
+    ts: Optional[str] = None,
 ) -> List[dict]:
     rows = []
+    snapshot_ts = ts or _utc_now()
     for market in markets:
         if not _is_binary_market(market):
             continue
@@ -137,7 +200,7 @@ def binary_snapshot_rows_from_gamma_markets(
         no_book["token_id"] = str(token_ids[1])
         rows.append(
             {
-                "ts": _utc_now(),
+                "ts": snapshot_ts,
                 "type": "binary_snapshot",
                 "venue": "polymarket",
                 "market_id": str(market.get("id") or market.get("conditionId")),
@@ -148,6 +211,71 @@ def binary_snapshot_rows_from_gamma_markets(
             }
         )
     return rows
+
+
+def raw_gamma_markets_from_ndjson(path: Path) -> List[dict]:
+    markets_by_id = {}
+    market_order = []
+    with path.open() as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("type") != "raw_polymarket_gamma_market":
+                continue
+            raw = row.get("raw")
+            if isinstance(raw, dict):
+                market_id = str(row.get("market_id") or raw.get("id") or raw.get("conditionId") or "")
+                if not market_id:
+                    continue
+                if market_id not in markets_by_id:
+                    market_order.append(market_id)
+                markets_by_id[market_id] = raw
+    return [markets_by_id[market_id] for market_id in market_order]
+
+
+def market_ids_from_rule_file(path: Path) -> set:
+    row = json.loads(path.read_text())
+    market_ids = set()
+    for rule in row.get("implications", []):
+        _add_if_present(market_ids, rule, "antecedent")
+        _add_if_present(market_ids, rule, "consequent")
+    for section in ["mutually_exclusive", "equivalent", "collectively_exhaustive", "complement"]:
+        for rule in row.get(section, []):
+            _add_if_present(market_ids, rule, "first")
+            _add_if_present(market_ids, rule, "second")
+    if market_ids:
+        return market_ids
+
+    # Backward-compatible fallback for older candidate-only rule files.
+    for candidate in row.get("candidates", []):
+        if not _candidate_is_tradeable_pair(candidate):
+            continue
+        _add_if_present(market_ids, candidate, "market_a_id")
+        _add_if_present(market_ids, candidate, "market_b_id")
+    return market_ids
+
+
+def _add_if_present(target: set, row: dict, key: str) -> None:
+    value = row.get(key)
+    if value:
+        target.add(str(value))
+
+
+def _candidate_is_tradeable_pair(candidate: dict) -> bool:
+    if candidate.get("relation_type") not in {
+        "mutually_exclusive",
+        "equivalent",
+        "collectively_exhaustive",
+        "complement",
+    }:
+        return False
+    if candidate.get("trade_allowed") is False:
+        return False
+    if candidate.get("risk_flags"):
+        return False
+    return True
 
 
 def _fetch_json(url: str, timeout: float, proxy: Optional[str] = None):
@@ -188,7 +316,13 @@ def _loads_json_list(value) -> List[str]:
         return value
     if not value:
         return []
-    return json.loads(value)
+    try:
+        loaded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return loaded
 
 
 def _market_fee_rate(market: dict) -> float:

@@ -24,6 +24,8 @@ class OpenAIRulesTests(unittest.TestCase):
         payload_text = json.dumps(payload)
 
         self.assertEqual(payload["model"], "test-model")
+        self.assertEqual(payload["max_output_tokens"], 4000)
+        self.assertEqual(payload["reasoning"]["effort"], "medium")
         self.assertEqual(payload["text"]["format"]["type"], "json_schema")
         self.assertTrue(payload["text"]["format"]["strict"])
         self.assertIn("Will A happen?", payload_text)

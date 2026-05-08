@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from poly_strategy.collectors import binary_snapshot_rows_from_gamma_markets, collect_polymarket_binary_snapshots_loop
+from poly_strategy.collectors import (
+    binary_snapshot_rows_from_gamma_markets,
+    collect_polymarket_binary_snapshots_for_markets,
+    collect_polymarket_binary_snapshots_loop,
+    market_ids_from_rule_file,
+    raw_gamma_markets_from_ndjson,
+)
 
 
 class CollectorTests(unittest.TestCase):
@@ -30,11 +36,12 @@ class CollectorTests(unittest.TestCase):
             },
         }
 
-        rows = binary_snapshot_rows_from_gamma_markets([market], lambda token_id: books[token_id])
+        rows = binary_snapshot_rows_from_gamma_markets([market], lambda token_id: books[token_id], ts="2026-05-08T00:00:00Z")
 
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["type"], "binary_snapshot")
+        self.assertEqual(row["ts"], "2026-05-08T00:00:00Z")
         self.assertEqual(row["market_id"], "123")
         self.assertEqual(row["fee_rate"], 0.05)
         self.assertEqual(row["yes"]["token_id"], "yes-token")
@@ -70,6 +77,137 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(lines), 3)
         self.assertEqual(calls[0][1:], (2, 3.0, "http://127.0.0.1:10808"))
+
+    def test_market_ids_from_rule_file_reads_all_rule_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rules.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "implications": [{"antecedent": "a", "consequent": "b"}],
+                        "mutually_exclusive": [{"first": "c", "second": "d"}],
+                        "equivalent": [{"first": "e", "second": "f"}],
+                        "collectively_exhaustive": [{"first": "g", "second": "h"}],
+                        "complement": [{"first": "i", "second": "j"}],
+                        "candidates": [{"market_a_id": "k", "market_b_id": "l"}],
+                    }
+                )
+            )
+
+            market_ids = market_ids_from_rule_file(path)
+
+        self.assertEqual(market_ids, {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"})
+
+    def test_market_ids_from_rule_file_falls_back_to_clean_pair_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rules.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "relation_type": "mutually_exclusive",
+                                "market_a_id": "a",
+                                "market_b_id": "b",
+                                "trade_allowed": True,
+                                "risk_flags": [],
+                            },
+                            {
+                                "relation_type": "implies",
+                                "market_a_id": "c",
+                                "market_b_id": "d",
+                                "trade_allowed": True,
+                                "risk_flags": [],
+                            },
+                            {
+                                "relation_type": "equivalent",
+                                "market_a_id": "risky",
+                                "market_b_id": "b",
+                                "trade_allowed": True,
+                                "risk_flags": ["ambiguous_wording"],
+                            },
+                        ]
+                    }
+                )
+            )
+
+            market_ids = market_ids_from_rule_file(path)
+
+        self.assertEqual(market_ids, {"a", "b"})
+
+    def test_collect_polymarket_binary_snapshots_for_markets_fetches_only_rule_markets(self):
+        markets = [
+            {
+                "id": "a",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["a-yes", "a-no"]),
+                "question": "A?",
+            },
+            {
+                "id": "b",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["b-yes", "b-no"]),
+                "question": "B?",
+            },
+            {
+                "id": "unused",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["unused-yes", "unused-no"]),
+                "question": "Unused?",
+            },
+        ]
+        books = {
+            "a-yes": {"asks": [{"price": "0.40", "size": "10"}], "bids": []},
+            "a-no": {"asks": [{"price": "0.61", "size": "10"}], "bids": []},
+            "b-yes": {"asks": [{"price": "0.30", "size": "10"}], "bids": []},
+            "b-no": {"asks": [{"price": "0.72", "size": "10"}], "bids": []},
+        }
+        fetched = []
+
+        def book_fetcher(token_id):
+            fetched.append(token_id)
+            return books[token_id]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "targeted.ndjson"
+            count = collect_polymarket_binary_snapshots_for_markets(
+                path,
+                markets,
+                {"a", "b"},
+                book_fetcher,
+                ts="2026-05-08T00:00:00Z",
+            )
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual(fetched, ["a-yes", "a-no", "b-yes", "b-no"])
+        self.assertEqual({row["market_id"] for row in rows}, {"a", "b"})
+        self.assertEqual({row["ts"] for row in rows}, {"2026-05-08T00:00:00Z"})
+
+    def test_raw_gamma_markets_from_ndjson_dedupes_repeated_collections(self):
+        rows = [
+            {"type": "raw_polymarket_gamma_market", "market_id": "a", "raw": {"id": "a", "question": "old"}},
+            {"type": "raw_polymarket_gamma_market", "market_id": "b", "raw": {"id": "b", "question": "b"}},
+            {"type": "raw_polymarket_gamma_market", "market_id": "a", "raw": {"id": "a", "question": "new"}},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            markets = raw_gamma_markets_from_ndjson(path)
+
+        self.assertEqual([market["id"] for market in markets], ["a", "b"])
+        self.assertEqual(markets[0]["question"], "new")
 
 
 if __name__ == "__main__":

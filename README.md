@@ -46,9 +46,11 @@ export OPENAI_BASE_URL=https://api.wwcloud.app
 python3 -m poly_strategy.cli discover-rules \
   --raw data/polymarket-gamma.ndjson \
   --out rules/candidate-implications.json \
-  --batch-size 20 \
+  --batch-size 10 \
   --min-confidence 0.95 \
-  --max-markets 100
+  --max-markets 100 \
+  --max-output-tokens 4000 \
+  --reasoning-effort medium
 ```
 
 You can also pass the model and base URL explicitly:
@@ -70,6 +72,44 @@ Supported deterministic relation formats:
 - `mutually_exclusive`: if `A YES` and `B YES` cannot both happen, scan `buy A NO + buy B NO`.
 - `collectively_exhaustive`: if at least one of `A YES` or `B YES` must happen, scan `buy A YES + buy B YES`.
 - `complement`: if exactly one of `A YES` or `B YES` must happen, scan both `YES + YES` and `NO + NO` bundles.
+
+For incremental discovery, reuse a previous rule file as cache:
+
+```bash
+python3 -m poly_strategy.cli discover-rules \
+  --raw data/polymarket-gamma.ndjson \
+  --out rules/candidate-implications.json \
+  --cache rules/candidate-implications.json \
+  --model gpt-5.5 \
+  --base-url https://api.wwcloud.app
+```
+
+New rule files include `processed_market_ids`, so a later incremental run skips markets that were already reviewed even if the LLM found no relation for them. If the cache fully covers the raw input, `discover-rules --cache ...` can refresh the normalized rule file without an API call or model.
+
+Collect only markets referenced by a rule file:
+
+```bash
+python3 -m poly_strategy.cli collect-rule-markets \
+  --gamma data/polymarket-gamma.ndjson \
+  --rules rules/candidate-implications.json \
+  --out data/rule-markets.ndjson \
+  --proxy 127.0.0.1:10808
+```
+
+Watch those markets repeatedly and replay opportunities:
+
+```bash
+python3 -m poly_strategy.cli monitor-rules \
+  --gamma data/polymarket-gamma.ndjson \
+  --rules rules/candidate-implications.json \
+  --out data/rule-monitor.ndjson \
+  --interval 5 \
+  --iterations 12 \
+  --min-net-edge 0.002 \
+  --max-capital-per-trade 20
+```
+
+`monitor-rules` appends each targeted snapshot batch, replays the cumulative file, and prints current-iteration opportunities plus active run duration/edge when any opportunity survives the `--min-net-edge` filter.
 
 Collect backtestable binary snapshots by combining Gamma market discovery with YES/NO CLOB books:
 

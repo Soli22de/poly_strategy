@@ -140,6 +140,46 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(opportunity.legs[0].token, "NO")
         self.assertEqual(opportunity.legs[1].token, "NO")
 
+    def test_mutual_exclusion_basket_arb_buys_all_no_tokens(self):
+        first = BinaryMarketSnapshot(
+            market_id="a",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.60, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.30, 50)], bids=[]),
+            fee_rate=0.0,
+        )
+        second = BinaryMarketSnapshot(
+            market_id="b",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.61, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.31, 50)], bids=[]),
+            fee_rate=0.0,
+        )
+        third = BinaryMarketSnapshot(
+            market_id="c",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.62, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.32, 50)], bids=[]),
+            fee_rate=0.0,
+        )
+        rules = [
+            MutualExclusionRule("a", "b"),
+            MutualExclusionRule("a", "c"),
+            MutualExclusionRule("b", "c"),
+        ]
+
+        from poly_strategy.scanner import find_mutual_exclusion_basket_arbs
+
+        opportunities = find_mutual_exclusion_basket_arbs([first, second, third], rules, min_net_edge=0.0)
+
+        self.assertEqual(len(opportunities), 1)
+        opportunity = opportunities[0]
+        self.assertEqual(opportunity.kind, "mutual_exclusion_basket")
+        self.assertEqual(opportunity.quantity, 50)
+        self.assertAlmostEqual(opportunity.cost_per_share, 0.93)
+        self.assertAlmostEqual(opportunity.net_edge_per_share, 1.07)
+        self.assertEqual([leg.token for leg in opportunity.legs], ["NO", "NO", "NO"])
+
     def test_equivalent_arb_buys_yes_on_one_market_and_no_on_the_other(self):
         first = BinaryMarketSnapshot(
             market_id="candidate-wins-election",
