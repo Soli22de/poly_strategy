@@ -117,6 +117,50 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual([row["market_id"] for row in rows], ["a", "b"])
         self.assertEqual(set(fetched), {"a-yes", "a-no", "b-yes", "b-no"})
 
+    def test_binary_snapshot_rows_can_skip_failed_book_fetches(self):
+        markets = [
+            {
+                "id": "good",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["good-yes", "good-no"]),
+            },
+            {
+                "id": "bad",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["bad-yes", "bad-no"]),
+            },
+        ]
+        books = {
+            "good-yes": {"asks": [{"price": "0.40", "size": "10"}], "bids": []},
+            "good-no": {"asks": [{"price": "0.61", "size": "10"}], "bids": []},
+            "bad-yes": {"asks": [{"price": "0.30", "size": "10"}], "bids": []},
+        }
+        errors = []
+
+        def book_fetcher(token_id):
+            if token_id == "bad-no":
+                raise RuntimeError("temporary book failure")
+            return books[token_id]
+
+        rows = binary_snapshot_rows_from_gamma_markets(
+            markets,
+            book_fetcher,
+            ts="2026-05-09T00:00:00Z",
+            skip_book_errors=True,
+            errors=errors,
+        )
+
+        self.assertEqual([row["market_id"] for row in rows], ["good"])
+        self.assertEqual([error["kind"] for error in errors], ["book_fetch_error", "market_skipped"])
+        self.assertEqual(errors[0]["token_id"], "bad-no")
+        self.assertEqual(errors[1]["market_id"], "bad")
+
     def test_market_ids_from_rule_file_reads_all_rule_sections(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rules.json"

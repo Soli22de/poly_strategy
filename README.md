@@ -113,6 +113,29 @@ python3 -m poly_strategy.cli monitor-rules \
 
 `monitor-rules` appends each targeted snapshot batch, replays the cumulative file, and prints current-iteration opportunities plus active run duration/edge when any opportunity survives the `--min-net-edge` filter.
 
+For a longer paper-trading run, use `paper-monitor`. It keeps the same targeted collection loop, but writes structured JSONL for every iteration plus a final summary. Use `--skip-book-errors` so one failed CLOB book does not discard the whole batch, and `--continue-on-error` for unattended runs:
+
+```bash
+python3 -m poly_strategy.cli paper-monitor \
+  --gamma data/polymarket-gamma.ndjson \
+  --rules rules/candidate-implications.json \
+  --snapshots-out data/paper-monitor-snapshots.ndjson \
+  --report-out data/paper-monitor-report.jsonl \
+  --proxy 127.0.0.1:10808 \
+  --interval 5 \
+  --iterations 17280 \
+  --book-workers 8 \
+  --min-net-edge 0.002 \
+  --max-capital-per-trade 20 \
+  --bankroll 100 \
+  --min-run-observations 2 \
+  --min-run-seconds 3 \
+  --skip-book-errors \
+  --continue-on-error
+```
+
+At a 5 second interval, `--iterations 17280` is roughly one day. The report rows include current opportunities, stable opportunities after the run-duration filter, simulated stable paper trades, collection error counts, and the cumulative replay totals.
+
 Write a conflict-aware paper trading report. This sorts opportunities by edge per capital, reserves overlapping leg liquidity so the same visible ask depth is not counted twice, and applies both per-trade and per-iteration bankroll caps:
 
 ```bash

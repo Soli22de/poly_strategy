@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -199,6 +199,99 @@ class CliTests(unittest.TestCase):
         self.assertEqual(replay.call_args.kwargs["min_net_edge"], 0.002)
         self.assertEqual(replay.call_args.kwargs["max_capital_per_trade"], 20.0)
         self.assertIn("opportunities=1", stdout.getvalue())
+
+    def test_paper_monitor_writes_iteration_and_summary_report(self):
+        result = SimpleNamespace(
+            snapshot_count=1,
+            opportunity_count=0,
+            paper_trade_count=0,
+            paper_rejections=[],
+            paper_capital_used=0.0,
+            paper_edge=0.0,
+            last_snapshot_ts=None,
+            opportunities=[],
+            paper_trades=[],
+            runs=[],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            report = Path(tmp) / "paper-monitor.jsonl"
+            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules", return_value=1) as collect:
+                with patch("poly_strategy.cli.replay_ndjson", return_value=result) as replay:
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        code = main(
+                            [
+                                "paper-monitor",
+                                "--gamma",
+                                "data/gamma.ndjson",
+                                "--rules",
+                                "rules/generated.json",
+                                "--snapshots-out",
+                                str(snapshots),
+                                "--report-out",
+                                str(report),
+                                "--iterations",
+                                "1",
+                                "--interval",
+                                "0",
+                                "--book-workers",
+                                "4",
+                                "--skip-book-errors",
+                            ]
+                        )
+            rows = [json.loads(line) for line in report.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        self.assertEqual(collect.call_args.args[5], 4)
+        self.assertTrue(collect.call_args.kwargs["skip_book_errors"])
+        replay.assert_called_once()
+        self.assertEqual(rows[0]["type"], "paper_monitor_iteration")
+        self.assertEqual(rows[0]["snapshots_collected"], 1)
+        self.assertEqual(rows[1]["type"], "paper_monitor_summary")
+        self.assertIn("completed_iterations=1", stdout.getvalue())
+
+    def test_paper_monitor_can_continue_after_iteration_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            report = Path(tmp) / "paper-monitor.jsonl"
+            with patch(
+                "poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules",
+                side_effect=RuntimeError("temporary failure"),
+            ):
+                with patch("poly_strategy.cli.replay_ndjson") as replay:
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        code = main(
+                            [
+                                "paper-monitor",
+                                "--gamma",
+                                "data/gamma.ndjson",
+                                "--rules",
+                                "rules/generated.json",
+                                "--snapshots-out",
+                                str(snapshots),
+                                "--report-out",
+                                str(report),
+                                "--iterations",
+                                "1",
+                                "--interval",
+                                "0",
+                                "--continue-on-error",
+                            ]
+                        )
+            rows = [json.loads(line) for line in report.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        replay.assert_not_called()
+        self.assertEqual(rows[0]["type"], "paper_monitor_iteration_error")
+        self.assertEqual(rows[0]["phase"], "collect")
+        self.assertEqual(rows[0]["error_type"], "RuntimeError")
+        self.assertEqual(rows[0]["snapshots_collected"], 0)
+        self.assertEqual(rows[1]["type"], "paper_monitor_summary")
+        self.assertEqual(rows[1]["error_iterations"], 1)
 
     def test_paper_report_command_writes_json_report(self):
         with tempfile.TemporaryDirectory() as tmp:

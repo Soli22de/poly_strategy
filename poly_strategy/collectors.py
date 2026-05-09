@@ -1,6 +1,6 @@
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
@@ -80,6 +80,8 @@ def collect_polymarket_binary_snapshots(
     timeout: float,
     proxy: Optional[str] = None,
     max_workers: int = 1,
+    skip_book_errors: bool = False,
+    errors: Optional[list] = None,
 ) -> int:
     params = urlencode({"active": "true", "closed": "false", "limit": str(limit)})
     markets = _fetch_json(f"{GAMMA_MARKETS_URL}?{params}", timeout, proxy=proxy)
@@ -90,7 +92,14 @@ def collect_polymarket_binary_snapshots(
         book_params = urlencode({"token_id": token_id})
         return _fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{book_params}", timeout, proxy=proxy)
 
-    rows = binary_snapshot_rows_from_gamma_markets(markets, fetch_book, ts=_utc_now(), max_workers=max_workers)
+    rows = binary_snapshot_rows_from_gamma_markets(
+        markets,
+        fetch_book,
+        ts=_utc_now(),
+        max_workers=max_workers,
+        skip_book_errors=skip_book_errors,
+        errors=errors,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         for row in rows:
@@ -105,6 +114,8 @@ def collect_polymarket_binary_snapshots_for_rules(
     timeout: float,
     proxy: Optional[str] = None,
     max_workers: int = 1,
+    skip_book_errors: bool = False,
+    errors: Optional[list] = None,
 ) -> int:
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     market_ids = market_ids_from_rule_file(rules_path)
@@ -120,6 +131,8 @@ def collect_polymarket_binary_snapshots_for_rules(
         fetch_book,
         ts=_utc_now(),
         max_workers=max_workers,
+        skip_book_errors=skip_book_errors,
+        errors=errors,
     )
 
 
@@ -155,6 +168,8 @@ def collect_polymarket_binary_snapshots_for_markets(
     book_fetcher: Callable[[str], dict],
     ts: Optional[str] = None,
     max_workers: int = 1,
+    skip_book_errors: bool = False,
+    errors: Optional[list] = None,
 ) -> int:
     wanted = {str(market_id) for market_id in market_ids}
     rows = binary_snapshot_rows_from_gamma_markets(
@@ -162,6 +177,8 @@ def collect_polymarket_binary_snapshots_for_markets(
         book_fetcher,
         ts=ts or _utc_now(),
         max_workers=max_workers,
+        skip_book_errors=skip_book_errors,
+        errors=errors,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
@@ -199,6 +216,8 @@ def binary_snapshot_rows_from_gamma_markets(
     book_fetcher: Callable[[str], dict],
     ts: Optional[str] = None,
     max_workers: int = 1,
+    skip_book_errors: bool = False,
+    errors: Optional[list] = None,
 ) -> List[dict]:
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
@@ -218,10 +237,38 @@ def binary_snapshot_rows_from_gamma_markets(
         [token_id for _, yes_token_id, no_token_id in selected_markets for token_id in [yes_token_id, no_token_id]],
         book_fetcher,
         max_workers,
+        skip_errors=skip_book_errors,
+        errors=errors,
     )
     for market, yes_token_id, no_token_id in selected_markets:
-        yes_book = _normalized_book(books_by_token_id[yes_token_id])
-        no_book = _normalized_book(books_by_token_id[no_token_id])
+        market_id = str(market.get("id") or market.get("conditionId"))
+        if yes_token_id not in books_by_token_id or no_token_id not in books_by_token_id:
+            if skip_book_errors:
+                _append_collection_error(
+                    errors,
+                    "market_skipped",
+                    market_id=market_id,
+                    token_id=",".join([yes_token_id, no_token_id]),
+                    message="missing one or more CLOB books",
+                )
+                continue
+            missing_token_id = yes_token_id if yes_token_id not in books_by_token_id else no_token_id
+            raise KeyError(missing_token_id)
+        try:
+            yes_book = _normalized_book(books_by_token_id[yes_token_id])
+            no_book = _normalized_book(books_by_token_id[no_token_id])
+        except (KeyError, TypeError, ValueError) as exc:
+            if not skip_book_errors:
+                raise
+            _append_collection_error(
+                errors,
+                "book_normalize_error",
+                market_id=market_id,
+                token_id=",".join([yes_token_id, no_token_id]),
+                message=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            continue
         yes_book["token_id"] = yes_token_id
         no_book["token_id"] = no_token_id
         rows.append(
@@ -229,7 +276,7 @@ def binary_snapshot_rows_from_gamma_markets(
                 "ts": snapshot_ts,
                 "type": "binary_snapshot",
                 "venue": "polymarket",
-                "market_id": str(market.get("id") or market.get("conditionId")),
+                "market_id": market_id,
                 "question": market.get("question"),
                 "fee_rate": _market_fee_rate(market),
                 "yes": yes_book,
@@ -239,15 +286,74 @@ def binary_snapshot_rows_from_gamma_markets(
     return rows
 
 
-def _fetch_books_by_token_id(token_ids: Iterable[str], book_fetcher: Callable[[str], dict], max_workers: int) -> dict:
+def _fetch_books_by_token_id(
+    token_ids: Iterable[str],
+    book_fetcher: Callable[[str], dict],
+    max_workers: int,
+    skip_errors: bool = False,
+    errors: Optional[list] = None,
+) -> dict:
     ordered_token_ids = list(dict.fromkeys(str(token_id) for token_id in token_ids))
     if max_workers == 1 or len(ordered_token_ids) <= 1:
-        return {token_id: book_fetcher(token_id) for token_id in ordered_token_ids}
+        books = {}
+        for token_id in ordered_token_ids:
+            try:
+                books[token_id] = book_fetcher(token_id)
+            except Exception as exc:
+                if not skip_errors:
+                    raise
+                _append_collection_error(
+                    errors,
+                    "book_fetch_error",
+                    token_id=token_id,
+                    message=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+        return books
 
     worker_count = min(max_workers, len(ordered_token_ids))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        fetched = executor.map(book_fetcher, ordered_token_ids)
-        return dict(zip(ordered_token_ids, fetched))
+        futures = {executor.submit(book_fetcher, token_id): token_id for token_id in ordered_token_ids}
+        books = {}
+        for future in as_completed(futures):
+            token_id = futures[future]
+            try:
+                books[token_id] = future.result()
+            except Exception as exc:
+                if not skip_errors:
+                    raise
+                _append_collection_error(
+                    errors,
+                    "book_fetch_error",
+                    token_id=token_id,
+                    message=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+        return books
+
+
+def _append_collection_error(
+    errors: Optional[list],
+    kind: str,
+    *,
+    message: str,
+    token_id: Optional[str] = None,
+    market_id: Optional[str] = None,
+    error_type: Optional[str] = None,
+) -> None:
+    if errors is None:
+        return
+    row = {
+        "kind": kind,
+        "message": message,
+    }
+    if token_id is not None:
+        row["token_id"] = token_id
+    if market_id is not None:
+        row["market_id"] = market_id
+    if error_type is not None:
+        row["error_type"] = error_type
+    errors.append(row)
 
 
 def raw_gamma_markets_from_ndjson(path: Path) -> List[dict]:

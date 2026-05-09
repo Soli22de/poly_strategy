@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 
@@ -130,6 +131,8 @@ def main(argv=None) -> int:
                     time.sleep(args.interval)
             print(f"wrote={total} out={args.out}")
             return 0
+        if args.command == "paper-monitor":
+            return _run_paper_monitor(args)
         if args.command == "paper-report":
             result = replay_ndjson(
                 Path(args.path),
@@ -294,6 +297,39 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
     monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
 
+    paper_monitor = subparsers.add_parser(
+        "paper-monitor",
+        help="run a resilient targeted collection loop and append paper-trading JSONL reports",
+    )
+    paper_monitor.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    paper_monitor.add_argument("--rules", required=True, help="rule JSON path")
+    paper_monitor.add_argument("--snapshots-out", required=True, help="append refreshed snapshots here")
+    paper_monitor.add_argument("--report-out", required=True, help="append per-iteration paper reports here")
+    paper_monitor.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    paper_monitor.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+    paper_monitor.add_argument("--iterations", type=int, default=1, help="number of monitor iterations")
+    paper_monitor.add_argument("--interval", type=float, default=5.0, help="seconds between iterations")
+    paper_monitor.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    paper_monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
+    paper_monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
+    paper_monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
+    paper_monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
+    paper_monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
+    paper_monitor.add_argument("--skip-book-errors", action="store_true", help="skip markets whose CLOB books fail")
+    paper_monitor.add_argument("--continue-on-error", action="store_true", help="record iteration errors and keep looping")
+    paper_monitor.add_argument(
+        "--max-opportunities-per-iteration",
+        type=int,
+        default=10,
+        help="maximum current/stable opportunities to include in each report row",
+    )
+    paper_monitor.add_argument(
+        "--max-errors-per-iteration",
+        type=int,
+        default=20,
+        help="maximum collection error details to include in each report row",
+    )
+
     report = subparsers.add_parser("paper-report", help="write a JSON paper-trading replay report")
     report.add_argument("path", help="input NDJSON path")
     report.add_argument("--rules", help="JSON file with discovered rules")
@@ -362,6 +398,108 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--verbosity", help="optional Responses API text verbosity")
 
     return parser
+
+
+def _run_paper_monitor(args) -> int:
+    if args.iterations < 1:
+        raise ValueError("iterations must be at least 1")
+    if args.interval < 0:
+        raise ValueError("interval must be non-negative")
+    if args.max_opportunities_per_iteration < 0:
+        raise ValueError("max opportunities per iteration must be non-negative")
+    if args.max_errors_per_iteration < 0:
+        raise ValueError("max errors per iteration must be non-negative")
+
+    snapshots_path = Path(args.snapshots_out)
+    report_path = Path(args.report_out)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_snapshots_collected = 0
+    completed_iterations = 0
+    error_iterations = 0
+    last_result = None
+
+    for index in range(args.iterations):
+        iteration = index + 1
+        collection_errors = []
+        phase = "collect"
+        snapshots_collected = 0
+        try:
+            snapshots_collected = collect_polymarket_binary_snapshots_for_rules(
+                snapshots_path,
+                Path(args.gamma),
+                Path(args.rules),
+                args.timeout,
+                args.proxy,
+                args.book_workers,
+                skip_book_errors=args.skip_book_errors,
+                errors=collection_errors,
+            )
+            total_snapshots_collected += snapshots_collected
+            phase = "replay"
+            result = replay_ndjson(
+                snapshots_path,
+                min_net_edge=args.min_net_edge,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+                rules_path=Path(args.rules),
+            )
+            current_opportunities = _current_monitor_opportunities(result)
+            stable_opportunities = _stable_current_opportunities(
+                result,
+                args.min_run_observations,
+                args.min_run_seconds,
+            )
+            stable_selection = select_paper_trades(
+                stable_opportunities,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+            )
+            row = _paper_monitor_iteration_row(
+                iteration,
+                snapshots_collected,
+                result,
+                current_opportunities,
+                stable_opportunities,
+                stable_selection,
+                collection_errors,
+                args,
+            )
+            phase = "write_report"
+            _append_jsonl_row(report_path, row)
+            completed_iterations += 1
+            last_result = result
+            print(
+                f"iteration={iteration} snapshots_collected={snapshots_collected} "
+                f"current_opportunities={len(current_opportunities)} "
+                f"stable_opportunities={len(stable_opportunities)} "
+                f"stable_paper_edge={row['stable_paper_edge']:.6f} "
+                f"errors={len(collection_errors)}"
+            )
+        except (OSError, URLError, TimeoutError, RuntimeError, ValueError) as exc:
+            if not args.continue_on_error:
+                raise
+            error_iterations += 1
+            row = _paper_monitor_error_row(iteration, exc, collection_errors, args, phase, snapshots_collected)
+            _append_jsonl_row(report_path, row)
+            print(f"iteration={iteration} error={exc}", file=sys.stderr)
+
+        if index < args.iterations - 1 and args.interval > 0:
+            time.sleep(args.interval)
+
+    summary = _paper_monitor_summary_row(
+        args,
+        total_snapshots_collected,
+        completed_iterations,
+        error_iterations,
+        last_result,
+    )
+    _append_jsonl_row(report_path, summary)
+    print(
+        f"wrote_snapshots={total_snapshots_collected} completed_iterations={completed_iterations} "
+        f"error_iterations={error_iterations} report={args.report_out}"
+    )
+    return 0
 
 
 def _current_monitor_opportunities(result) -> list:
@@ -435,6 +573,111 @@ def _paper_report_row(result) -> dict:
             for run in result.runs
         ],
     }
+
+
+def _paper_monitor_iteration_row(
+    iteration: int,
+    snapshots_collected: int,
+    result,
+    current_opportunities: list,
+    stable_opportunities: list,
+    stable_selection,
+    errors: list,
+    args,
+) -> dict:
+    stable_paper_capital_used = sum(trade.capital_used for trade in stable_selection.trades)
+    stable_paper_edge = sum(trade.edge for trade in stable_selection.trades)
+    top_current = _top_opportunity_rows(current_opportunities, args.max_opportunities_per_iteration)
+    top_stable = _top_opportunity_rows(stable_opportunities, args.max_opportunities_per_iteration)
+    top_stable_trades = [
+        trade_to_row(trade)
+        for trade in sorted(stable_selection.trades, key=lambda trade: trade.roi, reverse=True)[
+            : args.max_opportunities_per_iteration
+        ]
+    ]
+    return {
+        "type": "paper_monitor_iteration",
+        "ts": _utc_now(),
+        "iteration": iteration,
+        "snapshots_collected": snapshots_collected,
+        "snapshot_count": result.snapshot_count,
+        "opportunity_count": result.opportunity_count,
+        "current_opportunity_count": len(current_opportunities),
+        "stable_opportunity_count": len(stable_opportunities),
+        "paper_trade_count": result.paper_trade_count,
+        "paper_rejection_count": len(result.paper_rejections),
+        "paper_capital_used": result.paper_capital_used,
+        "paper_edge": result.paper_edge,
+        "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
+        "stable_paper_trade_count": len(stable_selection.trades),
+        "stable_paper_rejection_count": len(stable_selection.rejections),
+        "stable_paper_capital_used": stable_paper_capital_used,
+        "stable_paper_edge": stable_paper_edge,
+        "stable_paper_roi": stable_paper_edge / stable_paper_capital_used if stable_paper_capital_used > 0 else 0.0,
+        "last_snapshot_ts": result.last_snapshot_ts,
+        "current_opportunities": top_current,
+        "stable_opportunities": top_stable,
+        "stable_paper_trades": top_stable_trades,
+        "error_count": len(errors),
+        "errors": errors[: args.max_errors_per_iteration],
+    }
+
+
+def _paper_monitor_error_row(
+    iteration: int,
+    exc: Exception,
+    errors: list,
+    args,
+    phase: str,
+    snapshots_collected: int,
+) -> dict:
+    return {
+        "type": "paper_monitor_iteration_error",
+        "ts": _utc_now(),
+        "iteration": iteration,
+        "phase": phase,
+        "snapshots_collected": snapshots_collected,
+        "error_type": exc.__class__.__name__,
+        "message": str(exc),
+        "error_count": len(errors),
+        "errors": errors[: args.max_errors_per_iteration],
+    }
+
+
+def _paper_monitor_summary_row(args, snapshots_collected: int, completed_iterations: int, error_iterations: int, result) -> dict:
+    row = {
+        "type": "paper_monitor_summary",
+        "ts": _utc_now(),
+        "iterations_requested": args.iterations,
+        "completed_iterations": completed_iterations,
+        "error_iterations": error_iterations,
+        "snapshots_collected": snapshots_collected,
+        "snapshots_path": args.snapshots_out,
+        "report_path": args.report_out,
+    }
+    if result is not None:
+        row.update(
+            {
+                "snapshot_count": result.snapshot_count,
+                "opportunity_count": result.opportunity_count,
+                "paper_trade_count": result.paper_trade_count,
+                "paper_capital_used": result.paper_capital_used,
+                "paper_edge": result.paper_edge,
+                "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
+                "last_snapshot_ts": result.last_snapshot_ts,
+                "by_kind": _paper_summary_by_kind(result),
+            }
+        )
+    return row
+
+
+def _top_opportunity_rows(opportunities: list, limit: int) -> list:
+    if limit == 0:
+        return []
+    return [
+        opportunity_to_row(opportunity)
+        for opportunity in sorted(opportunities, key=lambda opportunity: opportunity.net_edge_per_share, reverse=True)[:limit]
+    ]
 
 
 def _paper_summary_by_kind(result) -> list:
@@ -529,6 +772,16 @@ def _write_jsonl_or_stdout(rows: list, out: str) -> None:
     else:
         for row in rows:
             print(json.dumps(row, sort_keys=True))
+
+
+def _append_jsonl_row(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 if __name__ == "__main__":
