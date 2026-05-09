@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 class RefreshExternalSignalsScriptTests(unittest.TestCase):
-    def test_script_loads_env_local_and_sends_oddpool_header(self):
+    def test_script_defaults_oddpool_free_to_search_endpoint_and_quota(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -27,6 +27,8 @@ class RefreshExternalSignalsScriptTests(unittest.TestCase):
                 env_path.write_text(
                     "ODDPOOL_API_KEY=test-key\n"
                     "ODDPOOL_API_URL=https://api.oddpool.com/arbitrage/current?min_net_cents=0.5\n"
+                    "ODDPOOL_PLAN=free\n"
+                    "ODDPOOL_SEARCH_LIMIT=7\n"
                     "SOURCE=oddpool\n"
                     "PROXY=127.0.0.1:10808\n"
                 )
@@ -49,9 +51,12 @@ class RefreshExternalSignalsScriptTests(unittest.TestCase):
                     env_path.write_text(old_env)
 
         self.assertIn("--url", argv)
-        self.assertIn("https://api.oddpool.com/arbitrage/current?min_net_cents=0.5", argv)
+        self.assertIn("https://api.oddpool.com/search/recent/markets?limit=7", argv)
+        self.assertNotIn("https://api.oddpool.com/arbitrage/current?min_net_cents=0.5", argv)
         self.assertIn("--header", argv)
         self.assertIn("X-API-Key=test-key", argv)
+        self.assertIn("--oddpool-quota-state", argv)
+        self.assertIn("--oddpool-monthly-quota", argv)
         self.assertIn("--proxy", argv)
         self.assertIn("127.0.0.1:10808", argv)
 

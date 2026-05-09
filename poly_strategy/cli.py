@@ -454,6 +454,9 @@ def main(argv=None) -> int:
                 timeout=args.timeout,
                 proxy=args.proxy,
                 headers=headers,
+                oddpool_quota_state_path=Path(args.oddpool_quota_state) if args.oddpool_quota_state else None,
+                oddpool_monthly_quota=args.oddpool_monthly_quota,
+                oddpool_min_interval_seconds=args.oddpool_min_interval_seconds,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -954,7 +957,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_signals.add_argument("--out", required=True, help="append normalized external signals here")
     input_group = ingest_signals.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--input", help="input JSON or NDJSON path")
-    input_group.add_argument("--url", help="input JSON URL")
+    input_group.add_argument("--url", action="append", help="input JSON URL; can be repeated")
     ingest_signals.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds for URL input")
     ingest_signals.add_argument("--proxy", help="HTTP proxy for URL input, for example 127.0.0.1:10808")
     ingest_signals.add_argument(
@@ -962,6 +965,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="HTTP header for URL input, formatted as Name=Value; can be repeated",
+    )
+    ingest_signals.add_argument("--oddpool-quota-state", help="optional Oddpool Free quota ledger JSON path")
+    ingest_signals.add_argument("--oddpool-monthly-quota", type=int, default=1000, help="Oddpool Free monthly request quota")
+    ingest_signals.add_argument(
+        "--oddpool-min-interval-seconds",
+        type=float,
+        default=1.0,
+        help="minimum seconds between Oddpool requests",
     )
 
     signal_report = subparsers.add_parser("external-signal-report", help="summarize normalized external signals")

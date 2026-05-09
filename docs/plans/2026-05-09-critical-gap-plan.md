@@ -17,6 +17,15 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
 
 ## Critical Gap Checklist
 
+- [ ] Close the current six production gaps before treating the system as usable.
+  - [x] Oddpool must be plan-aware: Free plan uses Search endpoints, Premium arbitrage endpoints are disabled unless explicitly requested.
+  - [x] Oddpool Free payloads must normalize recent/search market and event rows, not only arbitrage rows.
+  - [x] Oddpool Free must keep a local quota ledger for 1 req/sec and 1000 requests/month.
+  - [ ] Cross-platform matches must be semantic-verified before they can become actionable dry-run signals.
+  - [ ] Kalshi/Polymarket cross-platform output must stop hardcoding executable YES/NO legs for unverified matches.
+  - [ ] Execution must write live-attempt/reconciliation state into the risk ledger after real submissions.
+  - [ ] Data rotation must run as a persistent LaunchAgent, not only as a manual script.
+  - [ ] Rule discovery must broaden beyond deterministic neg-risk pairs with topic clustering and safer non-neg-risk candidates.
 - [x] Expand opportunity coverage beyond the current small watchlist.
   - [x] Rank high-liquidity/high-relevance Polymarket markets.
   - [x] Include high-liquidity single-market YES/NO bundles.
@@ -52,6 +61,10 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Compress old raw/snapshot files.
   - [x] Retain reports and alert logs.
   - [x] Guard against disk exhaustion.
+- [ ] Background production data maintenance.
+  - [ ] Add a persistent macOS LaunchAgent for `scripts/rotate_data.sh`.
+  - [ ] Install/reload it with the existing LaunchAgent installer.
+  - [ ] Smoke-test rotation in dry-run mode and rotate current oversized snapshot data.
 - [x] Convert background jobs to persistent LaunchAgents.
   - [x] Realtime monitor plist.
   - [x] Alert loop plist.
@@ -63,10 +76,20 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Polymarket/Kalshi matching candidates.
   - [x] Cross-platform fee/funding/risk model.
   - [x] Dry-run-only cross-platform execution risk report.
+- [ ] Upgrade cross-platform/Kalshi from candidate framework to verified dry-run signals.
+  - [ ] Add deterministic semantic verification fields to match reports.
+  - [ ] Emit only watch/verified binary legs, not hardcoded Polymarket YES / Kalshi NO execution legs.
+  - [ ] Keep unverified matches as priority/research signals only.
 - [x] Integrate external tool signals into the realtime loop.
   - [x] Poll generic external signal URLs/files.
   - [x] Normalize Oddpool/PillarLabAI/Polyprophet-style payloads through the existing signal schema.
   - [x] Convert high-confidence signals into watchlist priority boosts.
+- [x] Make Oddpool integration Free-plan safe.
+  - [x] Default `ODDPOOL_PLAN=free`.
+  - [x] Use `/search/recent/markets` and optional `/search/markets` queries for Free.
+  - [x] Refuse or ignore `/arbitrage/current` while Free mode is active.
+  - [x] Add local quota/rate ledger.
+  - [x] Add tests for Free payload normalization and script endpoint selection.
 - [x] Add live-risk controls while keeping live trading disabled.
   - [x] Daily max loss.
   - [x] Per-trade max loss/notional.
@@ -75,6 +98,14 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Partial-fill/reconciliation placeholders.
   - [x] Balance/API-key safety checks.
   - [x] Failure cooldown/pause mechanism.
+- [ ] Upgrade live-risk controls from placeholders to stateful reconciliation.
+  - [ ] Classify dry-run/live responses.
+  - [ ] Detect unknown/partial/failure states requiring reconciliation.
+  - [ ] Update daily risk state after live submission attempts.
+- [ ] Broaden rule coverage beyond neg-risk.
+  - [ ] Add topic-clustered LLM batching.
+  - [ ] Add conservative deterministic equivalent detection for exact duplicate binary questions.
+  - [ ] Keep ambiguous deterministic candidates blocked unless verified.
 - [x] Final validation.
   - [x] Unit tests.
   - [x] Smoke tests with current data.

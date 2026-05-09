@@ -7,22 +7,40 @@ from typing import Iterable, Optional
 from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
+from poly_strategy.oddpool import reserve_oddpool_quota
+
 
 def ingest_external_signals(
     out_path: Path,
     source: str,
     input_path: Optional[Path] = None,
-    url: Optional[str] = None,
+    url=None,
     timeout: float = 10.0,
     proxy: Optional[str] = None,
     headers: Optional[dict] = None,
+    oddpool_quota_state_path: Optional[Path] = None,
+    oddpool_monthly_quota: int = 1000,
+    oddpool_min_interval_seconds: float = 1.0,
 ) -> int:
     if not source:
         raise ValueError("source is required")
-    if bool(input_path) == bool(url):
+    urls = _url_values(url)
+    if bool(input_path) == bool(urls):
         raise ValueError("provide exactly one of input_path or url")
 
-    payloads = _payloads_from_path(input_path) if input_path else _payloads_from_url(url, timeout, proxy, headers or {})
+    if input_path:
+        payloads = _payloads_from_path(input_path)
+    else:
+        payloads = []
+        for item_url in urls:
+            if source == "oddpool" and oddpool_quota_state_path is not None:
+                reserve_oddpool_quota(
+                    oddpool_quota_state_path,
+                    item_url,
+                    monthly_limit=oddpool_monthly_quota,
+                    min_interval_seconds=oddpool_min_interval_seconds,
+                )
+            payloads.extend(_payloads_from_url(item_url, timeout, proxy, headers or {}))
     rows = [row for row in (_normalize_signal(payload, source) for payload in payloads) if row is not None]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("a") as handle:
@@ -162,6 +180,10 @@ def _legs_from_flat_payload(payload: dict) -> list:
 
 def _normalize_oddpool_payload(payload: dict) -> dict:
     normalized = dict(payload)
+    if _is_oddpool_search_market(payload):
+        return _normalize_oddpool_search_market(payload, normalized)
+    if _is_oddpool_search_event(payload):
+        return _normalize_oddpool_search_event(payload, normalized)
     if "quoted_edge" not in normalized:
         for key in ["net_cents", "net_edge_cents", "profit_cents", "edge_cents"]:
             if key in payload:
@@ -175,7 +197,85 @@ def _normalize_oddpool_payload(payload: dict) -> dict:
             if isinstance(value, list):
                 normalized["legs"] = value
                 break
+    if "legs" not in normalized:
+        legs = _legs_from_oddpool_nested_arbitrage(payload)
+        if legs:
+            normalized["legs"] = legs
     return normalized
+
+
+def _is_oddpool_search_market(payload: dict) -> bool:
+    return bool(payload.get("market_id") or payload.get("marketId") or payload.get("ticker")) and bool(
+        payload.get("exchange") or payload.get("platform")
+    )
+
+
+def _is_oddpool_search_event(payload: dict) -> bool:
+    return bool(payload.get("event_id") or payload.get("eventId")) and bool(payload.get("exchange") or payload.get("platform"))
+
+
+def _normalize_oddpool_search_market(payload: dict, normalized: dict) -> dict:
+    market_id = str(payload.get("market_id") or payload.get("marketId") or payload.get("ticker") or "").strip()
+    venue = str(payload.get("exchange") or payload.get("platform") or "").strip().lower()
+    normalized.setdefault("source_id", market_id)
+    normalized.setdefault("kind", "oddpool_search_market")
+    normalized.setdefault("event_title", payload.get("event_title") or payload.get("event") or payload.get("question") or payload.get("title"))
+    normalized.setdefault("quoted_depth", payload.get("liquidity") or payload.get("volume") or payload.get("volume_24h"))
+    normalized["legs"] = [
+        {
+            "venue": venue,
+            "market_id": market_id,
+            "token": payload.get("outcome") or payload.get("side_token"),
+            "side": "watch",
+            "price": payload.get("last_yes_price") or payload.get("yes_price") or payload.get("price"),
+            "size": payload.get("liquidity") or payload.get("volume"),
+        }
+    ]
+    return normalized
+
+
+def _normalize_oddpool_search_event(payload: dict, normalized: dict) -> dict:
+    event_id = str(payload.get("event_id") or payload.get("eventId") or "").strip()
+    venue = str(payload.get("exchange") or payload.get("platform") or "").strip().lower()
+    normalized.setdefault("source_id", event_id)
+    normalized.setdefault("kind", "oddpool_search_event")
+    normalized.setdefault("event_title", payload.get("event_title") or payload.get("title") or payload.get("name"))
+    normalized.setdefault("quoted_depth", payload.get("liquidity") or payload.get("volume") or payload.get("volume_24h"))
+    normalized["legs"] = [
+        {
+            "venue": venue,
+            "market_id": event_id,
+            "token": None,
+            "side": "watch",
+            "price": None,
+            "size": payload.get("liquidity") or payload.get("volume"),
+        }
+    ]
+    return normalized
+
+
+def _legs_from_oddpool_nested_arbitrage(payload: dict) -> list:
+    legs = []
+    for venue in ["polymarket", "kalshi"]:
+        raw = payload.get(venue)
+        if not isinstance(raw, dict):
+            continue
+        market_id = raw.get("market_id") or raw.get("marketId") or raw.get("ticker")
+        if not market_id:
+            continue
+        token = raw.get("outcome") or raw.get("side_token") or raw.get("side")
+        price = raw.get("price") or raw.get("ask") or raw.get("best_ask") or raw.get("yes_ask") or raw.get("no_ask")
+        legs.append(
+            {
+                "venue": venue,
+                "market_id": market_id,
+                "token": token,
+                "side": raw.get("action") or "buy",
+                "price": price,
+                "size": raw.get("size") or raw.get("depth") or raw.get("quantity"),
+            }
+        )
+    return legs
 
 
 def _cents_to_dollars(value) -> Optional[float]:
@@ -231,6 +331,14 @@ def _normalize_proxy(proxy: str) -> str:
     if "://" in proxy:
         return proxy
     return f"http://{proxy}"
+
+
+def _url_values(url) -> list:
+    if url is None or url == "":
+        return []
+    if isinstance(url, (list, tuple)):
+        return [str(item).strip() for item in url if str(item).strip()]
+    return [str(url).strip()]
 
 
 def _utc_now() -> str:
