@@ -396,8 +396,10 @@ def _bundle_candidate(
                 quantity,
                 _token_id_for(snapshot, token),
                 fill.worst_price,
+                snapshot.fee_rate,
+                list(levels),
             )
-            for (snapshot, token, _), fill in zip(leg_specs, fills)
+            for (snapshot, token, levels), fill in zip(leg_specs, fills)
         ],
     )
 

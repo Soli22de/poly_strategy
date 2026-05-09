@@ -75,6 +75,8 @@ class Leg:
     quantity: float
     token_id: Optional[str] = None
     worst_price: Optional[float] = None
+    fee_rate: float = 0.0
+    levels: Optional[List[Level]] = None
 
 
 @dataclass(frozen=True)

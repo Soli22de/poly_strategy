@@ -1,7 +1,9 @@
 import unittest
 
-from poly_strategy.models import Leg, Opportunity
+from poly_strategy.models import BinaryMarketSnapshot, Leg, Opportunity, OrderBook
+from poly_strategy.orderbook import Level
 from poly_strategy.paper import select_paper_trades
+from poly_strategy.scanner import find_yes_no_bundle_arbs
 
 
 class PaperTests(unittest.TestCase):
@@ -49,6 +51,27 @@ class PaperTests(unittest.TestCase):
         self.assertAlmostEqual(selection.trades[0].quantity, 15)
         self.assertAlmostEqual(selection.trades[0].capital_used, 12)
         self.assertAlmostEqual(selection.trades[0].edge, 1.5)
+
+    def test_select_paper_trades_reprices_reduced_quantity_from_orderbook_levels(self):
+        snapshot = BinaryMarketSnapshot(
+            market_id="sample",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.40, 5), Level(0.70, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.40, 5), Level(0.70, 100)], bids=[]),
+            fee_rate=0.0,
+        )
+        opportunity = find_yes_no_bundle_arbs(snapshot, min_net_edge=0.0)[0]
+
+        selection = select_paper_trades([opportunity], max_capital_per_trade=4)
+
+        self.assertEqual(len(selection.trades), 1)
+        trade = selection.trades[0]
+        self.assertAlmostEqual(trade.quantity, 5)
+        self.assertAlmostEqual(trade.capital_used, 4)
+        self.assertAlmostEqual(trade.edge, 1)
+        self.assertAlmostEqual(trade.opportunity.cost_per_share, 0.80)
+        self.assertAlmostEqual(trade.opportunity.net_edge_per_share, 0.20)
+        self.assertEqual([leg.worst_price for leg in trade.opportunity.legs], [0.40, 0.40])
 
 
 if __name__ == "__main__":

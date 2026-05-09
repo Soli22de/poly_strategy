@@ -2,7 +2,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
+from poly_strategy.fees import polymarket_taker_fee_per_share
 from poly_strategy.models import Leg, Opportunity
+from poly_strategy.orderbook import insufficient_liquidity, take_levels
 
 
 @dataclass(frozen=True)
@@ -64,20 +66,24 @@ def select_paper_trades(
             rejections.append(PaperRejection(opportunity, "invalid_cost", 0.0))
             continue
         quantity = _available_quantity(opportunity, remaining_by_leg)
+        capital_cap = None
         if max_capital_per_trade is not None:
-            quantity = min(quantity, max_capital_per_trade / opportunity.cost_per_share)
+            capital_cap = max_capital_per_trade
         if remaining_bankroll is not None:
-            quantity = min(quantity, remaining_bankroll / opportunity.cost_per_share)
+            capital_cap = remaining_bankroll if capital_cap is None else min(capital_cap, remaining_bankroll)
+        if capital_cap is not None:
+            quantity = min(quantity, _quantity_for_cap(opportunity, quantity, capital_cap))
 
         if quantity <= min_quantity:
             rejections.append(PaperRejection(opportunity, _rejection_reason(opportunity, remaining_by_leg, remaining_bankroll), quantity))
             continue
 
+        selected_opportunity = _opportunity_at_quantity(opportunity, quantity)
         trade = PaperTrade(
-            opportunity=opportunity,
+            opportunity=selected_opportunity,
             quantity=quantity,
-            capital_used=quantity * opportunity.cost_per_share,
-            edge=quantity * opportunity.net_edge_per_share,
+            capital_used=quantity * selected_opportunity.cost_per_share,
+            edge=quantity * selected_opportunity.net_edge_per_share,
         )
         trades.append(trade)
         for leg in opportunity.legs:
@@ -128,6 +134,85 @@ def rejection_to_row(rejection: PaperRejection) -> dict:
 def _selection_sort_key(opportunity: Opportunity) -> tuple:
     roi = opportunity.net_edge_per_share / opportunity.cost_per_share if opportunity.cost_per_share > 0 else 0.0
     return (-roi, -opportunity.net_edge_per_share, -opportunity.total_edge, opportunity_key(opportunity))
+
+
+def _quantity_for_cap(opportunity: Opportunity, max_quantity: float, capital_cap: float) -> float:
+    if capital_cap <= 0 or max_quantity <= 0:
+        return 0.0
+    if not _can_reprice(opportunity):
+        return min(max_quantity, capital_cap / opportunity.cost_per_share)
+    if _opportunity_notional(opportunity, max_quantity) <= capital_cap:
+        return max_quantity
+
+    low = 0.0
+    high = max_quantity
+    for _ in range(50):
+        midpoint = (low + high) / 2
+        if midpoint <= 0:
+            break
+        if _opportunity_notional(opportunity, midpoint) <= capital_cap:
+            low = midpoint
+        else:
+            high = midpoint
+    return low
+
+
+def _opportunity_at_quantity(opportunity: Opportunity, quantity: float) -> Opportunity:
+    if not _can_reprice(opportunity):
+        return opportunity
+
+    payout_per_share = opportunity.cost_per_share + opportunity.net_edge_per_share
+    cost_per_share = _opportunity_notional(opportunity, quantity) / quantity
+    return Opportunity(
+        kind=opportunity.kind,
+        quantity=quantity,
+        cost_per_share=cost_per_share,
+        net_edge_per_share=payout_per_share - cost_per_share,
+        legs=[_leg_at_quantity(leg, quantity) for leg in opportunity.legs],
+        ts=opportunity.ts,
+    )
+
+
+def _can_reprice(opportunity: Opportunity) -> bool:
+    if not opportunity.legs:
+        return False
+    return all(leg.levels and not insufficient_liquidity(leg.levels, min(opportunity.quantity, leg.quantity)) for leg in opportunity.legs)
+
+
+def _opportunity_notional(opportunity: Opportunity, quantity: float) -> float:
+    if quantity <= 0:
+        return 0.0
+    return sum(_leg_notional(leg, quantity) for leg in opportunity.legs)
+
+
+def _leg_notional(leg: Leg, quantity: float) -> float:
+    total = 0.0
+    remaining = quantity
+    for level in leg.levels or []:
+        if remaining <= 0:
+            break
+        used = min(remaining, level.size)
+        total += used * (level.price + polymarket_taker_fee_per_share(level.price, leg.fee_rate))
+        remaining -= used
+    return total
+
+
+def _leg_at_quantity(leg: Leg, quantity: float) -> Leg:
+    if not leg.levels:
+        return leg
+    fill = take_levels(leg.levels, quantity)
+    return Leg(
+        venue=leg.venue,
+        market_id=leg.market_id,
+        token=leg.token,
+        side=leg.side,
+        average_price=fill.average_price,
+        quantity=quantity,
+        token_id=leg.token_id,
+        worst_price=fill.worst_price,
+        fee_rate=leg.fee_rate,
+        levels=leg.levels,
+    )
 
 
 def _initial_leg_capacity(opportunities: List[Opportunity]) -> dict:
