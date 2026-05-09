@@ -349,6 +349,12 @@ def main(argv=None) -> int:
                 Path(args.gamma),
                 Path(args.rules),
                 expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                include_top_markets=args.include_top_markets,
+                include_top_neg_risk_groups=args.include_top_neg_risk_groups,
+                min_liquidity=args.min_liquidity,
+                min_volume_24h=args.min_volume_24h,
+                max_markets=args.max_markets,
+                external_signals_path=Path(args.external_signals) if args.external_signals else None,
             )
             count = write_watchlist(rows, Path(args.out))
             print(f"wrote={count} out={args.out}")
@@ -695,6 +701,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not include known markets sharing a referenced negRiskMarketID",
     )
+    watchlist.add_argument("--include-top-markets", type=int, default=0, help="also include this many top liquid markets")
+    watchlist.add_argument(
+        "--include-top-neg-risk-groups",
+        type=int,
+        default=0,
+        help="also include every market from this many top neg-risk groups",
+    )
+    watchlist.add_argument("--min-liquidity", type=float, default=0.0, help="minimum liquidity for ranked additions")
+    watchlist.add_argument("--min-volume-24h", type=float, default=0.0, help="minimum 24h volume for ranked additions")
+    watchlist.add_argument("--max-markets", type=int, help="cap the final watchlist by priority score")
+    watchlist.add_argument("--external-signals", help="external_signal NDJSON path used as a priority boost")
 
     stream_watchlist = subparsers.add_parser(
         "stream-polymarket-watchlist",
