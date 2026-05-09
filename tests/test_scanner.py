@@ -52,6 +52,22 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(find_yes_no_bundle_arbs(snapshot, min_net_edge=0.0), [])
 
+    def test_yes_no_bundle_uses_profitable_prefix_depth(self):
+        snapshot = BinaryMarketSnapshot(
+            market_id="prefix-only",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.45, 10), Level(0.95, 90)], bids=[]),
+            no=OrderBook(asks=[Level(0.53, 10), Level(0.95, 90)], bids=[]),
+            fee_rate=0.0,
+        )
+
+        opportunities = find_yes_no_bundle_arbs(snapshot, min_net_edge=0.01)
+
+        self.assertEqual(len(opportunities), 1)
+        self.assertGreater(opportunities[0].quantity, 10)
+        self.assertLess(opportunities[0].quantity, 11)
+        self.assertGreater(opportunities[0].net_edge_per_share, 0.01)
+
     def test_cross_venue_same_binary_buys_cheap_yes_and_expensive_no(self):
         polymarket = VenueBinarySnapshot(
             market_id="france-world-cup",
@@ -179,6 +195,43 @@ class ScannerTests(unittest.TestCase):
         self.assertAlmostEqual(opportunity.cost_per_share, 0.93)
         self.assertAlmostEqual(opportunity.net_edge_per_share, 1.07)
         self.assertEqual([leg.token for leg in opportunity.legs], ["NO", "NO", "NO"])
+
+    def test_mutual_exclusion_basket_uses_profitable_prefix_depth(self):
+        first = BinaryMarketSnapshot(
+            market_id="a",
+            venue="polymarket",
+            yes=OrderBook(asks=[], bids=[]),
+            no=OrderBook(asks=[Level(0.40, 5), Level(0.99, 95)], bids=[]),
+            fee_rate=0.0,
+        )
+        second = BinaryMarketSnapshot(
+            market_id="b",
+            venue="polymarket",
+            yes=OrderBook(asks=[], bids=[]),
+            no=OrderBook(asks=[Level(0.40, 5), Level(0.99, 95)], bids=[]),
+            fee_rate=0.0,
+        )
+        third = BinaryMarketSnapshot(
+            market_id="c",
+            venue="polymarket",
+            yes=OrderBook(asks=[], bids=[]),
+            no=OrderBook(asks=[Level(0.40, 5), Level(0.99, 95)], bids=[]),
+            fee_rate=0.0,
+        )
+        rules = [
+            MutualExclusionRule("a", "b"),
+            MutualExclusionRule("a", "c"),
+            MutualExclusionRule("b", "c"),
+        ]
+
+        from poly_strategy.scanner import find_mutual_exclusion_basket_arbs
+
+        opportunities = find_mutual_exclusion_basket_arbs([first, second, third], rules, min_net_edge=0.01)
+
+        self.assertEqual(len(opportunities), 1)
+        self.assertGreater(opportunities[0].quantity, 5)
+        self.assertLess(opportunities[0].quantity, 10)
+        self.assertGreater(opportunities[0].net_edge_per_share, 0.01)
 
     def test_equivalent_arb_buys_yes_on_one_market_and_no_on_the_other(self):
         first = BinaryMarketSnapshot(

@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import List
+from typing import List, Optional, Tuple
 
 from poly_strategy.fees import polymarket_taker_fee_per_share
 from poly_strategy.models import (
@@ -16,10 +16,6 @@ from poly_strategy.models import (
 from poly_strategy.orderbook import Level, insufficient_liquidity, take_levels
 
 
-def _depth_quantity(first: List[Level], second: List[Level]) -> float:
-    return min(sum(level.size for level in first), sum(level.size for level in second))
-
-
 def _buy_cost_per_share(price: float, fee_rate: float) -> float:
     return price + polymarket_taker_fee_per_share(price, fee_rate)
 
@@ -28,54 +24,19 @@ def find_yes_no_bundle_arbs(
     snapshot: BinaryMarketSnapshot,
     min_net_edge: float = 0.0,
 ) -> List[Opportunity]:
-    quantity = _depth_quantity(snapshot.yes.asks, snapshot.no.asks)
-    if quantity <= 0:
-        return []
-    if insufficient_liquidity(snapshot.yes.asks, quantity) or insufficient_liquidity(snapshot.no.asks, quantity):
-        return []
-
-    yes_fill = take_levels(snapshot.yes.asks, quantity)
-    no_fill = take_levels(snapshot.no.asks, quantity)
-    cost_per_share = _buy_cost_per_share(yes_fill.average_price, snapshot.fee_rate) + _buy_cost_per_share(
-        no_fill.average_price,
-        snapshot.fee_rate,
+    opportunity = _bundle_candidate(
+        "yes_no_bundle",
+        [
+            (snapshot, "YES", snapshot.yes.asks),
+            (snapshot, "NO", snapshot.no.asks),
+        ],
+        payout_per_share=1.0,
+        min_net_edge=min_net_edge,
+        ts=snapshot.ts,
     )
-    net_edge = 1.0 - cost_per_share
-
-    if net_edge <= min_net_edge:
+    if opportunity is None:
         return []
-
-    return [
-        Opportunity(
-            kind="yes_no_bundle",
-            quantity=quantity,
-            cost_per_share=cost_per_share,
-            net_edge_per_share=net_edge,
-            ts=snapshot.ts,
-            legs=[
-                Leg(
-                    snapshot.venue,
-                    snapshot.market_id,
-                    "YES",
-                    "buy",
-                    yes_fill.average_price,
-                    quantity,
-                    snapshot.yes.token_id,
-                    yes_fill.worst_price,
-                ),
-                Leg(
-                    snapshot.venue,
-                    snapshot.market_id,
-                    "NO",
-                    "buy",
-                    no_fill.average_price,
-                    quantity,
-                    snapshot.no.token_id,
-                    no_fill.worst_price,
-                ),
-            ],
-        )
-    ]
+    return [opportunity]
 
 
 def find_cross_venue_same_binary(
@@ -243,7 +204,7 @@ def _implication_candidate(
     antecedent: BinaryMarketSnapshot,
     consequent: BinaryMarketSnapshot,
     min_net_edge: float,
-) -> Opportunity:
+) -> Optional[Opportunity]:
     return _two_leg_candidate(
         "implication",
         consequent,
@@ -260,7 +221,7 @@ def _mutually_exclusive_candidate(
     first: BinaryMarketSnapshot,
     second: BinaryMarketSnapshot,
     min_net_edge: float,
-) -> Opportunity:
+) -> Optional[Opportunity]:
     return _two_leg_candidate(
         "mutually_exclusive",
         first,
@@ -277,42 +238,17 @@ def _mutual_exclusion_basket_candidate(
     market_ids: List[str],
     by_market_id: dict,
     min_net_edge: float,
-) -> Opportunity:
+) -> Optional[Opportunity]:
     snapshots = [by_market_id[market_id] for market_id in market_ids if market_id in by_market_id]
     if len(snapshots) != len(market_ids):
         return None
 
-    quantity = min(sum(level.size for level in snapshot.no.asks) for snapshot in snapshots)
-    if quantity <= 0:
-        return None
-
-    fills = [take_levels(snapshot.no.asks, quantity) for snapshot in snapshots]
-    cost_per_share = sum(
-        _buy_cost_per_share(fill.average_price, snapshot.fee_rate) for snapshot, fill in zip(snapshots, fills)
-    )
-    net_edge = (len(snapshots) - 1) - cost_per_share
-    if net_edge <= min_net_edge:
-        return None
-
-    return Opportunity(
+    return _bundle_candidate(
         kind="mutual_exclusion_basket",
-        quantity=quantity,
-        cost_per_share=cost_per_share,
-        net_edge_per_share=net_edge,
+        leg_specs=[(snapshot, "NO", snapshot.no.asks) for snapshot in snapshots],
+        payout_per_share=len(snapshots) - 1,
+        min_net_edge=min_net_edge,
         ts=snapshots[0].ts,
-        legs=[
-            Leg(
-                snapshot.venue,
-                snapshot.market_id,
-                "NO",
-                "buy",
-                fill.average_price,
-                quantity,
-                snapshot.no.token_id,
-                fill.worst_price,
-            )
-            for snapshot, fill in zip(snapshots, fills)
-        ],
     )
 
 
@@ -325,18 +261,33 @@ def _two_leg_candidate(
     second_token: str,
     second_levels: List[Level],
     min_net_edge: float,
-) -> Opportunity:
-    quantity = _depth_quantity(first_levels, second_levels)
-    if quantity <= 0:
+) -> Optional[Opportunity]:
+    return _bundle_candidate(
+        kind=kind,
+        leg_specs=[
+            (first, first_token, first_levels),
+            (second, second_token, second_levels),
+        ],
+        payout_per_share=1.0,
+        min_net_edge=min_net_edge,
+        ts=first.ts or second.ts,
+    )
+
+
+def _bundle_candidate(
+    kind: str,
+    leg_specs: List[Tuple[BinaryMarketSnapshot, str, List[Level]]],
+    payout_per_share: float,
+    min_net_edge: float,
+    ts: Optional[str],
+) -> Optional[Opportunity]:
+    quantity = _max_profitable_quantity(leg_specs, payout_per_share, min_net_edge)
+    if quantity is None:
         return None
 
-    first_fill = take_levels(first_levels, quantity)
-    second_fill = take_levels(second_levels, quantity)
-    cost_per_share = _buy_cost_per_share(first_fill.average_price, first.fee_rate) + _buy_cost_per_share(
-        second_fill.average_price,
-        second.fee_rate,
-    )
-    net_edge = 1.0 - cost_per_share
+    fills = [take_levels(levels, quantity) for _, _, levels in leg_specs]
+    cost_per_share = _bundle_cost_per_share(leg_specs, quantity)
+    net_edge = payout_per_share - cost_per_share
     if net_edge <= min_net_edge:
         return None
 
@@ -345,30 +296,79 @@ def _two_leg_candidate(
         quantity=quantity,
         cost_per_share=cost_per_share,
         net_edge_per_share=net_edge,
-        ts=first.ts or second.ts,
+        ts=ts,
         legs=[
             Leg(
-                first.venue,
-                first.market_id,
-                first_token,
+                snapshot.venue,
+                snapshot.market_id,
+                token,
                 "buy",
-                first_fill.average_price,
+                fill.average_price,
                 quantity,
-                _token_id_for(first, first_token),
-                first_fill.worst_price,
-            ),
-            Leg(
-                second.venue,
-                second.market_id,
-                second_token,
-                "buy",
-                second_fill.average_price,
-                quantity,
-                _token_id_for(second, second_token),
-                second_fill.worst_price,
-            ),
+                _token_id_for(snapshot, token),
+                fill.worst_price,
+            )
+            for (snapshot, token, _), fill in zip(leg_specs, fills)
         ],
     )
+
+
+def _max_profitable_quantity(
+    leg_specs: List[Tuple[BinaryMarketSnapshot, str, List[Level]]],
+    payout_per_share: float,
+    min_net_edge: float,
+) -> Optional[float]:
+    if not leg_specs:
+        return None
+    if any(not levels for _, _, levels in leg_specs):
+        return None
+
+    target_cost = payout_per_share - min_net_edge
+    best_cost = sum(_buy_cost_per_share(levels[0].price, snapshot.fee_rate) for snapshot, _, levels in leg_specs)
+    if best_cost >= target_cost:
+        return None
+
+    max_quantity = min(sum(level.size for level in levels) for _, _, levels in leg_specs)
+    if max_quantity <= 0:
+        return None
+    if _bundle_cost_per_share(leg_specs, max_quantity) < target_cost:
+        return max_quantity
+
+    low = 0.0
+    high = max_quantity
+    for _ in range(50):
+        midpoint = (low + high) / 2
+        if midpoint <= 0:
+            break
+        if _bundle_cost_per_share(leg_specs, midpoint) < target_cost:
+            low = midpoint
+        else:
+            high = midpoint
+
+    if low <= 1e-9:
+        return None
+    return low
+
+
+def _bundle_cost_per_share(leg_specs: List[Tuple[BinaryMarketSnapshot, str, List[Level]]], quantity: float) -> float:
+    total = 0.0
+    for snapshot, _, levels in leg_specs:
+        total += _fee_adjusted_notional(levels, quantity, snapshot.fee_rate) / quantity
+    return total
+
+
+def _fee_adjusted_notional(levels: List[Level], quantity: float, fee_rate: float) -> float:
+    if insufficient_liquidity(levels, quantity):
+        raise ValueError("insufficient liquidity")
+    remaining = quantity
+    notional = 0.0
+    for level in levels:
+        if remaining <= 0:
+            break
+        used = min(remaining, level.size)
+        notional += used * _buy_cost_per_share(level.price, fee_rate)
+        remaining -= used
+    return notional
 
 
 def _maximal_cliques(adjacency) -> List[List[str]]:
@@ -404,49 +404,16 @@ def _cross_candidate(
     second_token: str,
     second_levels: List[Level],
     min_net_edge: float,
-) -> Opportunity:
-    quantity = _depth_quantity(first_levels, second_levels)
-    if quantity <= 0:
-        return None
-
-    first_fill = take_levels(first_levels, quantity)
-    second_fill = take_levels(second_levels, quantity)
-    cost_per_share = _buy_cost_per_share(first_fill.average_price, first.fee_rate) + _buy_cost_per_share(
-        second_fill.average_price,
-        second.fee_rate,
-    )
-    net_edge = 1.0 - cost_per_share
-    if net_edge <= min_net_edge:
-        return None
-
-    return Opportunity(
+) -> Optional[Opportunity]:
+    return _bundle_candidate(
         kind="cross_venue_same_binary",
-        quantity=quantity,
-        cost_per_share=cost_per_share,
-        net_edge_per_share=net_edge,
-        ts=first.ts or second.ts,
-        legs=[
-            Leg(
-                first.venue,
-                first.market_id,
-                first_token,
-                "buy",
-                first_fill.average_price,
-                quantity,
-                _token_id_for(first, first_token),
-                first_fill.worst_price,
-            ),
-            Leg(
-                second.venue,
-                second.market_id,
-                second_token,
-                "buy",
-                second_fill.average_price,
-                quantity,
-                _token_id_for(second, second_token),
-                second_fill.worst_price,
-            ),
+        leg_specs=[
+            (first, first_token, first_levels),
+            (second, second_token, second_levels),
         ],
+        payout_per_share=1.0,
+        min_net_edge=min_net_edge,
+        ts=first.ts or second.ts,
     )
 
 
