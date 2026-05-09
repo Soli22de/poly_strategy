@@ -497,6 +497,8 @@ Run a realtime-specific analysis report explaining why opportunities are absent 
   --out data/realtime-monitor-24h-v1-analysis.json
 ```
 
+The `zero_opportunity_diagnosis` section separates actionable near-misses from diagnostic or blocked candidates, so a positive-looking basket that still needs rule promotion will not be treated as executable.
+
 Turn alerts into refreshed dry-run execution plans with pretrade and risk checks:
 
 ```bash
@@ -516,6 +518,8 @@ Install persistent macOS LaunchAgents for realtime monitoring, alert extraction,
 DRY_RUN=1 scripts/install_launch_agents.sh   # preview
 scripts/install_launch_agents.sh             # install and bootstrap
 ```
+
+Oddpool Free is quota-limited. The included external signal LaunchAgent refreshes hourly by default to stay within the 1000 requests/month budget.
 
 Rotate large snapshot/update/log files while preserving report JSONL by default:
 

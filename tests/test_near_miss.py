@@ -29,7 +29,11 @@ class NearMissTests(unittest.TestCase):
             report = near_miss_report(snapshots, rules, top_n=3, min_net_edge=-0.0001)
 
         self.assertEqual(report["candidate_count"], 1)
+        self.assertEqual(report["actionable_candidate_count"], 1)
+        self.assertEqual(report["diagnostic_candidate_count"], 0)
+        self.assertEqual(report["blocked_candidate_count"], 0)
         self.assertEqual(report["top"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(report["top_actionable"][0]["kind"], "yes_no_bundle")
         self.assertAlmostEqual(report["top"][0]["gross_edge_per_share"], 0.0)
         self.assertLess(report["top"][0]["net_edge_per_share"], 0.0)
         self.assertEqual(report["by_kind"][0]["kind"], "yes_no_bundle")
@@ -62,6 +66,8 @@ class NearMissTests(unittest.TestCase):
         diagnostic = [row for row in report["top"] if row["kind"] == "potential_exhaustive_yes_basket"][0]
         self.assertTrue(diagnostic["diagnostic_only"])
         self.assertIn("complete collectively exhaustive", diagnostic["risk_note"])
+        self.assertGreater(report["diagnostic_candidate_count"], 0)
+        self.assertEqual(report["diagnostic_top"][0]["kind"], "potential_exhaustive_yes_basket")
 
     def test_near_miss_report_includes_verified_exhaustive_groups(self):
         snapshots = [
@@ -140,6 +146,8 @@ class NearMissTests(unittest.TestCase):
         diagnostic = report["neg_risk_expanded_groups"][0]
         self.assertEqual(diagnostic["status"], "incomplete_known_neg_risk_group")
         self.assertEqual(diagnostic["missing_snapshot_market_ids"], ["d"])
+        self.assertGreater(report["blocked_candidate_count"], 0)
+        self.assertEqual(report["blocked_top"][0]["trade_status"], "rejected")
 
     def test_near_miss_report_computes_full_known_neg_risk_group_when_snapshots_exist(self):
         snapshots = [

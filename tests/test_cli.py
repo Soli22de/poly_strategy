@@ -552,6 +552,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["near_miss"]["gamma_path"], str(gamma))
         self.assertEqual(row["near_miss_rejection_summary"]["neg_risk_group_count"], 0)
         self.assertGreater(row["near_miss"]["top"][0]["distance_to_min_net_edge"], 0)
+        self.assertEqual(row["zero_opportunity_diagnosis"]["actionable_candidate_count"], 1)
+        self.assertEqual(row["zero_opportunity_diagnosis"]["diagnostic_candidate_count"], 0)
+        self.assertIn("best_actionable_candidate_below_min_edge", row["zero_opportunity_diagnosis"]["reasons"])
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_monitor_analyze_command_summarizes_realtime_health(self):

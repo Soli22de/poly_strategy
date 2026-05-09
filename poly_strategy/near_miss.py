@@ -31,6 +31,9 @@ def near_miss_report(
     )
     candidates.sort(key=lambda row: (row["net_edge_per_share"], row["gross_edge_per_share"]), reverse=True)
     by_kind = _summary_by_kind(candidates, min_net_edge)
+    actionable = [row for row in candidates if _is_actionable_candidate(row)]
+    diagnostic_only = [row for row in candidates if row.get("diagnostic_only")]
+    blocked = [row for row in candidates if _candidate_blocked(row)]
     fee_blocked = [
         row
         for row in candidates
@@ -44,8 +47,14 @@ def near_miss_report(
         "latest_snapshot_ts": snapshots[-1].ts if snapshots else None,
         "latest_snapshot_count": len(snapshots),
         "candidate_count": len(candidates),
+        "actionable_candidate_count": len(actionable),
+        "diagnostic_candidate_count": len(diagnostic_only),
+        "blocked_candidate_count": len(blocked),
         "min_net_edge": min_net_edge,
         "top": candidates[:top_n],
+        "top_actionable": actionable[:top_n],
+        "diagnostic_top": diagnostic_only[:top_n],
+        "blocked_top": blocked[:top_n],
         "fee_blocked_top": fee_blocked[:top_n],
         "by_kind": by_kind,
         "neg_risk_expanded_groups": neg_risk_expanded_groups[:top_n],
@@ -487,18 +496,31 @@ def _summary_by_kind(candidates: List[dict], min_net_edge: float) -> list:
             {
                 "kind": candidate["kind"],
                 "candidate_count": 0,
+                "actionable_candidate_count": 0,
+                "diagnostic_candidate_count": 0,
+                "blocked_candidate_count": 0,
                 "positive_gross_count": 0,
                 "positive_net_count": 0,
+                "actionable_positive_net_count": 0,
                 "fee_blocked_count": 0,
                 "best_gross_edge_per_share": None,
                 "best_net_edge_per_share": None,
+                "best_actionable_net_edge_per_share": None,
             },
         )
         row["candidate_count"] += 1
+        if _is_actionable_candidate(candidate):
+            row["actionable_candidate_count"] += 1
+        if candidate.get("diagnostic_only"):
+            row["diagnostic_candidate_count"] += 1
+        if _candidate_blocked(candidate):
+            row["blocked_candidate_count"] += 1
         if candidate["gross_edge_per_share"] > min_net_edge:
             row["positive_gross_count"] += 1
         if candidate["net_edge_per_share"] > min_net_edge:
             row["positive_net_count"] += 1
+            if _is_actionable_candidate(candidate):
+                row["actionable_positive_net_count"] += 1
         if candidate["gross_edge_per_share"] > min_net_edge and candidate["net_edge_per_share"] <= min_net_edge:
             row["fee_blocked_count"] += 1
         row["best_gross_edge_per_share"] = _max_optional(
@@ -506,7 +528,20 @@ def _summary_by_kind(candidates: List[dict], min_net_edge: float) -> list:
             candidate["gross_edge_per_share"],
         )
         row["best_net_edge_per_share"] = _max_optional(row["best_net_edge_per_share"], candidate["net_edge_per_share"])
-    return sorted(summary.values(), key=lambda row: (-row["best_net_edge_per_share"], row["kind"]))
+        if _is_actionable_candidate(candidate):
+            row["best_actionable_net_edge_per_share"] = _max_optional(
+                row["best_actionable_net_edge_per_share"],
+                candidate["net_edge_per_share"],
+            )
+    return sorted(summary.values(), key=lambda row: (-(row["best_net_edge_per_share"] or -999), row["kind"]))
+
+
+def _is_actionable_candidate(candidate: dict) -> bool:
+    return not candidate.get("diagnostic_only") and not _candidate_blocked(candidate)
+
+
+def _candidate_blocked(candidate: dict) -> bool:
+    return candidate.get("trade_status") in {"rejected", "blocked"} or bool(candidate.get("rejection_reason"))
 
 
 def _max_optional(first: Optional[float], second: float) -> float:

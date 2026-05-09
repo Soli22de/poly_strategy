@@ -333,10 +333,15 @@ def _connection_event_summary(connection_rows: list) -> dict:
 
 def _zero_opportunity_diagnosis(report: dict, near_miss: dict) -> dict:
     top = near_miss.get("top", [])
+    top_actionable = near_miss.get("top_actionable", [])
+    diagnostic_top = near_miss.get("diagnostic_top", [])
+    blocked_top = near_miss.get("blocked_top", [])
     by_kind = near_miss.get("by_kind", [])
     best = top[0] if top else None
+    best_actionable = top_actionable[0] if top_actionable else None
     positive_gross = sum(int(row.get("positive_gross_count") or 0) for row in by_kind)
     positive_net = sum(int(row.get("positive_net_count") or 0) for row in by_kind)
+    actionable_positive_net = sum(int(row.get("actionable_positive_net_count") or 0) for row in by_kind)
     fee_blocked = sum(int(row.get("fee_blocked_count") or 0) for row in by_kind)
     reasons = []
     if report.get("final_known_token_count", 0) and report.get("final_known_token_count", 0) < 100:
@@ -345,10 +350,20 @@ def _zero_opportunity_diagnosis(report: dict, near_miss: dict) -> dict:
         reasons.append("no_evaluable_candidates")
     elif float(best.get("net_edge_per_share") or 0.0) <= float(near_miss.get("min_net_edge") or 0.0):
         reasons.append("best_candidate_below_min_edge")
+    if not best_actionable:
+        reasons.append("no_actionable_near_miss_candidates")
+    elif float(best_actionable.get("net_edge_per_share") or 0.0) <= float(near_miss.get("min_net_edge") or 0.0):
+        reasons.append("best_actionable_candidate_below_min_edge")
     if fee_blocked:
         reasons.append("fees_erase_gross_edge")
     if positive_gross and not positive_net:
         reasons.append("fee_drag_dominates_positive_gross_edges")
+    if positive_net and not actionable_positive_net:
+        reasons.append("positive_net_candidates_require_verification_or_are_blocked")
+    if diagnostic_top:
+        reasons.append("diagnostic_candidates_require_rule_promotion")
+    if blocked_top:
+        reasons.append("some_candidates_blocked_by_resolution_or_group_checks")
     if report.get("connection_events", {}).get("by_event"):
         events = {row.get("event") for row in report["connection_events"]["by_event"]}
         if "disconnected" in events or "reconnect_sleep" in events:
@@ -356,9 +371,14 @@ def _zero_opportunity_diagnosis(report: dict, near_miss: dict) -> dict:
     return {
         "reasons": sorted(set(reasons)),
         "best_candidate": best,
+        "best_actionable_candidate": best_actionable,
         "positive_gross_candidate_count": positive_gross,
         "positive_net_candidate_count": positive_net,
+        "actionable_positive_net_candidate_count": actionable_positive_net,
         "fee_blocked_candidate_count": fee_blocked,
+        "actionable_candidate_count": near_miss.get("actionable_candidate_count", 0),
+        "diagnostic_candidate_count": near_miss.get("diagnostic_candidate_count", 0),
+        "blocked_candidate_count": near_miss.get("blocked_candidate_count", 0),
         "closest_by_kind": by_kind[:10],
     }
 

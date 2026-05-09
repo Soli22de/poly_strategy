@@ -13,7 +13,7 @@
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>
-  <integer>300</integer>
+  <integer>3600</integer>
   <key>WorkingDirectory</key>
   <string>/Users/ww/Project/poly_strategy</string>
   <key>StandardOutPath</key>
