@@ -8,9 +8,15 @@ PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
 GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"
 RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
+EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-}"
 REPORT_OUT="${REPORT_OUT:-data/realtime-monitor-24h.jsonl}"
 SNAPSHOTS_OUT="${SNAPSHOTS_OUT:-data/realtime-monitor-24h-snapshots.ndjson}"
 UPDATES_OUT="${UPDATES_OUT:-}"
+INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
+INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
+MIN_LIQUIDITY="${MIN_LIQUIDITY:-0}"
+MIN_VOLUME_24H="${MIN_VOLUME_24H:-0}"
+MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-250}"
 SNAPSHOT_INTERVAL="${SNAPSHOT_INTERVAL:-2}"
 STALE_TIMEOUT="${STALE_TIMEOUT:-30}"
 RECONNECT_DELAY="${RECONNECT_DELAY:-2}"
@@ -27,10 +33,23 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-"$PYTHON_BIN" -m poly_strategy.cli build-watchlist \
-  --gamma "$GAMMA" \
-  --rules "$RULES" \
+watchlist_args=(
+  build-watchlist
+  --gamma "$GAMMA"
+  --rules "$RULES"
   --out "$WATCHLIST"
+  --include-top-markets "$INCLUDE_TOP_MARKETS"
+  --include-top-neg-risk-groups "$INCLUDE_TOP_NEG_RISK_GROUPS"
+  --min-liquidity "$MIN_LIQUIDITY"
+  --min-volume-24h "$MIN_VOLUME_24H"
+  --max-markets "$MAX_WATCHLIST_MARKETS"
+)
+
+if [[ -n "$EXTERNAL_SIGNALS" ]]; then
+  watchlist_args+=(--external-signals "$EXTERNAL_SIGNALS")
+fi
+
+"$PYTHON_BIN" -m poly_strategy.cli "${watchlist_args[@]}"
 
 args=(
   realtime-monitor-watchlist
