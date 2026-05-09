@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -f .env.local ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env.local
+  set +a
+fi
+
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 ALERTS_PATH="${ALERTS_PATH:-data/realtime-monitor-24h-v1-alerts.ndjson}"
 GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"
@@ -16,7 +23,7 @@ BOOK_WORKERS="${BOOK_WORKERS:-4}"
 MAX_ALERTS="${MAX_ALERTS:-20}"
 MIN_NET_EDGE="${MIN_NET_EDGE:-0.002}"
 MAX_CAPITAL_PER_TRADE="${MAX_CAPITAL_PER_TRADE:-10}"
-BANKROLL="${BANKROLL:-50}"
+BANKROLL="${BANKROLL:-100}"
 MIN_PAPER_ROI="${MIN_PAPER_ROI:-0.01}"
 MIN_RUN_OBSERVATIONS="${MIN_RUN_OBSERVATIONS:-1}"
 MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-0}"

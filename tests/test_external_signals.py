@@ -41,6 +41,38 @@ class ExternalSignalTests(unittest.TestCase):
         self.assertEqual(row["legs"][0]["venue"], "polymarket")
         self.assertEqual(row["legs"][1]["market_id"], "kalshi-1")
 
+
+    def test_ingest_external_signals_supports_oddpool_current_shape(self):
+        payload = {
+            "arbitrages": [
+                {
+                    "id": "arb-1",
+                    "net_cents": 1.25,
+                    "roi": 0.04,
+                    "depth": 200,
+                    "platforms": [
+                        {"platform": "Polymarket", "market_id": "poly-1", "outcome": "YES", "best_ask": 0.48},
+                        {"platform": "Kalshi", "ticker": "KXTEST", "outcome": "NO", "best_ask": 0.50},
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "oddpool.json"
+            out = Path(tmp) / "external.ndjson"
+            source.write_text(json.dumps(payload))
+
+            count = ingest_external_signals(out, "oddpool", input_path=source)
+            row = json.loads(out.read_text().splitlines()[0])
+
+        self.assertEqual(count, 1)
+        self.assertEqual(row["source"], "oddpool")
+        self.assertEqual(row["source_id"], "arb-1")
+        self.assertEqual(row["quoted_edge"], 0.0125)
+        self.assertEqual(row["quoted_depth"], 200)
+        self.assertEqual([leg["venue"] for leg in row["legs"]], ["polymarket", "kalshi"])
+
     def test_external_signal_report_summarizes_sources_and_venues(self):
         rows = [
             {

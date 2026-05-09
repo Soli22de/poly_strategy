@@ -79,7 +79,7 @@ def _payloads_from_loaded_json(loaded) -> list:
     if isinstance(loaded, list):
         return loaded
     if isinstance(loaded, dict):
-        for key in ["signals", "data", "results", "items", "opportunities"]:
+        for key in ["signals", "arbitrages", "arbs", "data", "results", "items", "opportunities"]:
             value = loaded.get(key)
             if isinstance(value, list):
                 return value
@@ -90,6 +90,7 @@ def _payloads_from_loaded_json(loaded) -> list:
 def _normalize_signal(payload: dict, default_source: str) -> Optional[dict]:
     if not isinstance(payload, dict):
         return None
+    payload = _normalize_oddpool_payload(payload) if default_source == "oddpool" else payload
     legs = _normalize_legs(payload)
     if not legs:
         return None
@@ -117,6 +118,8 @@ def _normalize_legs(payload: dict) -> list:
     raw_legs = payload.get("legs")
     if raw_legs is None:
         raw_legs = payload.get("markets")
+    if raw_legs is None:
+        raw_legs = payload.get("platforms")
     if not isinstance(raw_legs, list):
         raw_legs = _legs_from_flat_payload(payload)
 
@@ -125,7 +128,7 @@ def _normalize_legs(payload: dict) -> list:
         if not isinstance(leg, dict):
             continue
         venue = str(leg.get("venue") or leg.get("platform") or "").strip().lower()
-        market_id = str(leg.get("market_id") or leg.get("marketId") or leg.get("ticker") or "").strip()
+        market_id = str(leg.get("market_id") or leg.get("marketId") or leg.get("market") or leg.get("ticker") or "").strip()
         token = str(leg.get("token") or leg.get("outcome") or leg.get("side_token") or "").strip().upper()
         side = str(leg.get("side") or leg.get("action") or "buy").strip().lower()
         if not venue or not market_id:
@@ -155,6 +158,31 @@ def _legs_from_flat_payload(payload: dict) -> list:
     if second_market:
         legs.append({"venue": second_venue, "market_id": second_market, "token": payload.get("token_b"), "side": "buy"})
     return legs
+
+
+def _normalize_oddpool_payload(payload: dict) -> dict:
+    normalized = dict(payload)
+    if "quoted_edge" not in normalized:
+        for key in ["net_cents", "net_edge_cents", "profit_cents", "edge_cents"]:
+            if key in payload:
+                normalized["quoted_edge"] = _cents_to_dollars(payload.get(key))
+                break
+    if "quoted_depth" not in normalized:
+        normalized["quoted_depth"] = payload.get("depth") or payload.get("available_size") or payload.get("max_size")
+    if "legs" not in normalized:
+        for key in ["legs", "markets", "platforms", "orders"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                normalized["legs"] = value
+                break
+    return normalized
+
+
+def _cents_to_dollars(value) -> Optional[float]:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return None
+    return parsed / 100.0
 
 
 def _read_external_signals(path: Path) -> Iterable[dict]:

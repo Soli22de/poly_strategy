@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -f .env.local ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env.local
+  set +a
+fi
+
 LABEL="${LABEL:-poly_strategy_realtime_monitor_24h}"
 LOG_PATH="${LOG_PATH:-data/realtime-monitor-24h-v1.log}"
 REPORT_OUT="${REPORT_OUT:-data/realtime-monitor-24h-v1.jsonl}"
@@ -13,7 +20,7 @@ STALE_TIMEOUT="${STALE_TIMEOUT:-30}"
 RECONNECT_DELAY="${RECONNECT_DELAY:-2}"
 MIN_NET_EDGE="${MIN_NET_EDGE:-0.002}"
 MAX_CAPITAL_PER_TRADE="${MAX_CAPITAL_PER_TRADE:-10}"
-BANKROLL="${BANKROLL:-50}"
+BANKROLL="${BANKROLL:-100}"
 MIN_PAPER_ROI="${MIN_PAPER_ROI:-0.01}"
 MIN_RUN_OBSERVATIONS="${MIN_RUN_OBSERVATIONS:-2}"
 MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-3}"
