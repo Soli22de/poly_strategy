@@ -215,6 +215,10 @@ def main(argv=None) -> int:
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
                 rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
             )
             rows = _execution_plan_rows(result, args)
             _write_jsonl_or_stdout(rows, args.out)
@@ -237,6 +241,10 @@ def main(argv=None) -> int:
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
                 rules_path=Path(args.rules),
+                gamma_path=Path(args.gamma),
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
             )
             rows = _execution_plan_rows(result, args)
             _write_jsonl_or_stdout(rows, args.out)
@@ -505,6 +513,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")
     execute.add_argument("--rules", help="JSON file with discovered rules")
+    execute.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk group paper scans")
     execute.add_argument("--out", help="output NDJSON execution plan path")
     execute.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     execute.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")

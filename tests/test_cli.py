@@ -638,6 +638,72 @@ class CliTests(unittest.TestCase):
         self.assertEqual(plan_text, "")
         self.assertIn("wrote=0", stdout.getvalue())
 
+    def test_execute_latest_can_plan_neg_risk_group_with_gamma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            gamma = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "plans.ndjson"
+            snapshots.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "ts": "2026-05-09T00:00:00Z",
+                            "type": "binary_snapshot",
+                            "venue": "polymarket",
+                            "market_id": market_id,
+                            "fee_rate": 0.0,
+                            "yes": {"token_id": f"{market_id}-yes", "asks": [[yes_price, 100]], "bids": []},
+                            "no": {"token_id": f"{market_id}-no", "asks": [[0.70, 100]], "bids": []},
+                        }
+                    )
+                    for market_id, yes_price in [("a", 0.40), ("b", 0.50)]
+                )
+                + "\n"
+            )
+            gamma.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "type": "raw_polymarket_gamma_market",
+                            "market_id": market_id,
+                            "raw": {
+                                "id": market_id,
+                                "question": f"{market_id} wins?",
+                                "closed": False,
+                                "enableOrderBook": True,
+                                "acceptingOrders": True,
+                                "outcomes": json.dumps(["Yes", "No"]),
+                                "clobTokenIds": json.dumps([f"{market_id}-yes", f"{market_id}-no"]),
+                                "negRiskMarketID": "group-1",
+                            },
+                        }
+                    )
+                    for market_id in ["a", "b"]
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "execute-latest",
+                        str(snapshots),
+                        "--gamma",
+                        str(gamma),
+                        "--out",
+                        str(out),
+                        "--max-capital-per-trade",
+                        "9",
+                    ]
+                )
+            row = json.loads(out.read_text().splitlines()[0])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["opportunity_kind"], "neg_risk_group_yes_basket")
+        self.assertTrue(row["pretrade_check"]["passed"])
+        self.assertIn("wrote=1", stdout.getvalue())
+
     def test_execute_latest_can_require_stable_run_observations(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.ndjson"
