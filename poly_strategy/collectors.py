@@ -27,8 +27,14 @@ def write_sample_snapshot(path: Path) -> int:
     return 1
 
 
-def collect_polymarket_gamma(path: Path, limit: int, timeout: float, proxy: Optional[str] = None) -> int:
-    params = urlencode({"active": "true", "closed": "false", "limit": str(limit)})
+def collect_polymarket_gamma(
+    path: Path,
+    limit: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    offset: int = 0,
+) -> int:
+    params = urlencode({"active": "true", "closed": "false", "limit": str(limit), "offset": str(offset)})
     rows = _fetch_json(f"{GAMMA_MARKETS_URL}?{params}", timeout, proxy=proxy)
     if not isinstance(rows, list):
         raise RuntimeError("unexpected Polymarket Gamma response")
@@ -49,6 +55,28 @@ def collect_polymarket_gamma(path: Path, limit: int, timeout: float, proxy: Opti
                 + "\n"
             )
     return len(rows)
+
+
+def collect_polymarket_gamma_pages(
+    path: Path,
+    limit: int,
+    pages: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    start_offset: int = 0,
+    collect_page: Callable[[Path, int, float, Optional[str], int], int] = collect_polymarket_gamma,
+) -> int:
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    if pages < 1:
+        raise ValueError("pages must be at least 1")
+    if start_offset < 0:
+        raise ValueError("start_offset must be non-negative")
+
+    total = 0
+    for page in range(pages):
+        total += collect_page(path, limit, timeout, proxy, start_offset + page * limit)
+    return total
 
 
 def collect_polymarket_gamma_markets_by_id(
@@ -152,9 +180,12 @@ def collect_polymarket_binary_snapshots_for_rules(
     max_workers: int = 1,
     skip_book_errors: bool = False,
     errors: Optional[list] = None,
+    expand_neg_risk_groups: bool = True,
 ) -> int:
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     market_ids = market_ids_from_rule_file(rules_path)
+    if expand_neg_risk_groups:
+        market_ids = expand_market_ids_with_neg_risk_groups(markets, market_ids)
 
     def fetch_book(token_id: str) -> dict:
         book_params = urlencode({"token_id": token_id})
@@ -183,6 +214,7 @@ def collect_polymarket_binary_snapshots_for_rules_loop(
     collect_once: Callable[[Path, Path, Path, float, Optional[str], int], int] = collect_polymarket_binary_snapshots_for_rules,
     sleep: Callable[[float], None] = time.sleep,
     max_workers: int = 1,
+    expand_neg_risk_groups: bool = True,
 ) -> int:
     if iterations < 1:
         raise ValueError("iterations must be at least 1")
@@ -191,7 +223,15 @@ def collect_polymarket_binary_snapshots_for_rules_loop(
 
     total = 0
     for index in range(iterations):
-        total += collect_once(path, gamma_path, rules_path, timeout, proxy, max_workers)
+        total += collect_once(
+            path,
+            gamma_path,
+            rules_path,
+            timeout,
+            proxy,
+            max_workers,
+            expand_neg_risk_groups=expand_neg_risk_groups,
+        )
         if index < iterations - 1 and interval_seconds > 0:
             sleep(interval_seconds)
     return total
@@ -437,6 +477,30 @@ def market_ids_from_rule_file(path: Path) -> set:
         _add_if_present(market_ids, candidate, "market_a_id")
         _add_if_present(market_ids, candidate, "market_b_id")
     return market_ids
+
+
+def expand_market_ids_with_neg_risk_groups(markets: Iterable[dict], market_ids: Iterable[str]) -> set:
+    selected_market_ids = {str(market_id) for market_id in market_ids if market_id}
+    if not selected_market_ids:
+        return selected_market_ids
+
+    markets_by_id = {}
+    group_ids = set()
+    for market in markets:
+        market_id = str(market.get("id") or market.get("conditionId") or "")
+        if not market_id:
+            continue
+        markets_by_id[market_id] = market
+        if market_id in selected_market_ids:
+            group_id = str(market.get("negRiskMarketID") or "").strip()
+            if group_id:
+                group_ids.add(group_id)
+
+    expanded = set(selected_market_ids)
+    for market_id, market in markets_by_id.items():
+        if str(market.get("negRiskMarketID") or "").strip() in group_ids:
+            expanded.add(market_id)
+    return expanded
 
 
 def _add_if_present(target: set, row: dict, key: str) -> None:

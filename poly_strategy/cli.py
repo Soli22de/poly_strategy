@@ -13,7 +13,7 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_rules,
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
-    collect_polymarket_gamma,
+    collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
     write_sample_snapshot,
 )
@@ -85,7 +85,14 @@ def main(argv=None) -> int:
                     args.proxy,
                 )
             else:
-                count = collect_polymarket_gamma(Path(args.out), args.limit, args.timeout, args.proxy)
+                count = collect_polymarket_gamma_pages(
+                    Path(args.out),
+                    args.limit,
+                    args.pages,
+                    args.timeout,
+                    args.proxy,
+                    args.offset,
+                )
             print(f"wrote={count} out={args.out}")
             return 0
         if args.command == "collect-polymarket-binaries":
@@ -110,6 +117,7 @@ def main(argv=None) -> int:
                 args.interval,
                 args.iterations,
                 max_workers=args.book_workers,
+                expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -123,6 +131,7 @@ def main(argv=None) -> int:
                     args.timeout,
                     args.proxy,
                     args.book_workers,
+                    expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
                 )
                 result = replay_ndjson(
                     Path(args.out),
@@ -205,6 +214,7 @@ def main(argv=None) -> int:
                 args.timeout,
                 args.proxy,
                 args.book_workers,
+                expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
             )
             result = replay_ndjson(
                 Path(args.snapshots_out),
@@ -321,7 +331,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     collect = subparsers.add_parser("collect-polymarket", help="collect Polymarket public data")
     collect.add_argument("--out", required=True, help="output NDJSON path")
-    collect.add_argument("--limit", type=int, default=100, help="Gamma market count when no token IDs are provided")
+    collect.add_argument("--limit", type=int, default=100, help="Gamma market count per page when no token IDs are provided")
+    collect.add_argument("--pages", type=int, default=1, help="Gamma pages to collect when no token or market IDs are provided")
+    collect.add_argument("--offset", type=int, default=0, help="starting Gamma offset when collecting pages")
     collect.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     collect.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     collect.add_argument("--token-id", action="append", help="CLOB token ID to collect; can be repeated")
@@ -351,6 +363,11 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_rule_markets.add_argument("--iterations", type=int, default=1, help="number of collection iterations")
     collect_rule_markets.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
     collect_rule_markets.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    collect_rule_markets.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not automatically collect known markets sharing a referenced negRiskMarketID",
+    )
 
     monitor = subparsers.add_parser("monitor-rules", help="collect rule markets repeatedly and replay opportunities")
     monitor.add_argument("--out", required=True, help="output NDJSON path")
@@ -366,6 +383,11 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
     monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
     monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
+    monitor.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not automatically collect known markets sharing a referenced negRiskMarketID",
+    )
 
     paper_monitor = subparsers.add_parser(
         "paper-monitor",
@@ -387,6 +409,11 @@ def _build_parser() -> argparse.ArgumentParser:
     paper_monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
     paper_monitor.add_argument("--skip-book-errors", action="store_true", help="skip markets whose CLOB books fail")
     paper_monitor.add_argument("--continue-on-error", action="store_true", help="record iteration errors and keep looping")
+    paper_monitor.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not automatically collect known markets sharing a referenced negRiskMarketID",
+    )
     paper_monitor.add_argument(
         "--max-opportunities-per-iteration",
         type=int,
@@ -452,6 +479,11 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     execute_once.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     execute_once.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    execute_once.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not automatically collect known markets sharing a referenced negRiskMarketID",
+    )
     execute_once.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     execute_once.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
     execute_once.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
@@ -541,6 +573,7 @@ def _run_paper_monitor(args) -> int:
                 args.book_workers,
                 skip_book_errors=args.skip_book_errors,
                 errors=collection_errors,
+                expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
             )
             total_snapshots_collected += snapshots_collected
             phase = "scan"

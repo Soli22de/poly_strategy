@@ -7,7 +7,9 @@ from poly_strategy.collectors import (
     binary_snapshot_rows_from_gamma_markets,
     collect_polymarket_binary_snapshots_for_markets,
     collect_polymarket_binary_snapshots_loop,
+    collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
+    expand_market_ids_with_neg_risk_groups,
     market_ids_from_rule_file,
     raw_gamma_markets_from_ndjson,
 )
@@ -39,6 +41,40 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(calls[0][1], 7)
         self.assertEqual(calls[0][2], "127.0.0.1:10808")
         self.assertEqual([row["type"] for row in rows], ["raw_polymarket_gamma_market", "raw_polymarket_gamma_market"])
+
+    def test_collect_polymarket_gamma_pages_uses_offsets(self):
+        calls = []
+
+        def collect_page(path, limit, timeout, proxy, offset):
+            calls.append((path, limit, timeout, proxy, offset))
+            return 2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+
+            count = collect_polymarket_gamma_pages(
+                path,
+                limit=100,
+                pages=3,
+                timeout=7,
+                proxy="127.0.0.1:10808",
+                start_offset=50,
+                collect_page=collect_page,
+            )
+
+        self.assertEqual(count, 6)
+        self.assertEqual([call[4] for call in calls], [50, 150, 250])
+
+    def test_expand_market_ids_with_neg_risk_groups_adds_known_group_members(self):
+        markets = [
+            {"id": "a", "negRiskMarketID": "group-1"},
+            {"id": "b", "negRiskMarketID": "group-1"},
+            {"id": "c", "negRiskMarketID": "group-2"},
+        ]
+
+        market_ids = expand_market_ids_with_neg_risk_groups(markets, {"a"})
+
+        self.assertEqual(market_ids, {"a", "b"})
 
     def test_binary_snapshot_rows_from_gamma_markets_fetches_yes_and_no_books(self):
         market = {

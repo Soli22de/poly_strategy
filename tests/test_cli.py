@@ -153,6 +153,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(collect.call_args.args[3], "127.0.0.1:10808")
         self.assertIn("wrote=2", stdout.getvalue())
 
+    def test_collect_polymarket_can_fetch_gamma_market_pages(self):
+        with patch("poly_strategy.cli.collect_polymarket_gamma_pages", return_value=200) as collect:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "collect-polymarket",
+                        "--out",
+                        "data/gamma.ndjson",
+                        "--limit",
+                        "100",
+                        "--pages",
+                        "2",
+                        "--offset",
+                        "50",
+                        "--timeout",
+                        "7",
+                        "--proxy",
+                        "127.0.0.1:10808",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        args = collect.call_args.args
+        self.assertEqual(str(args[0]), "data/gamma.ndjson")
+        self.assertEqual(args[1], 100)
+        self.assertEqual(args[2], 2)
+        self.assertEqual(args[3], 7.0)
+        self.assertEqual(args[4], "127.0.0.1:10808")
+        self.assertEqual(args[5], 50)
+        self.assertIn("wrote=200", stdout.getvalue())
+
     def test_collect_rule_markets_passes_gamma_and_rules_to_targeted_collector(self):
         with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules_loop", return_value=4) as collect:
             stdout = io.StringIO()
@@ -189,6 +222,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[5], 3.0)
         self.assertEqual(args[6], 2)
         self.assertEqual(collect.call_args.kwargs["max_workers"], 5)
+        self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         self.assertIn("wrote=4", stdout.getvalue())
 
     def test_monitor_rules_collects_targeted_snapshots_and_replays(self):
@@ -223,6 +257,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 3)
+        self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         replay.assert_called_once()
         self.assertEqual(replay.call_args.kwargs["min_net_edge"], 0.002)
         self.assertEqual(replay.call_args.kwargs["max_capital_per_trade"], 20.0)
@@ -281,6 +316,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 4)
+        self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         self.assertTrue(collect.call_args.kwargs["skip_book_errors"])
         self.assertEqual(rows[0]["type"], "paper_monitor_iteration")
         self.assertEqual(rows[0]["snapshots_collected"], 1)
@@ -562,7 +598,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("wrote=0", stdout.getvalue())
 
     def test_execute_rules_once_refreshes_before_planning(self):
-        def collect_once(path, gamma, rules, timeout, proxy, max_workers):
+        def collect_once(path, gamma, rules, timeout, proxy, max_workers, **kwargs):
             path.write_text(
                 json.dumps(
                     {
@@ -612,6 +648,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 4)
+        self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["orders"][0]["token_id"], "yes-token")
         self.assertIn("snapshots=1 plans=1", stdout.getvalue())
