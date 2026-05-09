@@ -468,3 +468,107 @@ It detects the simplest structure opportunity:
 ```text
 buy YES + buy NO < 1 - costs
 ```
+
+## Current Production Dry-Run Loop
+
+The current MVP is designed to stay dry-run by default. It widens the realtime watchlist, refreshes market metadata incrementally, explains zero-opportunity periods, emits alerts, and builds risk-checked execution plans without submitting live orders.
+
+Refresh Gamma metadata, reuse the rule cache, rebuild a larger prioritized watchlist, and restart the realtime monitor only if the watchlist changes:
+
+```bash
+SKIP_LLM=1 \
+LIMIT=100 \
+PAGES=5 \
+INCLUDE_TOP_MARKETS=150 \
+INCLUDE_TOP_NEG_RISK_GROUPS=25 \
+MAX_WATCHLIST_MARKETS=250 \
+scripts/refresh_discovery_watchlist.sh
+```
+
+Run a realtime-specific analysis report explaining why opportunities are absent or close:
+
+```bash
+.venv/bin/python -m poly_strategy.cli monitor-analyze data/realtime-monitor-24h-v1.jsonl \
+  --snapshots data/realtime-monitor-24h-v1-snapshots.ndjson \
+  --rules data/gpt55-candidate-rules-all.json \
+  --gamma data/polymarket-gamma.ndjson \
+  --near-miss-min-net-edge 0.002 \
+  --near-miss-top 20 \
+  --out data/realtime-monitor-24h-v1-analysis.json
+```
+
+Turn alerts into refreshed dry-run execution plans with pretrade and risk checks:
+
+```bash
+scripts/run_monitor_alerts_once.sh
+scripts/run_execution_dry_run_once.sh
+```
+
+Send alerts to notification sinks. The script reads `ALERT_WEBHOOK_URL`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, and `DISCORD_WEBHOOK_URL` when present:
+
+```bash
+DRY_RUN=1 ALERT_WEBHOOK_URL=https://example.test/hook scripts/run_notify_alerts_once.sh
+```
+
+Install persistent macOS LaunchAgents for realtime monitoring, alert extraction, discovery refresh, external signal refresh, alert execution dry-run, and notifications:
+
+```bash
+DRY_RUN=1 scripts/install_launch_agents.sh   # preview
+scripts/install_launch_agents.sh             # install and bootstrap
+```
+
+Rotate large snapshot/update/log files while preserving report JSONL by default:
+
+```bash
+DRY_RUN=1 MAX_BYTES=104857600 scripts/rotate_data.sh
+MAX_BYTES=104857600 RETENTION_DAYS=14 scripts/rotate_data.sh
+```
+
+## Kalshi / Cross-Platform Framework
+
+Collect Kalshi market metadata and orderbooks, convert them to the local binary snapshot format, and generate Polymarket/Kalshi text-match candidates:
+
+```bash
+.venv/bin/python -m poly_strategy.cli collect-kalshi \
+  --out data/kalshi-markets.ndjson \
+  --limit 100 \
+  --proxy 127.0.0.1:10808
+
+.venv/bin/python -m poly_strategy.cli collect-kalshi-orderbooks \
+  --out data/kalshi-orderbooks.ndjson \
+  --ticker KXEXAMPLE \
+  --proxy 127.0.0.1:10808
+
+.venv/bin/python -m poly_strategy.cli kalshi-snapshots \
+  --orderbooks data/kalshi-orderbooks.ndjson \
+  --out data/kalshi-snapshots.ndjson
+
+.venv/bin/python -m poly_strategy.cli match-cross-platform \
+  --polymarket-gamma data/polymarket-gamma.ndjson \
+  --kalshi-markets data/kalshi-markets.ndjson \
+  --out data/cross-platform-matches.json \
+  --signals-out data/external-signals.ndjson
+```
+
+Cross-platform matches are candidates only. They must still pass semantic verification, fee/funding checks, and dry-run execution risk checks before any live system is considered.
+
+## Risk Controls
+
+Execution planning adds `pretrade_check` and `risk_check` rows. Live posting remains blocked unless `--live --allow-live` are both passed and `POLY_STRATEGY_ALLOW_LIVE=1` plus required private keys are present.
+
+Useful risk flags:
+
+```bash
+.venv/bin/python -m poly_strategy.cli execute-latest data/realtime-alert-execution-refresh.ndjson \
+  --rules data/gpt55-candidate-rules-all.json \
+  --gamma data/polymarket-gamma.ndjson \
+  --out data/checked-plans.ndjson \
+  --max-trade-notional 10 \
+  --max-daily-loss 25 \
+  --max-daily-orders 20 \
+  --kill-switch data/KILL_SWITCH \
+  --require-pretrade-pass \
+  --require-risk-pass
+```
+
+Create `data/KILL_SWITCH` to block new plans immediately. Risk state is read from `--risk-state` when supplied and supports `date`, `orders`, `realized_loss`, and `pause_until`.

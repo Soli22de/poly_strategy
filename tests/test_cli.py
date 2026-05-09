@@ -1216,6 +1216,7 @@ class CliTests(unittest.TestCase):
             snapshot_out_path=snapshots,
             max_messages=2,
             snapshot_interval_seconds=3.0,
+            ws_max_size=4194304,
             url="wss://example.test/ws",
         )
         self.assertIn("messages=2", stdout.getvalue())
@@ -1300,6 +1301,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(kwargs["stale_timeout_seconds"], 30.0)
         self.assertEqual(kwargs["reconnect_delay_seconds"], 1.0)
         self.assertEqual(kwargs["max_reconnects"], 3)
+        self.assertEqual(kwargs["ws_max_size"], 4194304)
         self.assertEqual(kwargs["min_net_edge"], 0.002)
         self.assertEqual(kwargs["min_paper_roi"], 0.01)
         self.assertEqual(kwargs["min_run_observations"], 2)

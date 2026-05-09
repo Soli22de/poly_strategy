@@ -47,7 +47,12 @@ from poly_strategy.monitoring import IncrementalReplayState, stable_current_oppo
 from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
-from poly_strategy.realtime import POLYMARKET_MARKET_WS_URL, monitor_polymarket_watchlist, stream_polymarket_watchlist
+from poly_strategy.realtime import (
+    DEFAULT_WS_MAX_SIZE,
+    POLYMARKET_MARKET_WS_URL,
+    monitor_polymarket_watchlist,
+    stream_polymarket_watchlist,
+)
 from poly_strategy.risk import risk_check_execution_plan
 from poly_strategy.rule_discovery import discover_rules
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
@@ -482,6 +487,7 @@ def main(argv=None) -> int:
                 snapshot_out_path=Path(args.snapshots_out) if args.snapshots_out else None,
                 max_messages=args.max_messages,
                 snapshot_interval_seconds=args.snapshot_interval,
+                ws_max_size=args.ws_max_size,
                 url=args.url,
             )
             print(f"messages={count} out={args.out}")
@@ -509,6 +515,7 @@ def main(argv=None) -> int:
                 min_run_observations=args.min_run_observations,
                 min_run_seconds=args.min_run_seconds,
                 max_opportunities_per_iteration=args.max_opportunities_per_iteration,
+                ws_max_size=args.ws_max_size,
                 url=args.url,
                 progress=_print_realtime_monitor_progress,
             )
@@ -949,6 +956,7 @@ def _build_parser() -> argparse.ArgumentParser:
     stream_watchlist.add_argument("--snapshots-out", help="append backtestable binary snapshots here")
     stream_watchlist.add_argument("--snapshot-interval", type=float, default=2.0, help="seconds between snapshot writes")
     stream_watchlist.add_argument("--max-messages", type=int, help="stop after this many raw WebSocket messages")
+    stream_watchlist.add_argument("--ws-max-size", type=int, default=DEFAULT_WS_MAX_SIZE, help="maximum WebSocket message bytes")
     stream_watchlist.add_argument("--url", default=POLYMARKET_MARKET_WS_URL, help="Polymarket market WebSocket URL")
 
     realtime_monitor = subparsers.add_parser(
@@ -965,6 +973,7 @@ def _build_parser() -> argparse.ArgumentParser:
     realtime_monitor.add_argument("--stale-timeout", type=float, default=30.0, help="reconnect if no WS messages arrive for this many seconds")
     realtime_monitor.add_argument("--reconnect-delay", type=float, default=2.0, help="seconds to wait before reconnecting after a WS error")
     realtime_monitor.add_argument("--max-reconnects", type=int, help="maximum reconnect attempts before failing; default is unlimited")
+    realtime_monitor.add_argument("--ws-max-size", type=int, default=DEFAULT_WS_MAX_SIZE, help="maximum WebSocket message bytes")
     realtime_monitor.add_argument("--max-messages", type=int, help="stop after this many raw WebSocket messages")
     realtime_monitor.add_argument("--max-iterations", type=int, help="stop after this many scan iterations")
     realtime_monitor.add_argument("--url", default=POLYMARKET_MARKET_WS_URL, help="Polymarket market WebSocket URL")

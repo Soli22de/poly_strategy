@@ -14,6 +14,7 @@ from poly_strategy.paper import opportunity_to_row, select_paper_trades, trade_t
 POLYMARKET_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 KALSHI_PROD_WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 KALSHI_DEMO_WS_URL = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+DEFAULT_WS_MAX_SIZE = 4 * 1024 * 1024
 
 
 class RealtimeStaleError(RuntimeError):
@@ -179,6 +180,7 @@ def stream_polymarket_watchlist(
     snapshot_out_path: Optional[Path] = None,
     max_messages: Optional[int] = None,
     snapshot_interval_seconds: Optional[float] = 2.0,
+    ws_max_size: Optional[int] = DEFAULT_WS_MAX_SIZE,
     url: str = POLYMARKET_MARKET_WS_URL,
 ) -> int:
     return asyncio.run(
@@ -188,6 +190,7 @@ def stream_polymarket_watchlist(
             snapshot_out_path=snapshot_out_path,
             max_messages=max_messages,
             snapshot_interval_seconds=snapshot_interval_seconds,
+            ws_max_size=ws_max_size,
             url=url,
         )
     )
@@ -215,6 +218,7 @@ def monitor_polymarket_watchlist(
     min_run_observations: int = 1,
     min_run_seconds: float = 0.0,
     max_opportunities_per_iteration: int = 10,
+    ws_max_size: Optional[int] = DEFAULT_WS_MAX_SIZE,
     url: str = POLYMARKET_MARKET_WS_URL,
     progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
@@ -241,6 +245,7 @@ def monitor_polymarket_watchlist(
             min_run_observations=min_run_observations,
             min_run_seconds=min_run_seconds,
             max_opportunities_per_iteration=max_opportunities_per_iteration,
+            ws_max_size=ws_max_size,
             url=url,
             progress=progress,
         )
@@ -253,6 +258,7 @@ async def _stream_polymarket_watchlist(
     snapshot_out_path: Optional[Path],
     max_messages: Optional[int],
     snapshot_interval_seconds: Optional[float],
+    ws_max_size: Optional[int],
     url: str,
 ) -> int:
     if max_messages is not None and max_messages < 1:
@@ -273,7 +279,7 @@ async def _stream_polymarket_watchlist(
 
     count = 0
     last_snapshot_at = None
-    async with websockets.connect(url) as websocket:
+    async with websockets.connect(url, max_size=ws_max_size) as websocket:
         await websocket.send(json.dumps(payload))
         with out_path.open("a") as update_handle:
             snapshot_handle = snapshot_out_path.open("a") if snapshot_out_path else None
@@ -322,6 +328,7 @@ async def _monitor_polymarket_watchlist(
     min_run_observations: int,
     min_run_seconds: float,
     max_opportunities_per_iteration: int,
+    ws_max_size: Optional[int],
     url: str,
     progress: Optional[Callable[[dict], None]],
 ) -> dict:
@@ -332,6 +339,7 @@ async def _monitor_polymarket_watchlist(
         stale_timeout_seconds=stale_timeout_seconds,
         reconnect_delay_seconds=reconnect_delay_seconds,
         max_reconnects=max_reconnects,
+        ws_max_size=ws_max_size,
         min_run_observations=min_run_observations,
         min_run_seconds=min_run_seconds,
         max_opportunities_per_iteration=max_opportunities_per_iteration,
@@ -371,7 +379,7 @@ async def _monitor_polymarket_watchlist(
             last_message_at = connection_started_at
             _write_rows(report_handle, [_connection_event_row("connecting", connection_count, reconnect_count)])
             try:
-                async with websockets.connect(url) as websocket:
+                async with websockets.connect(url, max_size=ws_max_size) as websocket:
                     await websocket.send(json.dumps(payload))
                     _write_rows(report_handle, [_connection_event_row("connected", connection_count, reconnect_count)])
                     while True:
@@ -485,6 +493,7 @@ def _validate_realtime_limits(
     stale_timeout_seconds: Optional[float],
     reconnect_delay_seconds: float,
     max_reconnects: Optional[int],
+    ws_max_size: Optional[int],
     min_run_observations: int,
     min_run_seconds: float,
     max_opportunities_per_iteration: int,
@@ -501,6 +510,8 @@ def _validate_realtime_limits(
         raise ValueError("reconnect_delay_seconds must be non-negative")
     if max_reconnects is not None and max_reconnects < 0:
         raise ValueError("max_reconnects must be non-negative")
+    if ws_max_size is not None and ws_max_size < 1:
+        raise ValueError("ws_max_size must be at least 1 or None")
     if min_run_observations < 1:
         raise ValueError("min_run_observations must be at least 1")
     if min_run_seconds < 0:

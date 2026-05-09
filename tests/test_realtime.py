@@ -150,6 +150,7 @@ class RealtimeTests(unittest.TestCase):
             ]
         ]
         fake_socket = _FakeWebSocket(messages)
+        connect_kwargs = []
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -177,10 +178,11 @@ class RealtimeTests(unittest.TestCase):
             rules.write_text(json.dumps({}))
             progress_rows = []
 
-            with patch.dict(
-                sys.modules,
-                {"websockets": SimpleNamespace(connect=lambda url: fake_socket)},
-            ):
+            def connect(url, **kwargs):
+                connect_kwargs.append(kwargs)
+                return fake_socket
+
+            with patch.dict(sys.modules, {"websockets": SimpleNamespace(connect=connect)}):
                 summary = monitor_polymarket_watchlist(
                     watchlist,
                     report,
@@ -209,6 +211,7 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(report_rows[1]["event"], "connected")
         self.assertEqual(report_rows[2]["type"], "realtime_monitor_iteration")
         self.assertEqual(report_rows[3]["type"], "realtime_monitor_summary")
+        self.assertEqual(connect_kwargs[0]["max_size"], 4 * 1024 * 1024)
         self.assertEqual(len(update_rows), 2)
         self.assertEqual(snapshot_rows[0]["type"], "binary_snapshot")
         self.assertEqual(json.loads(fake_socket.sent[0])["assets_ids"], ["yes-token", "no-token"])
@@ -236,7 +239,7 @@ class RealtimeTests(unittest.TestCase):
         ]
         sockets = [_FailingWebSocket(RuntimeError("boom")), _FakeWebSocket(good_messages)]
 
-        def connect(url):
+        def connect(url, **kwargs):
             return sockets.pop(0)
 
         with tempfile.TemporaryDirectory() as tmp:
