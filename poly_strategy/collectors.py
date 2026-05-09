@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 
@@ -49,6 +49,42 @@ def collect_polymarket_gamma(path: Path, limit: int, timeout: float, proxy: Opti
                 + "\n"
             )
     return len(rows)
+
+
+def collect_polymarket_gamma_markets_by_id(
+    path: Path,
+    market_ids: Iterable[str],
+    timeout: float,
+    proxy: Optional[str] = None,
+    fetch_json: Optional[Callable[[str, float, Optional[str]], dict]] = None,
+) -> int:
+    fetch = fetch_json or _fetch_json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    seen = set()
+    with path.open("a") as handle:
+        for market_id in market_ids:
+            normalized_market_id = str(market_id)
+            if not normalized_market_id or normalized_market_id in seen:
+                continue
+            seen.add(normalized_market_id)
+            row = fetch(f"{GAMMA_MARKETS_URL}/{quote(normalized_market_id)}", timeout, proxy)
+            if not isinstance(row, dict):
+                raise RuntimeError("unexpected Polymarket Gamma market response")
+            handle.write(
+                json.dumps(
+                    {
+                        "ts": _utc_now(),
+                        "type": "raw_polymarket_gamma_market",
+                        "market_id": str(row.get("id") or row.get("conditionId") or normalized_market_id),
+                        "raw": row,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            count += 1
+    return count
 
 
 def collect_polymarket_books(path: Path, token_ids: Iterable[str], timeout: float, proxy: Optional[str] = None) -> int:

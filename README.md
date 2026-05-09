@@ -241,6 +241,16 @@ Collect backtestable binary snapshots by combining Gamma market discovery with Y
 python3 -m poly_strategy.cli collect-polymarket-binaries --out data/live-binaries.ndjson --limit 50 --timeout 12 --proxy 127.0.0.1:10808
 ```
 
+Refresh Gamma metadata for specific market IDs when a near-miss candidate is missing text metadata:
+
+```bash
+python3 -m poly_strategy.cli collect-polymarket \
+  --out data/polymarket-gamma.ndjson \
+  --market-id 544094 \
+  --market-id 544095 \
+  --proxy 127.0.0.1:10808
+```
+
 Then replay them:
 
 ```bash

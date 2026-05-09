@@ -14,6 +14,7 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
     collect_polymarket_gamma,
+    collect_polymarket_gamma_markets_by_id,
     write_sample_snapshot,
 )
 from poly_strategy.openai_rules import (
@@ -72,8 +73,17 @@ def main(argv=None) -> int:
                 )
             return 0
         if args.command == "collect-polymarket":
+            if args.token_id and args.market_id:
+                raise ValueError("--token-id and --market-id cannot be used together")
             if args.token_id:
                 count = collect_polymarket_books(Path(args.out), args.token_id, args.timeout, args.proxy)
+            elif args.market_id:
+                count = collect_polymarket_gamma_markets_by_id(
+                    Path(args.out),
+                    args.market_id,
+                    args.timeout,
+                    args.proxy,
+                )
             else:
                 count = collect_polymarket_gamma(Path(args.out), args.limit, args.timeout, args.proxy)
             print(f"wrote={count} out={args.out}")
@@ -314,6 +324,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     collect.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     collect.add_argument("--token-id", action="append", help="CLOB token ID to collect; can be repeated")
+    collect.add_argument("--market-id", action="append", help="Gamma market ID to collect; can be repeated")
 
     collect_binaries = subparsers.add_parser(
         "collect-polymarket-binaries",

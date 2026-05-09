@@ -7,12 +7,39 @@ from poly_strategy.collectors import (
     binary_snapshot_rows_from_gamma_markets,
     collect_polymarket_binary_snapshots_for_markets,
     collect_polymarket_binary_snapshots_loop,
+    collect_polymarket_gamma_markets_by_id,
     market_ids_from_rule_file,
     raw_gamma_markets_from_ndjson,
 )
 
 
 class CollectorTests(unittest.TestCase):
+    def test_collect_polymarket_gamma_markets_by_id_appends_raw_rows(self):
+        calls = []
+
+        def fetch_json(url, timeout, proxy):
+            calls.append((url, timeout, proxy))
+            return {"id": url.rsplit("/", 1)[-1], "question": "Sample?"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+
+            count = collect_polymarket_gamma_markets_by_id(
+                path,
+                ["a market", "a market", "b"],
+                timeout=7,
+                proxy="127.0.0.1:10808",
+                fetch_json=fetch_json,
+            )
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("a%20market", calls[0][0])
+        self.assertEqual(calls[0][1], 7)
+        self.assertEqual(calls[0][2], "127.0.0.1:10808")
+        self.assertEqual([row["type"] for row in rows], ["raw_polymarket_gamma_market", "raw_polymarket_gamma_market"])
+
     def test_binary_snapshot_rows_from_gamma_markets_fetches_yes_and_no_books(self):
         market = {
             "id": "123",

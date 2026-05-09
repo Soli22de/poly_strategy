@@ -125,6 +125,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(collect.call_args.kwargs["max_workers"], 4)
         self.assertIn("wrote=3", stdout.getvalue())
 
+    def test_collect_polymarket_can_fetch_gamma_markets_by_id(self):
+        with patch("poly_strategy.cli.collect_polymarket_gamma_markets_by_id", return_value=2) as collect:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "collect-polymarket",
+                        "--out",
+                        "data/gamma.ndjson",
+                        "--market-id",
+                        "544094",
+                        "--market-id",
+                        "544095",
+                        "--timeout",
+                        "7",
+                        "--proxy",
+                        "127.0.0.1:10808",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        self.assertEqual(str(collect.call_args.args[0]), "data/gamma.ndjson")
+        self.assertEqual(collect.call_args.args[1], ["544094", "544095"])
+        self.assertEqual(collect.call_args.args[2], 7.0)
+        self.assertEqual(collect.call_args.args[3], "127.0.0.1:10808")
+        self.assertIn("wrote=2", stdout.getvalue())
+
     def test_collect_rule_markets_passes_gamma_and_rules_to_targeted_collector(self):
         with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules_loop", return_value=4) as collect:
             stdout = io.StringIO()
