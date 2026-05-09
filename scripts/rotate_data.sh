@@ -10,6 +10,14 @@ RETENTION_DAYS="${RETENTION_DAYS:-14}"
 DRY_RUN="${DRY_RUN:-0}"
 INCLUDE_REPORTS="${INCLUDE_REPORTS:-0}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+LOCK_DIR="$DATA_DIR/.rotate.lock"
+
+mkdir -p "$DATA_DIR"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "rotation_skipped reason=lock_exists lock=$LOCK_DIR"
+  exit 0
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 patterns=(
   "$DATA_DIR/*snapshots*.ndjson"

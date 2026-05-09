@@ -24,7 +24,7 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Cross-platform matches must be semantic-verified before they can become actionable dry-run signals.
   - [x] Kalshi/Polymarket cross-platform output must stop hardcoding executable YES/NO legs for unverified matches.
   - [x] Execution must write live-attempt/reconciliation state into the risk ledger after real submissions.
-  - [ ] Data rotation must run as a persistent LaunchAgent, not only as a manual script.
+  - [x] Data rotation must run as a persistent LaunchAgent, not only as a manual script.
   - [ ] Rule discovery must broaden beyond deterministic neg-risk pairs with topic clustering and safer non-neg-risk candidates.
 - [x] Expand opportunity coverage beyond the current small watchlist.
   - [x] Rank high-liquidity/high-relevance Polymarket markets.
@@ -62,9 +62,9 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Retain reports and alert logs.
   - [x] Guard against disk exhaustion.
 - [ ] Background production data maintenance.
-  - [ ] Add a persistent macOS LaunchAgent for `scripts/rotate_data.sh`.
+  - [x] Add a persistent macOS LaunchAgent for `scripts/rotate_data.sh`.
   - [ ] Install/reload it with the existing LaunchAgent installer.
-  - [ ] Smoke-test rotation in dry-run mode and rotate current oversized snapshot data.
+  - [x] Smoke-test rotation in dry-run mode and rotate current oversized snapshot data.
 - [x] Convert background jobs to persistent LaunchAgents.
   - [x] Realtime monitor plist.
   - [x] Alert loop plist.
