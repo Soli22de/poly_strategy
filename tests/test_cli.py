@@ -815,6 +815,36 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["by_source"][0]["source"], "oddpool")
         self.assertIn("wrote=1", stdout.getvalue())
 
+    def test_build_watchlist_command_writes_token_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma.ndjson"
+            rules = Path(tmp) / "rules.json"
+            out = Path(tmp) / "watchlist.json"
+            gamma.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_polymarket_gamma_market",
+                        "market_id": "a",
+                        "raw": {
+                            "id": "a",
+                            "question": "A?",
+                            "clobTokenIds": json.dumps(["a-yes", "a-no"]),
+                        },
+                    }
+                )
+                + "\n"
+            )
+            rules.write_text(json.dumps({"mutually_exclusive": [{"first": "a", "second": "a"}]}))
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["build-watchlist", "--gamma", str(gamma), "--rules", str(rules), "--out", str(out)])
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["markets"][0]["yes_token_id"], "a-yes")
+        self.assertIn("wrote=1", stdout.getvalue())
+
     def test_discover_rules_command_requires_model(self):
         stderr = io.StringIO()
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):

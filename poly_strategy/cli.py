@@ -37,6 +37,7 @@ from poly_strategy.monitoring import IncrementalReplayState, stable_current_oppo
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.rule_discovery import discover_rules
+from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
 
 def main(argv=None) -> int:
@@ -333,6 +334,15 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
+        if args.command == "build-watchlist":
+            rows = build_polymarket_watchlist(
+                Path(args.gamma),
+                Path(args.rules),
+                expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+            )
+            count = write_watchlist(rows, Path(args.out))
+            print(f"wrote={count} out={args.out}")
+            return 0
     except (
         OSError,
         URLError,
@@ -601,6 +611,16 @@ def _build_parser() -> argparse.ArgumentParser:
     signal_report = subparsers.add_parser("external-signal-report", help="summarize normalized external signals")
     signal_report.add_argument("path", help="external signal NDJSON path")
     signal_report.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
+
+    watchlist = subparsers.add_parser("build-watchlist", help="write a standardized Polymarket token watchlist")
+    watchlist.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    watchlist.add_argument("--rules", required=True, help="rule JSON path")
+    watchlist.add_argument("--out", required=True, help="output watchlist JSON path")
+    watchlist.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not include known markets sharing a referenced negRiskMarketID",
+    )
 
     return parser
 

@@ -30,6 +30,16 @@ Use a local HTTP proxy if direct access is unstable:
 python3 -m poly_strategy.cli collect-polymarket --out data/polymarket-gamma.ndjson --limit 20 --timeout 10 --proxy 127.0.0.1:10808
 ```
 
+Collect multiple Gamma pages when building a broader metadata cache:
+
+```bash
+python3 -m poly_strategy.cli collect-polymarket \
+  --out data/polymarket-gamma.ndjson \
+  --limit 100 \
+  --pages 2 \
+  --proxy 127.0.0.1:10808
+```
+
 Try collecting specific Polymarket CLOB books:
 
 ```bash
@@ -132,6 +142,17 @@ python3 -m poly_strategy.cli collect-rule-markets \
   --book-workers 8
 ```
 
+By default, targeted collection expands any referenced Polymarket `negRiskMarketID` to every known market in that same group. This is required for complete group baskets such as `sum(all YES) < 1`. Pass `--no-expand-neg-risk-groups` only when debugging a narrow rule file.
+
+Build the standardized token watchlist that a future WebSocket subscriber should use:
+
+```bash
+python3 -m poly_strategy.cli build-watchlist \
+  --gamma data/polymarket-gamma.ndjson \
+  --rules rules/candidate-implications.json \
+  --out data/watchlist.json
+```
+
 Watch those markets repeatedly and replay opportunities:
 
 ```bash
@@ -163,6 +184,7 @@ python3 -m poly_strategy.cli paper-monitor \
   --min-net-edge 0.002 \
   --max-capital-per-trade 20 \
   --bankroll 100 \
+  --min-paper-roi 0.01 \
   --min-run-observations 2 \
   --min-run-seconds 3 \
   --skip-book-errors \
@@ -213,11 +235,28 @@ Build dry-run execution plans from the latest snapshot batch:
 python3 -m poly_strategy.cli execute-latest data/rule-monitor.ndjson \
   --rules rules/candidate-implications.json \
   --min-net-edge 0.002 \
+  --min-paper-roi 0.01 \
   --min-run-observations 2 \
   --min-run-seconds 3 \
   --max-capital-per-trade 20 \
   --bankroll 100 \
+  --require-single-level \
+  --require-pretrade-pass \
   --out data/execution-plans.ndjson
+```
+
+Execution plans include a `pretrade_check` block with token presence, BUY-only validation, leg count, worst-price checks, single-level fill checks, paper ROI, and active run details. Use `--max-leg-count`, `--max-worst-price`, `--require-single-level`, and `--require-pretrade-pass` to turn these checks into hard gates.
+
+Normalize alerts from an external scanner such as Oddpool into the local signal format. These alerts are candidates only; the local scanner still has to verify orderbook depth and rule semantics before any paper or execution plan is created:
+
+```bash
+python3 -m poly_strategy.cli ingest-external-signals \
+  --source oddpool \
+  --input data/oddpool-signals.json \
+  --out data/external-signals.ndjson
+
+python3 -m poly_strategy.cli external-signal-report data/external-signals.ndjson \
+  --out data/external-signal-report.json
 ```
 
 For a safer pre-trade path, refresh the targeted rule-market books immediately before planning:
