@@ -509,7 +509,8 @@ class CliTests(unittest.TestCase):
             row = json.loads(out.read_text())
 
         self.assertEqual(code, 0)
-        self.assertEqual(row["type"], "paper_monitor_analysis")
+        self.assertEqual(row["type"], "monitor_analysis")
+        self.assertEqual(row["monitor_kind"], "paper")
         self.assertEqual(row["iteration_count"], 1)
         self.assertEqual(row["error_iteration_count"], 1)
         self.assertEqual(row["current_opportunity_observations"], 1)
@@ -523,6 +524,63 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["near_miss"]["gamma_path"], str(gamma))
         self.assertEqual(row["near_miss_rejection_summary"]["neg_risk_group_count"], 0)
         self.assertGreater(row["near_miss"]["top"][0]["distance_to_min_net_edge"], 0)
+        self.assertIn("wrote=1", stdout.getvalue())
+
+    def test_monitor_analyze_command_summarizes_realtime_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "realtime.jsonl"
+            out = Path(tmp) / "analysis.json"
+            report.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in [
+                        {
+                            "type": "realtime_monitor_connection_event",
+                            "ts": "2026-05-09T00:00:00Z",
+                            "event": "connected",
+                            "connection_count": 1,
+                            "reconnect_count": 0,
+                        },
+                        {
+                            "type": "realtime_monitor_iteration",
+                            "ts": "2026-05-09T00:00:01Z",
+                            "messages_seen": 10,
+                            "known_token_count": 50,
+                            "last_message_age_seconds": 0.5,
+                            "snapshots_collected": 25,
+                            "snapshot_count": 25,
+                            "current_opportunity_count": 0,
+                            "stable_opportunity_count": 0,
+                            "stable_paper_trade_count": 0,
+                        },
+                        {
+                            "type": "realtime_monitor_iteration",
+                            "ts": "2026-05-09T00:00:03Z",
+                            "messages_seen": 15,
+                            "known_token_count": 50,
+                            "last_message_age_seconds": 1.5,
+                            "snapshots_collected": 25,
+                            "snapshot_count": 50,
+                            "current_opportunity_count": 0,
+                            "stable_opportunity_count": 0,
+                            "stable_paper_trade_count": 0,
+                        },
+                    ]
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["monitor-analyze", str(report), "--out", str(out)])
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["monitor_kind"], "realtime")
+        self.assertEqual(row["iteration_count"], 2)
+        self.assertEqual(row["final_known_token_count"], 50)
+        self.assertEqual(row["messages_per_iteration"]["max"], 5)
+        self.assertEqual(row["connection_events"]["by_event"][0]["event"], "connected")
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_paper_report_command_writes_json_report(self):

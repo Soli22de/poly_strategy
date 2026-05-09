@@ -22,9 +22,11 @@ def analyze_paper_monitor_report(
         raise ValueError("near_miss_top_n must be non-negative")
 
     rows = list(_read_jsonl(path))
-    iteration_rows = [row for row in rows if row.get("type") == "paper_monitor_iteration"]
-    error_rows = [row for row in rows if row.get("type") == "paper_monitor_iteration_error"]
-    summary_rows = [row for row in rows if row.get("type") == "paper_monitor_summary"]
+    monitor_kind = _monitor_kind(rows)
+    iteration_rows = [row for row in rows if row.get("type") in {"paper_monitor_iteration", "realtime_monitor_iteration"}]
+    error_rows = [row for row in rows if row.get("type") in {"paper_monitor_iteration_error", "realtime_monitor_iteration_error"}]
+    summary_rows = [row for row in rows if row.get("type") in {"paper_monitor_summary", "realtime_monitor_summary"}]
+    connection_rows = [row for row in rows if row.get("type") == "realtime_monitor_connection_event"]
 
     timestamps = [_parse_ts(row.get("ts")) for row in rows if row.get("ts")]
     timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
@@ -41,7 +43,8 @@ def analyze_paper_monitor_report(
     stable_paper_edge = sum(float(row.get("stable_paper_edge") or 0.0) for row in iteration_rows)
 
     report = {
-        "type": "paper_monitor_analysis",
+        "type": "monitor_analysis",
+        "monitor_kind": monitor_kind,
         "report_path": str(path),
         "row_count": len(rows),
         "iteration_count": len(iteration_rows),
@@ -52,6 +55,8 @@ def analyze_paper_monitor_report(
         "duration_seconds": duration_seconds,
         "snapshots_collected": sum(int(row.get("snapshots_collected") or 0) for row in iteration_rows + error_rows),
         "final_snapshot_count": _latest_numeric(iteration_rows, latest_summary, "snapshot_count"),
+        "final_messages_seen": _latest_numeric(iteration_rows, latest_summary, "messages_seen"),
+        "final_known_token_count": _latest_numeric(iteration_rows, latest_summary, "known_token_count"),
         "current_opportunity_observations": sum(int(row.get("current_opportunity_count") or 0) for row in iteration_rows),
         "stable_opportunity_observations": sum(int(row.get("stable_opportunity_count") or 0) for row in iteration_rows),
         "stable_paper_trade_observations": sum(int(row.get("stable_paper_trade_count") or 0) for row in iteration_rows),
@@ -67,6 +72,9 @@ def analyze_paper_monitor_report(
         "stable_paper_roi_distribution": _distribution(stable_trade_rois),
         "current_opportunity_by_kind": _opportunity_kind_summary(iteration_rows, "current_opportunities"),
         "stable_opportunity_by_kind": _opportunity_kind_summary(iteration_rows, "stable_opportunities"),
+        "last_message_age_seconds": _distribution(_numeric_values(iteration_rows, "last_message_age_seconds")),
+        "messages_per_iteration": _distribution(_counter_deltas(iteration_rows, "messages_seen")),
+        "connection_events": _connection_event_summary(connection_rows),
         "top_current_opportunities": _top_opportunities(iteration_rows, "current_opportunities", top_n),
         "top_stable_opportunities": _top_opportunities(iteration_rows, "stable_opportunities", top_n),
         "top_stable_markets": _top_markets(iteration_rows, "stable_opportunities", top_n),
@@ -83,7 +91,12 @@ def analyze_paper_monitor_report(
         )
         report["near_miss"] = near_miss
         report["near_miss_rejection_summary"] = _near_miss_rejection_summary(near_miss)
+        report["zero_opportunity_diagnosis"] = _zero_opportunity_diagnosis(report, near_miss)
     return report
+
+
+def analyze_monitor_report(*args, **kwargs) -> dict:
+    return analyze_paper_monitor_report(*args, **kwargs)
 
 
 def _read_jsonl(path: Path) -> Iterable[dict]:
@@ -102,6 +115,15 @@ def _latest_numeric(iteration_rows: list, latest_summary: dict, key: str) -> flo
         if key in row:
             return row[key]
     return 0
+
+
+def _monitor_kind(rows: list) -> str:
+    types = {row.get("type") for row in rows}
+    if "realtime_monitor_iteration" in types or "realtime_monitor_summary" in types:
+        return "realtime"
+    if "paper_monitor_iteration" in types or "paper_monitor_summary" in types:
+        return "paper"
+    return "unknown"
 
 
 def _opportunity_values(rows: list, field: str, key: str) -> list:
@@ -137,6 +159,32 @@ def _distribution(values: list) -> dict:
         "max": ordered[-1],
         "mean": sum(ordered) / len(ordered),
     }
+
+
+def _numeric_values(rows: list, key: str) -> list:
+    values = []
+    for row in rows:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _counter_deltas(rows: list, key: str) -> list:
+    values = _numeric_values(rows, key)
+    if len(values) < 2:
+        return []
+    deltas = []
+    previous = values[0]
+    for value in values[1:]:
+        if value >= previous:
+            deltas.append(value - previous)
+        previous = value
+    return deltas
 
 
 def _percentile(ordered: list, q: float) -> float:
@@ -268,6 +316,50 @@ def _error_summary(error_rows: list, iteration_rows: list) -> dict:
         "by_phase": _counter_rows(phases, "phase"),
         "collection_error_kinds": _counter_rows(collection_error_kinds, "kind"),
         "collection_error_count": sum(int(row.get("error_count") or 0) for row in iteration_rows + error_rows),
+    }
+
+
+def _connection_event_summary(connection_rows: list) -> dict:
+    by_event = Counter(str(row.get("event") or "unknown") for row in connection_rows)
+    error_types = Counter(str(row.get("error_type") or "unknown") for row in connection_rows if row.get("error_type"))
+    latest = connection_rows[-1] if connection_rows else None
+    return {
+        "event_count": len(connection_rows),
+        "by_event": _counter_rows(by_event, "event"),
+        "by_error_type": _counter_rows(error_types, "error_type"),
+        "latest_event": latest,
+    }
+
+
+def _zero_opportunity_diagnosis(report: dict, near_miss: dict) -> dict:
+    top = near_miss.get("top", [])
+    by_kind = near_miss.get("by_kind", [])
+    best = top[0] if top else None
+    positive_gross = sum(int(row.get("positive_gross_count") or 0) for row in by_kind)
+    positive_net = sum(int(row.get("positive_net_count") or 0) for row in by_kind)
+    fee_blocked = sum(int(row.get("fee_blocked_count") or 0) for row in by_kind)
+    reasons = []
+    if report.get("final_known_token_count", 0) and report.get("final_known_token_count", 0) < 100:
+        reasons.append("watchlist_too_narrow")
+    if not top:
+        reasons.append("no_evaluable_candidates")
+    elif float(best.get("net_edge_per_share") or 0.0) <= float(near_miss.get("min_net_edge") or 0.0):
+        reasons.append("best_candidate_below_min_edge")
+    if fee_blocked:
+        reasons.append("fees_erase_gross_edge")
+    if positive_gross and not positive_net:
+        reasons.append("fee_drag_dominates_positive_gross_edges")
+    if report.get("connection_events", {}).get("by_event"):
+        events = {row.get("event") for row in report["connection_events"]["by_event"]}
+        if "disconnected" in events or "reconnect_sleep" in events:
+            reasons.append("websocket_reconnects_reduce_continuity")
+    return {
+        "reasons": sorted(set(reasons)),
+        "best_candidate": best,
+        "positive_gross_candidate_count": positive_gross,
+        "positive_net_candidate_count": positive_net,
+        "fee_blocked_candidate_count": fee_blocked,
+        "closest_by_kind": by_kind[:10],
     }
 
 

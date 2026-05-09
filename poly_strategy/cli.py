@@ -193,7 +193,7 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
-        if args.command == "paper-analyze":
+        if args.command in {"paper-analyze", "monitor-analyze"}:
             row = analyze_paper_monitor_report(
                 Path(args.path),
                 top_n=args.top,
@@ -575,6 +575,24 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--gamma", help="optional raw Gamma NDJSON path for near-miss neg-risk diagnostics")
     analyze.add_argument("--near-miss-top", type=int, default=10, help="near-miss rows to include")
     analyze.add_argument(
+        "--near-miss-min-net-edge",
+        type=float,
+        default=0.0,
+        help="minimum net edge threshold used to classify near misses",
+    )
+
+    monitor_analyze = subparsers.add_parser(
+        "monitor-analyze",
+        help="summarize a paper or realtime monitor JSONL report",
+    )
+    monitor_analyze.add_argument("path", help="monitor JSONL report path")
+    monitor_analyze.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
+    monitor_analyze.add_argument("--top", type=int, default=10, help="top opportunities and markets to include")
+    monitor_analyze.add_argument("--snapshots", help="optional snapshot NDJSON path for near-miss diagnostics")
+    monitor_analyze.add_argument("--rules", help="optional rule JSON path for relation near-miss diagnostics")
+    monitor_analyze.add_argument("--gamma", help="optional raw Gamma NDJSON path for near-miss neg-risk diagnostics")
+    monitor_analyze.add_argument("--near-miss-top", type=int, default=10, help="near-miss rows to include")
+    monitor_analyze.add_argument(
         "--near-miss-min-net-edge",
         type=float,
         default=0.0,
