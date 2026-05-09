@@ -23,7 +23,7 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Oddpool Free must keep a local quota ledger for 1 req/sec and 1000 requests/month.
   - [x] Cross-platform matches must be semantic-verified before they can become actionable dry-run signals.
   - [x] Kalshi/Polymarket cross-platform output must stop hardcoding executable YES/NO legs for unverified matches.
-  - [ ] Execution must write live-attempt/reconciliation state into the risk ledger after real submissions.
+  - [x] Execution must write live-attempt/reconciliation state into the risk ledger after real submissions.
   - [ ] Data rotation must run as a persistent LaunchAgent, not only as a manual script.
   - [ ] Rule discovery must broaden beyond deterministic neg-risk pairs with topic clustering and safer non-neg-risk candidates.
 - [x] Expand opportunity coverage beyond the current small watchlist.
@@ -98,10 +98,10 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Partial-fill/reconciliation placeholders.
   - [x] Balance/API-key safety checks.
   - [x] Failure cooldown/pause mechanism.
-- [ ] Upgrade live-risk controls from placeholders to stateful reconciliation.
-  - [ ] Classify dry-run/live responses.
-  - [ ] Detect unknown/partial/failure states requiring reconciliation.
-  - [ ] Update daily risk state after live submission attempts.
+- [x] Upgrade live-risk controls from placeholders to stateful reconciliation.
+  - [x] Classify dry-run/live responses.
+  - [x] Detect unknown/partial/failure states requiring reconciliation.
+  - [x] Update daily risk state after live submission attempts.
 - [ ] Broaden rule coverage beyond neg-risk.
   - [ ] Add topic-clustered LLM batching.
   - [ ] Add conservative deterministic equivalent detection for exact duplicate binary questions.

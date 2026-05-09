@@ -1,6 +1,12 @@
 import unittest
 
-from poly_strategy.execution import ExecutionConfigError, PolymarketClobExecutor, build_execution_plan, plan_to_row
+from poly_strategy.execution import (
+    ExecutionConfigError,
+    PolymarketClobExecutor,
+    build_execution_plan,
+    plan_to_row,
+    reconcile_execution_responses,
+)
 from poly_strategy.models import Leg, Opportunity
 from poly_strategy.paper import PaperTrade
 
@@ -88,6 +94,33 @@ class ExecutionTests(unittest.TestCase):
         executor = PolymarketClobExecutor(private_key="test-key")
         with self.assertRaises(ExecutionConfigError):
             executor.post_plan(plan, allow_live=True)
+
+    def test_reconcile_execution_responses_detects_unknown_live_fill(self):
+        row = {
+            "type": "execution_plan",
+            "dry_run": False,
+            "orders": [{"market_id": "a", "token_id": "yes-token", "price": 0.4, "size": 5}],
+        }
+
+        reconciliation = reconcile_execution_responses(row, [{"success": True, "orderID": "order-1"}])
+
+        self.assertEqual(reconciliation["status"], "needs_reconciliation")
+        self.assertEqual(reconciliation["submitted_order_count"], 1)
+        self.assertEqual(reconciliation["unknown_fill_count"], 1)
+        self.assertTrue(reconciliation["needs_reconciliation"])
+
+    def test_reconcile_execution_responses_detects_partial_fill(self):
+        row = {
+            "type": "execution_plan",
+            "dry_run": False,
+            "orders": [{"market_id": "a", "token_id": "yes-token", "price": 0.4, "size": 5}],
+        }
+
+        reconciliation = reconcile_execution_responses(row, [{"status": "filled", "filled_size": 2}])
+
+        self.assertEqual(reconciliation["status"], "needs_reconciliation")
+        self.assertEqual(reconciliation["partial_fill_count"], 1)
+        self.assertTrue(reconciliation["partial_fill_detected"])
 
 
 if __name__ == "__main__":

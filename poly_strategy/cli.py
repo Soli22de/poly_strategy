@@ -39,6 +39,7 @@ from poly_strategy.execution import (
     PolymarketClobExecutor,
     build_execution_plan,
     plan_to_row,
+    reconcile_execution_responses,
 )
 from poly_strategy.execution_checks import pretrade_check_row
 from poly_strategy.external_signals import external_signal_report, ingest_external_signals
@@ -53,7 +54,7 @@ from poly_strategy.realtime import (
     monitor_polymarket_watchlist,
     stream_polymarket_watchlist,
 )
-from poly_strategy.risk import risk_check_execution_plan
+from poly_strategy.risk import risk_check_execution_plan, update_risk_state_from_execution_result
 from poly_strategy.rule_discovery import discover_rules
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
@@ -1518,6 +1519,7 @@ def _execution_plan_rows(result, args) -> list:
         row["risk_check"] = risk_check
         if getattr(args, "require_risk_pass", False) and not risk_check["passed"]:
             continue
+        row["reconciliation"] = reconcile_execution_responses(row, [])
         rows.append(row)
         plans.append(plan)
     if args.live and rows:
@@ -1530,6 +1532,14 @@ def _execution_plan_rows(result, args) -> list:
                 allow_live=True,
                 allow_nonatomic=args.allow_nonatomic_live,
             )
+            row["reconciliation"] = reconcile_execution_responses(row, row["responses"])
+            if getattr(args, "risk_state", None):
+                row["risk_state_update"] = update_risk_state_from_execution_result(
+                    row,
+                    row["responses"],
+                    Path(args.risk_state),
+                    reconciliation=row["reconciliation"],
+                )
     return rows
 
 

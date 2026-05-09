@@ -111,6 +111,53 @@ def plan_to_row(plan: ExecutionPlan) -> dict:
     }
 
 
+def reconcile_execution_responses(plan_row: dict, responses: Optional[List[dict]] = None) -> dict:
+    responses = list(responses or [])
+    orders = list(plan_row.get("orders") or [])
+    dry_run = bool(plan_row.get("dry_run", True))
+    legs = []
+    submitted = 0
+    failed = 0
+    partial = 0
+    unknown = 0
+    for index, order in enumerate(orders):
+        response = responses[index] if index < len(responses) else None
+        row = _reconcile_order_response(order, response, dry_run)
+        legs.append(row)
+        if row["state"] in {"submitted", "filled", "posted_unknown_fill"}:
+            submitted += 1
+        if row["state"] == "failed":
+            failed += 1
+        if row["partial_fill"]:
+            partial += 1
+        if row["unknown_fill"]:
+            unknown += 1
+
+    missing_responses = max(0, len(orders) - len(responses))
+    needs_reconciliation = (not dry_run) and (missing_responses > 0 or failed > 0 or partial > 0 or unknown > 0)
+    if dry_run:
+        status = "dry_run"
+    elif needs_reconciliation:
+        status = "needs_reconciliation"
+    else:
+        status = "submitted"
+    return {
+        "type": "execution_reconciliation",
+        "status": status,
+        "dry_run": dry_run,
+        "order_count": len(orders),
+        "response_count": len(responses),
+        "submitted_order_count": submitted,
+        "failed_order_count": failed,
+        "partial_fill_count": partial,
+        "unknown_fill_count": unknown,
+        "missing_response_count": missing_responses,
+        "needs_reconciliation": needs_reconciliation,
+        "partial_fill_detected": partial > 0,
+        "legs": legs,
+    }
+
+
 class PolymarketClobExecutor:
     def __init__(
         self,
@@ -241,3 +288,72 @@ def _order_to_row(order: ExecutionOrder) -> dict:
         "tick_size": order.tick_size,
         "neg_risk": order.neg_risk,
     }
+
+
+def _reconcile_order_response(order: dict, response: Optional[dict], dry_run: bool) -> dict:
+    planned_size = _optional_float(order.get("size")) or 0.0
+    filled_size = _response_filled_size(response)
+    response_status = _response_status(response, dry_run)
+    partial_fill = filled_size is not None and 0.0 < filled_size < planned_size
+    filled = filled_size is not None and planned_size > 0 and filled_size >= planned_size
+    unknown_fill = (not dry_run) and response_status in {"submitted", "posted_unknown_fill"} and filled_size is None
+    return {
+        "market_id": order.get("market_id"),
+        "token_id": order.get("token_id"),
+        "planned_size": planned_size,
+        "filled_size": filled_size,
+        "order_id": _response_order_id(response),
+        "state": "filled" if filled else response_status,
+        "partial_fill": partial_fill,
+        "unknown_fill": unknown_fill,
+        "raw_response": response,
+    }
+
+
+def _response_status(response: Optional[dict], dry_run: bool) -> str:
+    if dry_run:
+        return "dry_run"
+    if not isinstance(response, dict):
+        return "failed"
+    status = str(response.get("status") or response.get("state") or "").strip().lower()
+    if status in {"filled", "matched"}:
+        return "filled"
+    if status in {"failed", "rejected", "error", "cancelled", "canceled"}:
+        return "failed"
+    if status in {"open", "live", "posted", "submitted"}:
+        return "submitted"
+    success = response.get("success")
+    if success is False:
+        return "failed"
+    if success is True or _response_order_id(response):
+        return "posted_unknown_fill"
+    return "failed"
+
+
+def _response_order_id(response: Optional[dict]):
+    if not isinstance(response, dict):
+        return None
+    for key in ["order_id", "orderID", "id", "orderId"]:
+        value = response.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _response_filled_size(response: Optional[dict]) -> Optional[float]:
+    if not isinstance(response, dict):
+        return None
+    for key in ["filled_size", "filledSize", "matched_size", "matchedSize", "filled"]:
+        parsed = _optional_float(response.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _optional_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

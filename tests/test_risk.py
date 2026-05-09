@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from poly_strategy.risk import risk_check_execution_plan
+from poly_strategy.risk import risk_check_execution_plan, update_risk_state_from_execution_result
 
 
 class RiskTests(unittest.TestCase):
@@ -44,6 +44,38 @@ class RiskTests(unittest.TestCase):
         failed = {row["name"] for row in check["checks"] if not row["passed"]}
         self.assertIn("not_paused", failed)
         self.assertIn("max_daily_orders", failed)
+
+    def test_risk_state_updates_after_live_execution_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "risk.json"
+            plan = _plan(price=0.5, size=4)
+            plan["dry_run"] = False
+            reconciliation = {
+                "status": "needs_reconciliation",
+                "submitted_order_count": 1,
+                "needs_reconciliation": True,
+            }
+
+            updated = update_risk_state_from_execution_result(
+                plan,
+                [{"success": True, "orderID": "order-1"}],
+                state,
+                reconciliation=reconciliation,
+                now=datetime(2026, 5, 9, 0, 0, tzinfo=timezone.utc),
+            )
+            check = risk_check_execution_plan(
+                _plan(price=0.5, size=3),
+                state_path=state,
+                max_daily_loss=3,
+                now=datetime(2026, 5, 9, 0, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(updated["orders"], 1)
+        self.assertEqual(updated["attempted_orders"], 1)
+        self.assertAlmostEqual(updated["reserved_notional"], 2.0)
+        self.assertTrue(updated["pending_reconciliation"])
+        self.assertFalse(check["passed"])
+        self.assertIn("max_daily_worst_case_loss", {row["name"] for row in check["checks"] if not row["passed"]})
 
 
 def _plan(price: float, size: float) -> dict:
