@@ -44,7 +44,7 @@ from poly_strategy.execution import (
 )
 from poly_strategy.execution_checks import pretrade_check_row
 from poly_strategy.external_signals import external_signal_report, ingest_external_signals
-from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to_row
+from poly_strategy.exhaustive_groups import promotion_candidate_count, promote_exhaustive_groups, result_to_row
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
@@ -415,6 +415,31 @@ def main(argv=None) -> int:
             )
             return 0
         if args.command == "verify-exhaustive-groups":
+            if args.skip_when_no_candidates and promotion_candidate_count(
+                Path(args.snapshots),
+                Path(args.rules_in),
+                min_net_edge=args.min_net_edge,
+                top_n=args.top,
+            ) == 0:
+                row = {
+                    "type": "exhaustive_group_promotion",
+                    "candidates_found": 0,
+                    "verified_count": 0,
+                    "added_count": 0,
+                    "rejected_count": 0,
+                    "skipped_existing_count": 0,
+                    "out_path": args.rules_out,
+                    "rows": [],
+                    "status": "skipped_no_candidates",
+                }
+                if args.report_out:
+                    Path(args.report_out).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args.report_out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                if Path(args.rules_in).exists() and args.rules_out != args.rules_in:
+                    Path(args.rules_out).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args.rules_out).write_text(Path(args.rules_in).read_text())
+                print(f"candidates=0 verified=0 added=0 rejected=0 skipped_existing=0 out={args.rules_out}")
+                return 0
             model = args.model or os.environ.get("OPENAI_MODEL")
             if not model:
                 print("error: model is required via --model or OPENAI_MODEL", file=sys.stderr)
@@ -437,6 +462,8 @@ def main(argv=None) -> int:
                 min_net_edge=args.min_net_edge,
                 top_n=args.top,
                 min_confidence=args.min_confidence,
+                state_path=Path(args.state) if args.state else None,
+                recheck_hours=args.recheck_hours,
             )
             row = result_to_row(result)
             if args.report_out:
@@ -972,6 +999,13 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_groups.add_argument("--max-output-tokens", type=int, default=2000, help="Responses API max_output_tokens")
     verify_groups.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
     verify_groups.add_argument("--verbosity", help="optional Responses API text verbosity")
+    verify_groups.add_argument("--state", help="promotion cache JSON path for rejected/added groups")
+    verify_groups.add_argument("--recheck-hours", type=float, default=24.0, help="hours before rechecking a rejected group")
+    verify_groups.add_argument(
+        "--skip-when-no-candidates",
+        action="store_true",
+        help="avoid requiring model/API key when no near-miss groups meet --min-net-edge",
+    )
 
     ingest_signals = subparsers.add_parser(
         "ingest-external-signals",

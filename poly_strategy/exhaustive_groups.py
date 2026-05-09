@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -28,11 +29,18 @@ def promote_exhaustive_groups(
     min_net_edge: float = 0.0,
     top_n: int = 10,
     min_confidence: float = 0.95,
+    state_path: Optional[Path] = None,
+    recheck_hours: float = 24.0,
+    now: Optional[datetime] = None,
 ) -> ExhaustiveGroupPromotionResult:
     if top_n < 0:
         raise ValueError("top_n must be non-negative")
+    if recheck_hours < 0:
+        raise ValueError("recheck_hours must be non-negative")
 
     rules_row = _load_rule_row(rules_in_path)
+    state_row = _load_state_row(state_path)
+    now = now or datetime.now(timezone.utc)
     market_texts = {market.market_id: market for market in read_market_texts(gamma_path)}
     existing_group_keys = _existing_group_keys(rules_row)
     candidates = potential_exhaustive_group_candidates(snapshots_path, rules_in_path, min_net_edge, top_n)
@@ -57,12 +65,20 @@ def promote_exhaustive_groups(
             report_row["status"] = "skipped_existing"
             report_rows.append(report_row)
             continue
+        cached_status = _cached_group_status(state_row, market_ids, now, recheck_hours)
+        if cached_status is not None:
+            skipped_existing_count += 1
+            report_row["status"] = "skipped_cached"
+            report_row["cached_status"] = cached_status
+            report_rows.append(report_row)
+            continue
 
         markets, missing_market_ids = _markets_for_group(market_texts, market_ids)
         if missing_market_ids:
             rejected_count += 1
             report_row["status"] = "missing_markets"
             report_row["missing_market_ids"] = missing_market_ids
+            _record_state(state_row, market_ids, "missing_markets", report_row, now)
             report_rows.append(report_row)
             continue
 
@@ -71,6 +87,7 @@ def promote_exhaustive_groups(
             rejected_count += 1
             report_row["status"] = "incomplete_known_neg_risk_group"
             report_row["extra_known_market_ids"] = extra_group_market_ids
+            _record_state(state_row, market_ids, "incomplete_known_neg_risk_group", report_row, now)
             report_rows.append(report_row)
             continue
 
@@ -81,9 +98,11 @@ def promote_exhaustive_groups(
             added_rows.append(_rule_row_from_verification(market_ids, verification))
             existing_group_keys.add(group_key)
             report_row["status"] = "added"
+            _record_state(state_row, market_ids, "added", report_row, now)
         else:
             rejected_count += 1
             report_row["status"] = "rejected"
+            _record_state(state_row, market_ids, "rejected", report_row, now)
         report_rows.append(report_row)
 
     output_row = dict(rules_row)
@@ -92,6 +111,7 @@ def promote_exhaustive_groups(
     )
     rules_out_path.parent.mkdir(parents=True, exist_ok=True)
     rules_out_path.write_text(json.dumps(output_row, indent=2, sort_keys=True) + "\n")
+    _write_state_row(state_path, state_row)
 
     return ExhaustiveGroupPromotionResult(
         candidates_found=len(candidates),
@@ -157,6 +177,15 @@ def result_to_row(result: ExhaustiveGroupPromotionResult) -> dict:
     }
 
 
+def promotion_candidate_count(
+    snapshots_path: Path,
+    rules_path: Path,
+    min_net_edge: float = 0.0,
+    top_n: int = 10,
+) -> int:
+    return len(potential_exhaustive_group_candidates(snapshots_path, rules_path, min_net_edge, top_n))
+
+
 def _latest_snapshot_batch(path: Path):
     snapshots = list(snapshots_from_ndjson_lines(path.read_text().splitlines()))
     if not snapshots:
@@ -169,6 +198,72 @@ def _load_rule_row(path: Optional[Path]) -> dict:
     if not path or not path.exists():
         return {}
     return json.loads(path.read_text())
+
+
+def _load_state_row(path: Optional[Path]) -> dict:
+    if not path or not path.exists():
+        return {"type": "exhaustive_group_promotion_state", "groups": {}}
+    try:
+        row = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"type": "exhaustive_group_promotion_state", "groups": {}}
+    if not isinstance(row, dict):
+        return {"type": "exhaustive_group_promotion_state", "groups": {}}
+    row.setdefault("type", "exhaustive_group_promotion_state")
+    row.setdefault("groups", {})
+    return row
+
+
+def _write_state_row(path: Optional[Path], row: dict) -> None:
+    if not path:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def _cached_group_status(state_row: dict, market_ids: List[str], now: datetime, recheck_hours: float) -> Optional[dict]:
+    row = (state_row.get("groups") or {}).get(_group_key_string(market_ids))
+    if not isinstance(row, dict):
+        return None
+    if row.get("status") == "added":
+        return None
+    ts = _parse_ts(row.get("ts"))
+    if ts is None:
+        return None
+    if now - ts <= timedelta(hours=recheck_hours):
+        return row
+    return None
+
+
+def _record_state(state_row: dict, market_ids: List[str], status: str, report_row: dict, now: datetime) -> None:
+    groups = state_row.setdefault("groups", {})
+    groups[_group_key_string(market_ids)] = {
+        "ts": _utc_iso(now),
+        "status": status,
+        "market_ids": list(market_ids),
+        "source_net_edge_per_share": report_row.get("source_net_edge_per_share"),
+        "reason": report_row.get("status"),
+        "verification": report_row.get("verification"),
+    }
+
+
+def _group_key_string(market_ids: List[str]) -> str:
+    return "|".join(sorted(str(market_id) for market_id in market_ids if market_id))
+
+
+def _parse_ts(value) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _existing_group_keys(row: dict) -> set:

@@ -6,6 +6,7 @@ from pathlib import Path
 from poly_strategy.exhaustive_groups import (
     potential_exhaustive_group_candidates,
     promote_exhaustive_groups,
+    promotion_candidate_count,
     result_to_row,
 )
 
@@ -116,6 +117,100 @@ class ExhaustiveGroupTests(unittest.TestCase):
         self.assertEqual(result.rejected_count, 1)
         self.assertEqual(result.rows[0]["status"], "incomplete_known_neg_risk_group")
         self.assertEqual(result.rows[0]["extra_known_market_ids"], ["d"])
+
+    def test_promote_exhaustive_groups_uses_state_to_skip_recent_rejections(self):
+        client = FakeVerifier(
+            {
+                "verdict": "uncertain",
+                "confidence": 0.80,
+                "trade_allowed": False,
+                "risk_flags": ["incomplete_outcome_set"],
+                "reason": "could be missing a candidate",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path, rules_path, gamma_path = _write_candidate_fixture(Path(tmp))
+            out_path = Path(tmp) / "rules-with-groups.json"
+            state_path = Path(tmp) / "promotion-state.json"
+
+            first = promote_exhaustive_groups(
+                gamma_path,
+                rules_path,
+                out_path,
+                snapshots_path,
+                client,
+                min_net_edge=0.0,
+                top_n=5,
+                min_confidence=0.95,
+                state_path=state_path,
+            )
+            second = promote_exhaustive_groups(
+                gamma_path,
+                rules_path,
+                out_path,
+                snapshots_path,
+                client,
+                min_net_edge=0.0,
+                top_n=5,
+                min_confidence=0.95,
+                state_path=state_path,
+            )
+
+        self.assertEqual(first.rejected_count, 1)
+        self.assertEqual(second.rejected_count, 0)
+        self.assertEqual(second.skipped_existing_count, 1)
+        self.assertEqual(second.rows[0]["status"], "skipped_cached")
+        self.assertEqual(client.market_ids_seen, [["a", "b", "c"]])
+
+    def test_promote_exhaustive_groups_does_not_cache_added_as_active_rule(self):
+        client = FakeVerifier(
+            {
+                "verdict": "exhaustive_group",
+                "confidence": 0.99,
+                "trade_allowed": True,
+                "risk_flags": [],
+                "reason": "same event and full candidate set",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path, rules_path, gamma_path = _write_candidate_fixture(Path(tmp))
+            out_path = Path(tmp) / "rules-with-groups.json"
+            state_path = Path(tmp) / "promotion-state.json"
+
+            first = promote_exhaustive_groups(
+                gamma_path,
+                rules_path,
+                out_path,
+                snapshots_path,
+                client,
+                min_net_edge=0.0,
+                top_n=5,
+                min_confidence=0.95,
+                state_path=state_path,
+            )
+            second = promote_exhaustive_groups(
+                gamma_path,
+                rules_path,
+                out_path,
+                snapshots_path,
+                client,
+                min_net_edge=0.0,
+                top_n=5,
+                min_confidence=0.95,
+                state_path=state_path,
+            )
+
+        self.assertEqual(first.added_count, 1)
+        self.assertEqual(second.added_count, 1)
+        self.assertEqual(client.market_ids_seen, [["a", "b", "c"], ["a", "b", "c"]])
+
+    def test_promotion_candidate_count_counts_near_miss_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path, rules_path, _ = _write_candidate_fixture(Path(tmp))
+
+            count = promotion_candidate_count(snapshots_path, rules_path, min_net_edge=0.0, top_n=5)
+
+        self.assertEqual(count, 1)
 
 
 class FakeVerifier:

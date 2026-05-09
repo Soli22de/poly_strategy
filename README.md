@@ -500,6 +500,14 @@ Run a realtime-specific analysis report explaining why opportunities are absent 
 The `zero_opportunity_diagnosis` section separates actionable near-misses from diagnostic or blocked candidates, so a positive-looking basket that still needs rule promotion will not be treated as executable.
 The same report is refreshed by `scripts/run_realtime_analysis_once.sh`; the LaunchAgent `poly_strategy_realtime_analysis_15m` runs it every 15 minutes.
 
+Promote only usable opportunities from diagnostic basket candidates:
+
+```bash
+scripts/run_rule_promotion_once.sh
+```
+
+This script first checks whether any diagnostic exhaustive-group candidate clears `MIN_NET_EDGE`. If none do, it exits without calling the LLM. When candidates exist, it runs the verifier, caches rejected groups in `data/exhaustive-group-promotion-state.json`, writes verified groups back into the active rule file, rebuilds the watchlist, and lets the realtime monitor restart only if the watchlist changes.
+
 Turn alerts into refreshed dry-run execution plans with pretrade and risk checks:
 
 ```bash
