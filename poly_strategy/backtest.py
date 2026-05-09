@@ -1,9 +1,11 @@
 import json
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from poly_strategy.collectors import raw_gamma_markets_from_ndjson
 from poly_strategy.models import (
     BinaryMarketSnapshot,
     CollectivelyExhaustiveRule,
@@ -12,6 +14,7 @@ from poly_strategy.models import (
     ExhaustiveGroupRule,
     ImplicationRule,
     MutualExclusionRule,
+    NegRiskGroupRule,
     OrderBook,
     Opportunity,
 )
@@ -25,6 +28,7 @@ from poly_strategy.scanner import (
     find_implication_arbs,
     find_mutual_exclusion_basket_arbs,
     find_mutually_exclusive_arbs,
+    find_neg_risk_group_arbs,
     find_yes_no_bundle_arbs,
 )
 
@@ -82,6 +86,7 @@ class RuleSet:
     equivalences: List[EquivalenceRule] = field(default_factory=list)
     collectively_exhaustive: List[CollectivelyExhaustiveRule] = field(default_factory=list)
     exhaustive_groups: List[ExhaustiveGroupRule] = field(default_factory=list)
+    neg_risk_groups: List[NegRiskGroupRule] = field(default_factory=list)
     complements: List[ComplementRule] = field(default_factory=list)
 
 
@@ -91,9 +96,10 @@ def replay_ndjson(
     max_capital_per_trade: Optional[float] = None,
     bankroll: Optional[float] = None,
     rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
 ) -> ReplayResult:
     snapshots = list(_read_binary_snapshots(path))
-    rule_set = load_rule_set(rules_path) if rules_path else RuleSet()
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
     opportunities: List[Opportunity] = []
     opportunities_by_snapshot: List[List[Opportunity]] = []
     for batch in _batches_by_ts(snapshots):
@@ -111,14 +117,19 @@ def replay_ndjson(
     )
 
 
-def load_rule_set(path: Path, min_confidence: float = 0.95) -> RuleSet:
+def load_rule_set(
+    path: Optional[Path] = None,
+    min_confidence: float = 0.95,
+    gamma_path: Optional[Path] = None,
+) -> RuleSet:
     return RuleSet(
-        implications=load_rules(path, min_confidence=min_confidence),
-        mutual_exclusions=load_mutually_exclusive_rules(path, min_confidence=min_confidence),
-        equivalences=load_equivalence_rules(path, min_confidence=min_confidence),
-        collectively_exhaustive=load_collectively_exhaustive_rules(path, min_confidence=min_confidence),
-        exhaustive_groups=load_exhaustive_group_rules(path, min_confidence=min_confidence),
-        complements=load_complement_rules(path, min_confidence=min_confidence),
+        implications=load_rules(path, min_confidence=min_confidence) if path else [],
+        mutual_exclusions=load_mutually_exclusive_rules(path, min_confidence=min_confidence) if path else [],
+        equivalences=load_equivalence_rules(path, min_confidence=min_confidence) if path else [],
+        collectively_exhaustive=load_collectively_exhaustive_rules(path, min_confidence=min_confidence) if path else [],
+        exhaustive_groups=load_exhaustive_group_rules(path, min_confidence=min_confidence) if path else [],
+        neg_risk_groups=load_neg_risk_group_rules(gamma_path) if gamma_path else [],
+        complements=load_complement_rules(path, min_confidence=min_confidence) if path else [],
     )
 
 
@@ -141,6 +152,7 @@ def scan_snapshot_batch(
         find_collectively_exhaustive_arbs(snapshots, rules.collectively_exhaustive, min_net_edge=min_net_edge)
     )
     opportunities.extend(find_exhaustive_group_arbs(snapshots, rules.exhaustive_groups, min_net_edge=min_net_edge))
+    opportunities.extend(find_neg_risk_group_arbs(snapshots, rules.neg_risk_groups, min_net_edge=min_net_edge))
     opportunities.extend(find_complement_arbs(snapshots, rules.complements, min_net_edge=min_net_edge))
     return opportunities
 
@@ -184,6 +196,32 @@ def load_exhaustive_group_rules(path: Path, min_confidence: float = 0.95) -> Lis
 
 def load_complement_rules(path: Path, min_confidence: float = 0.95) -> List[ComplementRule]:
     return _load_pair_rules(path, "complement", ComplementRule, min_confidence)
+
+
+def load_neg_risk_group_rules(path: Path) -> List[NegRiskGroupRule]:
+    grouped = defaultdict(list)
+    for market in raw_gamma_markets_from_ndjson(path):
+        if not _is_tradeable_binary_gamma_market(market):
+            continue
+        group_id = str(market.get("negRiskMarketID") or "").strip()
+        market_id = str(market.get("id") or market.get("conditionId") or "").strip()
+        if not group_id or not market_id:
+            continue
+        grouped[group_id].append(market)
+
+    rules = []
+    for group_id, markets in sorted(grouped.items()):
+        market_ids = []
+        seen = set()
+        for market in sorted(markets, key=_neg_risk_market_sort_key):
+            market_id = str(market.get("id") or market.get("conditionId") or "").strip()
+            if market_id in seen:
+                continue
+            seen.add(market_id)
+            market_ids.append(market_id)
+        if len(market_ids) >= 2:
+            rules.append(NegRiskGroupRule(market_ids=market_ids, neg_risk_market_id=group_id))
+    return rules
 
 
 def _load_pair_rules(path: Path, section: str, rule_cls, min_confidence: float):
@@ -261,6 +299,45 @@ def _market_ids_from_group_rule(rule: dict) -> List[str]:
         seen.add(market_id)
         market_ids.append(market_id)
     return market_ids
+
+
+def _is_tradeable_binary_gamma_market(market: dict) -> bool:
+    if market.get("closed") is True:
+        return False
+    if market.get("enableOrderBook") is False:
+        return False
+    if market.get("acceptingOrders") is False:
+        return False
+    outcomes = _loads_json_list(market.get("outcomes"))
+    if [str(outcome).lower() for outcome in outcomes] != ["yes", "no"]:
+        return False
+    return len(_loads_json_list(market.get("clobTokenIds"))) == 2
+
+
+def _loads_json_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        loaded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return loaded
+
+
+def _neg_risk_market_sort_key(market: dict) -> tuple:
+    threshold = str(market.get("groupItemThreshold") or "").strip()
+    try:
+        return (0, float(threshold), str(market.get("id") or market.get("conditionId") or ""))
+    except ValueError:
+        return (
+            1,
+            str(market.get("groupItemTitle") or ""),
+            str(market.get("id") or market.get("conditionId") or ""),
+        )
 
 
 def _read_binary_snapshots(path: Path) -> Iterable[BinaryMarketSnapshot]:

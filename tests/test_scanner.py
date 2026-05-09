@@ -8,6 +8,7 @@ from poly_strategy.models import (
     ExhaustiveGroupRule,
     ImplicationRule,
     MutualExclusionRule,
+    NegRiskGroupRule,
     OrderBook,
     VenueBinarySnapshot,
 )
@@ -20,6 +21,7 @@ from poly_strategy.scanner import (
     find_exhaustive_group_arbs,
     find_implication_arbs,
     find_mutually_exclusive_arbs,
+    find_neg_risk_group_arbs,
     find_yes_no_bundle_arbs,
 )
 
@@ -334,6 +336,38 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(find_exhaustive_group_arbs([snapshot], [ExhaustiveGroupRule([])]), [])
         self.assertEqual(find_exhaustive_group_arbs([snapshot], [ExhaustiveGroupRule(["a", "a"])]), [])
+
+    def test_neg_risk_group_arbs_scan_yes_and_no_baskets(self):
+        first = BinaryMarketSnapshot(
+            market_id="a",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.20, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.60, 100)], bids=[]),
+            fee_rate=0.0,
+        )
+        second = BinaryMarketSnapshot(
+            market_id="b",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.30, 70)], bids=[]),
+            no=OrderBook(asks=[Level(0.65, 70)], bids=[]),
+            fee_rate=0.0,
+        )
+        third = BinaryMarketSnapshot(
+            market_id="c",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.40, 80)], bids=[]),
+            no=OrderBook(asks=[Level(0.70, 80)], bids=[]),
+            fee_rate=0.0,
+        )
+        rule = NegRiskGroupRule(["a", "b", "c"], neg_risk_market_id="group-1")
+
+        opportunities = find_neg_risk_group_arbs([first, second, third], [rule], min_net_edge=0.0)
+
+        self.assertEqual([opportunity.kind for opportunity in opportunities], ["neg_risk_group_yes_basket", "neg_risk_group_no_basket"])
+        self.assertAlmostEqual(opportunities[0].cost_per_share, 0.90)
+        self.assertAlmostEqual(opportunities[0].net_edge_per_share, 0.10)
+        self.assertAlmostEqual(opportunities[1].cost_per_share, 1.95)
+        self.assertAlmostEqual(opportunities[1].net_edge_per_share, 0.05)
 
     def test_complement_arb_checks_yes_bundle_and_no_bundle(self):
         first = BinaryMarketSnapshot(

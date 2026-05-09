@@ -53,6 +53,7 @@ def main(argv=None) -> int:
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
                 rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
             )
             print(
                 f"snapshots={result.snapshot_count} opportunities={result.opportunity_count} "
@@ -139,6 +140,7 @@ def main(argv=None) -> int:
                     max_capital_per_trade=args.max_capital_per_trade,
                     bankroll=args.bankroll,
                     rules_path=Path(args.rules),
+                    gamma_path=Path(args.gamma),
                 )
                 current_opportunities = _current_monitor_opportunities(result)
                 stable_opportunities = _stable_current_opportunities(
@@ -167,6 +169,7 @@ def main(argv=None) -> int:
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
                 rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
             )
             row = _paper_report_row(result)
             if args.out:
@@ -328,6 +331,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     backtest.add_argument("--bankroll", type=float, help="cap simulated bankroll per timestamp batch")
     backtest.add_argument("--rules", help="JSON file with implication rules")
+    backtest.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk group paper scans")
 
     collect = subparsers.add_parser("collect-polymarket", help="collect Polymarket public data")
     collect.add_argument("--out", required=True, help="output NDJSON path")
@@ -430,6 +434,7 @@ def _build_parser() -> argparse.ArgumentParser:
     report = subparsers.add_parser("paper-report", help="write a JSON paper-trading replay report")
     report.add_argument("path", help="input NDJSON path")
     report.add_argument("--rules", help="JSON file with discovered rules")
+    report.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk group paper scans")
     report.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
     report.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     report.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
@@ -550,7 +555,8 @@ def _run_paper_monitor(args) -> int:
     snapshots_path = Path(args.snapshots_out)
     report_path = Path(args.report_out)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    rule_set = load_rule_set(Path(args.rules))
+    gamma_path = Path(args.gamma)
+    rule_set = load_rule_set(Path(args.rules), gamma_path=gamma_path if gamma_path.exists() else None)
     replay_state = IncrementalReplayState()
     snapshot_offset = _file_size(snapshots_path)
 

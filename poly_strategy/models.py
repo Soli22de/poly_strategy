@@ -54,6 +54,12 @@ class ExhaustiveGroupRule:
 
 
 @dataclass(frozen=True)
+class NegRiskGroupRule:
+    market_ids: List[str]
+    neg_risk_market_id: str = ""
+
+
+@dataclass(frozen=True)
 class ComplementRule:
     first_market_id: str
     second_market_id: str

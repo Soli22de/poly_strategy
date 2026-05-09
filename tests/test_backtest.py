@@ -9,6 +9,7 @@ from poly_strategy.backtest import (
     load_equivalence_rules,
     load_exhaustive_group_rules,
     load_mutually_exclusive_rules,
+    load_neg_risk_group_rules,
     load_rules,
     replay_ndjson,
 )
@@ -308,6 +309,44 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0].market_ids, ["a", "b"])
 
+    def test_load_neg_risk_group_rules_reads_tradeable_binary_gamma_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "type": "raw_polymarket_gamma_market",
+                            "market_id": market_id,
+                            "raw": {
+                                "id": market_id,
+                                "question": f"{market_id} wins?",
+                                "closed": closed,
+                                "enableOrderBook": True,
+                                "acceptingOrders": True,
+                                "outcomes": json.dumps(["Yes", "No"]),
+                                "clobTokenIds": json.dumps([f"{market_id}-yes", f"{market_id}-no"]),
+                                "negRiskMarketID": group_id,
+                                "groupItemThreshold": threshold,
+                            },
+                        }
+                    )
+                    for market_id, group_id, threshold, closed in [
+                        ("b", "group-1", "2", False),
+                        ("a", "group-1", "1", False),
+                        ("closed", "group-1", "3", True),
+                        ("single", "group-2", "1", False),
+                    ]
+                )
+                + "\n"
+            )
+
+            rules = load_neg_risk_group_rules(path)
+
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0].neg_risk_market_id, "group-1")
+        self.assertEqual(rules[0].market_ids, ["a", "b"])
+
     def test_replay_ndjson_scans_implication_rules_per_timestamp_batch(self):
         rows = [
             {
@@ -497,6 +536,71 @@ class BacktestTests(unittest.TestCase):
         ]
         self.assertEqual(len(basket_opportunities), 1)
         self.assertAlmostEqual(basket_opportunities[0].net_edge_per_share, 0.10)
+
+    def test_replay_ndjson_scans_neg_risk_groups_from_gamma_path(self):
+        rows = [
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "a",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.20, 100]], "bids": []},
+                "no": {"asks": [[0.60, 100]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "b",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.30, 100]], "bids": []},
+                "no": {"asks": [[0.65, 100]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "c",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.40, 100]], "bids": []},
+                "no": {"asks": [[0.70, 100]], "bids": []},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshots_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "type": "raw_polymarket_gamma_market",
+                            "market_id": market_id,
+                            "raw": {
+                                "id": market_id,
+                                "question": f"{market_id} wins?",
+                                "closed": False,
+                                "enableOrderBook": True,
+                                "acceptingOrders": True,
+                                "outcomes": json.dumps(["Yes", "No"]),
+                                "clobTokenIds": json.dumps([f"{market_id}-yes", f"{market_id}-no"]),
+                                "negRiskMarketID": "group-1",
+                                "groupItemThreshold": threshold,
+                            },
+                        }
+                    )
+                    for market_id, threshold in [("a", "1"), ("b", "2"), ("c", "3")]
+                )
+                + "\n"
+            )
+
+            result = replay_ndjson(snapshots_path, gamma_path=gamma_path)
+
+        kinds = sorted(opportunity.kind for opportunity in result.opportunities)
+        self.assertIn("neg_risk_group_yes_basket", kinds)
+        self.assertIn("neg_risk_group_no_basket", kinds)
 
     def test_replay_ndjson_scans_all_pair_relation_rules_per_timestamp_batch(self):
         rows = [

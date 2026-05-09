@@ -11,6 +11,7 @@ from poly_strategy.models import (
     ImplicationRule,
     Leg,
     MutualExclusionRule,
+    NegRiskGroupRule,
     Opportunity,
     VenueBinarySnapshot,
 )
@@ -174,6 +175,43 @@ def find_exhaustive_group_arbs(
     return opportunities
 
 
+def find_neg_risk_group_arbs(
+    snapshots: List[BinaryMarketSnapshot],
+    rules: List[NegRiskGroupRule],
+    min_net_edge: float = 0.0,
+) -> List[Opportunity]:
+    by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
+    opportunities = []
+    for rule in rules:
+        market_ids = _unique_market_ids(rule.market_ids)
+        if len(market_ids) < 2:
+            continue
+        group_snapshots = [by_market_id.get(market_id) for market_id in market_ids]
+        if any(snapshot is None for snapshot in group_snapshots):
+            continue
+
+        yes_opportunity = _bundle_candidate(
+            kind="neg_risk_group_yes_basket",
+            leg_specs=[(snapshot, "YES", snapshot.yes.asks) for snapshot in group_snapshots],
+            payout_per_share=1.0,
+            min_net_edge=min_net_edge,
+            ts=group_snapshots[0].ts,
+        )
+        if yes_opportunity is not None:
+            opportunities.append(yes_opportunity)
+
+        no_opportunity = _bundle_candidate(
+            kind="neg_risk_group_no_basket",
+            leg_specs=[(snapshot, "NO", snapshot.no.asks) for snapshot in group_snapshots],
+            payout_per_share=len(group_snapshots) - 1,
+            min_net_edge=min_net_edge,
+            ts=group_snapshots[0].ts,
+        )
+        if no_opportunity is not None:
+            opportunities.append(no_opportunity)
+    return opportunities
+
+
 def find_complement_arbs(
     snapshots: List[BinaryMarketSnapshot],
     rules: List[ComplementRule],
@@ -272,6 +310,7 @@ def _exhaustive_group_candidate(
     by_market_id: dict,
     min_net_edge: float,
 ) -> Optional[Opportunity]:
+    market_ids = [str(market_id) for market_id in market_ids if market_id]
     if len(market_ids) < 2 or len(set(market_ids)) != len(market_ids):
         return None
 
@@ -286,6 +325,20 @@ def _exhaustive_group_candidate(
         min_net_edge=min_net_edge,
         ts=snapshots[0].ts,
     )
+
+
+def _unique_market_ids(market_ids: List[str]) -> List[str]:
+    unique = []
+    seen = set()
+    for market_id in market_ids:
+        if not market_id:
+            continue
+        normalized = str(market_id)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
 
 
 def _two_leg_candidate(
