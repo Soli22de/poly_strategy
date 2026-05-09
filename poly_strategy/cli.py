@@ -36,6 +36,7 @@ from poly_strategy.execution_checks import pretrade_check_row
 from poly_strategy.external_signals import external_signal_report, ingest_external_signals
 from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to_row
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
+from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.realtime import POLYMARKET_MARKET_WS_URL, monitor_polymarket_watchlist, stream_polymarket_watchlist
@@ -465,6 +466,23 @@ def main(argv=None) -> int:
                 for row in rows:
                     print(json.dumps(row, sort_keys=True))
             return 0
+        if args.command == "notify-alerts":
+            rows = notify_alerts(
+                Path(args.path),
+                max_alerts=args.max_alerts,
+                webhook_url=args.webhook_url or os.environ.get("ALERT_WEBHOOK_URL"),
+                telegram_bot_token=args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN"),
+                telegram_chat_id=args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID"),
+                discord_webhook_url=args.discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL"),
+                desktop=args.desktop,
+                dry_run=args.dry_run,
+                timeout=args.timeout,
+                proxy=args.proxy,
+            )
+            _write_jsonl_or_stdout(rows, args.out)
+            if args.out:
+                print(f"wrote={len(rows)} out={args.out}")
+            return 0
     except (
         OSError,
         URLError,
@@ -867,6 +885,19 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor_alerts.add_argument("--max-alerts", type=int, default=20, help="maximum alert rows to emit")
     monitor_alerts.add_argument("--state", help="optional alert cooldown state JSON path")
     monitor_alerts.add_argument("--cooldown-seconds", type=float, default=0.0, help="suppress duplicate alerts for this many seconds when --state is set")
+
+    notify = subparsers.add_parser("notify-alerts", help="send latest opportunity alerts to webhook/chat/local sinks")
+    notify.add_argument("path", help="opportunity_alert NDJSON path")
+    notify.add_argument("--out", help="output notification_result NDJSON path; prints JSONL when omitted")
+    notify.add_argument("--max-alerts", type=int, default=20, help="latest alerts to notify")
+    notify.add_argument("--webhook-url", help="generic JSON webhook URL; defaults to ALERT_WEBHOOK_URL")
+    notify.add_argument("--telegram-bot-token", help="Telegram bot token; defaults to TELEGRAM_BOT_TOKEN")
+    notify.add_argument("--telegram-chat-id", help="Telegram chat id; defaults to TELEGRAM_CHAT_ID")
+    notify.add_argument("--discord-webhook-url", help="Discord webhook URL; defaults to DISCORD_WEBHOOK_URL")
+    notify.add_argument("--desktop", action="store_true", help="also send a local macOS desktop notification")
+    notify.add_argument("--dry-run", action="store_true", help="format notification_result rows without network or desktop sends")
+    notify.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    notify.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
 
     return parser
 

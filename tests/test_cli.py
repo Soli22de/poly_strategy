@@ -915,6 +915,45 @@ class CliTests(unittest.TestCase):
         self.assertTrue(rows[0]["pretrade_check"]["passed"])
         self.assertIn("snapshots=1 plans=1", stdout.getvalue())
 
+    def test_notify_alerts_command_writes_dry_run_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            alerts = Path(tmp) / "alerts.ndjson"
+            out = Path(tmp) / "notify.ndjson"
+            alerts.write_text(
+                json.dumps(
+                    {
+                        "type": "opportunity_alert",
+                        "alert_kind": "stable_paper_trade",
+                        "key": "a",
+                        "kind": "yes_no_bundle",
+                        "market_ids": ["m1"],
+                        "net_edge_per_share": 0.02,
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "notify-alerts",
+                        str(alerts),
+                        "--webhook-url",
+                        "https://example.test/hook",
+                        "--dry-run",
+                        "--out",
+                        str(out),
+                    ]
+                )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["channel"], "webhook")
+        self.assertEqual(rows[0]["status"], "dry_run")
+        self.assertIn("wrote=1", stdout.getvalue())
+
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):
         result = SimpleNamespace(
             markets_read=2,
