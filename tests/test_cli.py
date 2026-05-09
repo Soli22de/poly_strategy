@@ -1028,6 +1028,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(kwargs["max_opportunities_per_iteration"], 5)
         self.assertIn("iterations=2", stdout.getvalue())
 
+    def test_monitor_alerts_command_writes_latest_alerts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.jsonl"
+            out = Path(tmp) / "alerts.ndjson"
+            report.write_text(
+                json.dumps(
+                    {
+                        "type": "realtime_monitor_iteration",
+                        "iteration": 1,
+                        "stable_paper_trades": [
+                            {
+                                "key": "arb-1",
+                                "kind": "yes_no_bundle",
+                                "paper_roi": 0.03,
+                                "paper_edge": 0.2,
+                                "net_edge_per_share": 0.02,
+                                "total_edge": 0.2,
+                                "legs": [{"market_id": "m1"}],
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["monitor-alerts", str(report), "--out", str(out), "--min-paper-roi", "0.01"])
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["type"], "opportunity_alert")
+        self.assertEqual(rows[0]["key"], "arb-1")
+        self.assertIn("wrote=1", stdout.getvalue())
+
     def test_discover_rules_command_requires_model(self):
         stderr = io.StringIO()
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):

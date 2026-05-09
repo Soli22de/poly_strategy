@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 
+from poly_strategy.alerts import latest_monitor_alerts, write_alerts
 from poly_strategy.backtest import load_rule_set, replay_ndjson, snapshots_from_ndjson_lines
 from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_loop,
@@ -392,6 +393,21 @@ def main(argv=None) -> int:
                 f"paper_edge={summary['paper_edge']:.6f} report={args.report_out}"
             )
             return 0
+        if args.command == "monitor-alerts":
+            rows = latest_monitor_alerts(
+                Path(args.path),
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                include_current=args.include_current,
+                max_alerts=args.max_alerts,
+            )
+            if args.out:
+                count = write_alerts(rows, Path(args.out))
+                print(f"wrote={count} out={args.out}")
+            else:
+                for row in rows:
+                    print(json.dumps(row, sort_keys=True))
+            return 0
     except (
         OSError,
         URLError,
@@ -709,6 +725,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="maximum current/stable opportunities to include in each report row",
     )
+
+    monitor_alerts = subparsers.add_parser(
+        "monitor-alerts",
+        help="extract standardized opportunity alerts from the latest monitor report iteration",
+    )
+    monitor_alerts.add_argument("path", help="paper-monitor or realtime-monitor JSONL report path")
+    monitor_alerts.add_argument("--out", help="append opportunity_alert rows here; prints JSONL when omitted")
+    monitor_alerts.add_argument("--min-paper-roi", type=float, help="minimum stable paper trade ROI")
+    monitor_alerts.add_argument("--min-paper-edge", type=float, help="minimum stable paper trade edge")
+    monitor_alerts.add_argument("--include-current", action="store_true", help="also alert on latest current/stable opportunities")
+    monitor_alerts.add_argument("--max-alerts", type=int, default=20, help="maximum alert rows to emit")
 
     return parser
 

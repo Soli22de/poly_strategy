@@ -192,6 +192,16 @@ python3 -m poly_strategy.cli realtime-monitor-watchlist \
 
 Use `--max-messages` or `--max-iterations` for bounded smoke tests. The realtime monitor uses the same rule set, neg-risk baskets, stable-run filters, conflict-aware paper selection, and quality filters as the HTTP `paper-monitor`, but avoids polling each CLOB book over HTTP.
 
+Extract standardized alert rows from the latest monitor iteration:
+
+```bash
+python3 -m poly_strategy.cli monitor-alerts data/realtime-monitor.jsonl \
+  --min-paper-roi 0.01 \
+  --out data/opportunity-alerts.ndjson
+```
+
+`monitor-alerts` reads either `paper-monitor` or `realtime-monitor-watchlist` reports and emits `opportunity_alert` JSONL rows from the latest stable paper trades. Add `--include-current` if you also want non-paper-selected current opportunities for diagnostics or notifications.
+
 Watch those markets repeatedly and replay opportunities:
 
 ```bash
