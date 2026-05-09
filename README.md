@@ -171,6 +171,27 @@ python3 -m pip install -r requirements-live.txt
 
 The snapshot rows keep the watchlist `fee_rate`, so they can be replayed by the same `backtest`, `paper-report`, and `execute-latest` commands used for HTTP-collected snapshots.
 
+For the lower-latency paper-trading path, scan live WebSocket snapshots in-process and append one JSONL report row per scan interval:
+
+```bash
+python3 -m poly_strategy.cli realtime-monitor-watchlist \
+  --watchlist data/watchlist.json \
+  --rules rules/candidate-implications.json \
+  --gamma data/polymarket-gamma.ndjson \
+  --report-out data/realtime-monitor.jsonl \
+  --snapshots-out data/realtime-monitor-snapshots.ndjson \
+  --updates-out data/realtime-monitor-updates.ndjson \
+  --snapshot-interval 2 \
+  --min-net-edge 0.002 \
+  --max-capital-per-trade 20 \
+  --bankroll 100 \
+  --min-paper-roi 0.01 \
+  --min-run-observations 2 \
+  --min-run-seconds 3
+```
+
+Use `--max-messages` or `--max-iterations` for bounded smoke tests. The realtime monitor uses the same rule set, neg-risk baskets, stable-run filters, conflict-aware paper selection, and quality filters as the HTTP `paper-monitor`, but avoids polling each CLOB book over HTTP.
+
 Watch those markets repeatedly and replay opportunities:
 
 ```bash

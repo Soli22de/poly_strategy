@@ -36,7 +36,7 @@ from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
-from poly_strategy.realtime import POLYMARKET_MARKET_WS_URL, stream_polymarket_watchlist
+from poly_strategy.realtime import POLYMARKET_MARKET_WS_URL, monitor_polymarket_watchlist, stream_polymarket_watchlist
 from poly_strategy.rule_discovery import discover_rules
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
@@ -363,6 +363,35 @@ def main(argv=None) -> int:
             )
             print(f"messages={count} out={args.out}")
             return 0
+        if args.command == "realtime-monitor-watchlist":
+            summary = monitor_polymarket_watchlist(
+                Path(args.watchlist),
+                Path(args.report_out),
+                rules_path=Path(args.rules),
+                gamma_path=Path(args.gamma),
+                updates_out_path=Path(args.updates_out) if args.updates_out else None,
+                snapshots_out_path=Path(args.snapshots_out) if args.snapshots_out else None,
+                max_messages=args.max_messages,
+                max_iterations=args.max_iterations,
+                snapshot_interval_seconds=args.snapshot_interval,
+                min_net_edge=args.min_net_edge,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
+                min_run_observations=args.min_run_observations,
+                min_run_seconds=args.min_run_seconds,
+                max_opportunities_per_iteration=args.max_opportunities_per_iteration,
+                url=args.url,
+                progress=_print_realtime_monitor_progress,
+            )
+            print(
+                f"messages={summary['messages_seen']} iterations={summary['iterations_completed']} "
+                f"snapshots={summary['snapshots_collected']} opportunities={summary['opportunity_count']} "
+                f"paper_edge={summary['paper_edge']:.6f} report={args.report_out}"
+            )
+            return 0
     except (
         OSError,
         URLError,
@@ -654,6 +683,33 @@ def _build_parser() -> argparse.ArgumentParser:
     stream_watchlist.add_argument("--max-messages", type=int, help="stop after this many raw WebSocket messages")
     stream_watchlist.add_argument("--url", default=POLYMARKET_MARKET_WS_URL, help="Polymarket market WebSocket URL")
 
+    realtime_monitor = subparsers.add_parser(
+        "realtime-monitor-watchlist",
+        help="stream a watchlist and scan opportunities from live WebSocket snapshots",
+    )
+    realtime_monitor.add_argument("--watchlist", required=True, help="watchlist JSON from build-watchlist")
+    realtime_monitor.add_argument("--rules", required=True, help="rule JSON path")
+    realtime_monitor.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path for neg-risk groups")
+    realtime_monitor.add_argument("--report-out", required=True, help="append realtime monitor JSONL report here")
+    realtime_monitor.add_argument("--updates-out", help="append normalized realtime orderbook updates here")
+    realtime_monitor.add_argument("--snapshots-out", help="append backtestable binary snapshots here")
+    realtime_monitor.add_argument("--snapshot-interval", type=float, default=2.0, help="seconds between scan iterations")
+    realtime_monitor.add_argument("--max-messages", type=int, help="stop after this many raw WebSocket messages")
+    realtime_monitor.add_argument("--max-iterations", type=int, help="stop after this many scan iterations")
+    realtime_monitor.add_argument("--url", default=POLYMARKET_MARKET_WS_URL, help="Polymarket market WebSocket URL")
+    realtime_monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
+    realtime_monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
+    realtime_monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per scan iteration")
+    _add_paper_filter_args(realtime_monitor)
+    realtime_monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
+    realtime_monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
+    realtime_monitor.add_argument(
+        "--max-opportunities-per-iteration",
+        type=int,
+        default=10,
+        help="maximum current/stable opportunities to include in each report row",
+    )
+
     return parser
 
 
@@ -841,6 +897,16 @@ def _print_current_monitor_details(opportunities, runs) -> None:
             f"run market={run.market_id} observations={run.observation_count} "
             f"duration_seconds={run.duration_seconds:.3f} max_edge={run.max_edge_per_share:.6f}"
         )
+
+
+def _print_realtime_monitor_progress(row: dict) -> None:
+    print(
+        f"iteration={row['iteration']} messages={row['messages_seen']} "
+        f"snapshots={row['snapshots_collected']} "
+        f"current_opportunities={row['current_opportunity_count']} "
+        f"stable_opportunities={row['stable_opportunity_count']} "
+        f"stable_paper_edge={row['stable_paper_edge']:.6f}"
+    )
 
 
 def _paper_report_row(result) -> dict:

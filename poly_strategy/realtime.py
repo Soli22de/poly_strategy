@@ -3,9 +3,12 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
+from poly_strategy.backtest import load_rule_set, snapshot_from_row
+from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.orderbook import Level
+from poly_strategy.paper import opportunity_to_row, select_paper_trades, trade_to_row
 
 
 POLYMARKET_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -47,6 +50,10 @@ class RealtimeOrderBookStore:
     def __init__(self):
         self._books = {}
         self.last_update_ts = None
+
+    @property
+    def token_count(self) -> int:
+        return len(self._books)
 
     def apply_polymarket_message(self, message: dict) -> list:
         if isinstance(message, list):
@@ -182,6 +189,54 @@ def stream_polymarket_watchlist(
     )
 
 
+def monitor_polymarket_watchlist(
+    watchlist_path: Path,
+    report_out_path: Path,
+    rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
+    updates_out_path: Optional[Path] = None,
+    snapshots_out_path: Optional[Path] = None,
+    max_messages: Optional[int] = None,
+    max_iterations: Optional[int] = None,
+    snapshot_interval_seconds: Optional[float] = 2.0,
+    min_net_edge: float = 0.0,
+    max_capital_per_trade: Optional[float] = None,
+    bankroll: Optional[float] = None,
+    min_paper_roi: Optional[float] = None,
+    min_paper_edge: Optional[float] = None,
+    min_paper_quantity: float = 1e-9,
+    min_run_observations: int = 1,
+    min_run_seconds: float = 0.0,
+    max_opportunities_per_iteration: int = 10,
+    url: str = POLYMARKET_MARKET_WS_URL,
+    progress: Optional[Callable[[dict], None]] = None,
+) -> dict:
+    return asyncio.run(
+        _monitor_polymarket_watchlist(
+            watchlist_path,
+            report_out_path,
+            rules_path=rules_path,
+            gamma_path=gamma_path,
+            updates_out_path=updates_out_path,
+            snapshots_out_path=snapshots_out_path,
+            max_messages=max_messages,
+            max_iterations=max_iterations,
+            snapshot_interval_seconds=snapshot_interval_seconds,
+            min_net_edge=min_net_edge,
+            max_capital_per_trade=max_capital_per_trade,
+            bankroll=bankroll,
+            min_paper_roi=min_paper_roi,
+            min_paper_edge=min_paper_edge,
+            min_paper_quantity=min_paper_quantity,
+            min_run_observations=min_run_observations,
+            min_run_seconds=min_run_seconds,
+            max_opportunities_per_iteration=max_opportunities_per_iteration,
+            url=url,
+            progress=progress,
+        )
+    )
+
+
 async def _stream_polymarket_watchlist(
     watchlist_path: Path,
     out_path: Path,
@@ -235,6 +290,286 @@ async def _stream_polymarket_watchlist(
     return count
 
 
+async def _monitor_polymarket_watchlist(
+    watchlist_path: Path,
+    report_out_path: Path,
+    rules_path: Optional[Path],
+    gamma_path: Optional[Path],
+    updates_out_path: Optional[Path],
+    snapshots_out_path: Optional[Path],
+    max_messages: Optional[int],
+    max_iterations: Optional[int],
+    snapshot_interval_seconds: Optional[float],
+    min_net_edge: float,
+    max_capital_per_trade: Optional[float],
+    bankroll: Optional[float],
+    min_paper_roi: Optional[float],
+    min_paper_edge: Optional[float],
+    min_paper_quantity: float,
+    min_run_observations: int,
+    min_run_seconds: float,
+    max_opportunities_per_iteration: int,
+    url: str,
+    progress: Optional[Callable[[dict], None]],
+) -> dict:
+    _validate_realtime_limits(
+        max_messages=max_messages,
+        max_iterations=max_iterations,
+        snapshot_interval_seconds=snapshot_interval_seconds,
+        min_run_observations=min_run_observations,
+        min_run_seconds=min_run_seconds,
+        max_opportunities_per_iteration=max_opportunities_per_iteration,
+    )
+    try:
+        import websockets
+    except ImportError as exc:
+        raise RuntimeError("install websockets to use realtime WebSocket commands") from exc
+
+    markets = load_watchlist_markets(watchlist_path)
+    payload = polymarket_subscription_payload(token_ids_from_watchlist(markets))
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
+    replay_state = IncrementalReplayState()
+    store = RealtimeOrderBookStore()
+
+    report_out_path.parent.mkdir(parents=True, exist_ok=True)
+    if updates_out_path:
+        updates_out_path.parent.mkdir(parents=True, exist_ok=True)
+    if snapshots_out_path:
+        snapshots_out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    message_count = 0
+    iteration = 0
+    snapshots_collected = 0
+    next_snapshot_at = _initial_next_snapshot_at(snapshot_interval_seconds)
+    report_handle = report_out_path.open("a")
+    updates_handle = updates_out_path.open("a") if updates_out_path else None
+    snapshots_handle = snapshots_out_path.open("a") if snapshots_out_path else None
+    try:
+        async with websockets.connect(url) as websocket:
+            await websocket.send(json.dumps(payload))
+            while True:
+                raw_message = await _recv_until_next_snapshot(websocket, next_snapshot_at, snapshot_interval_seconds)
+                if raw_message is not None:
+                    message_count += 1
+                    message = json.loads(raw_message)
+                    update_rows = store.apply_polymarket_message(message)
+                    _write_rows(updates_handle, update_rows)
+
+                if _should_scan_now(raw_message, next_snapshot_at, snapshot_interval_seconds):
+                    snapshot_rows = store.binary_snapshot_rows(markets)
+                    next_snapshot_at = _advance_next_snapshot_at(snapshot_interval_seconds)
+                    if snapshot_rows:
+                        iteration += 1
+                        snapshots_collected += len(snapshot_rows)
+                        _write_rows(snapshots_handle, snapshot_rows)
+                        snapshots = [snapshot_from_row(row) for row in snapshot_rows]
+                        batch_result = replay_state.apply_snapshots(
+                            snapshots,
+                            rule_set,
+                            min_net_edge=min_net_edge,
+                            max_capital_per_trade=max_capital_per_trade,
+                            bankroll=bankroll,
+                            min_paper_roi=min_paper_roi,
+                            min_paper_edge=min_paper_edge,
+                            min_paper_quantity=min_paper_quantity,
+                        )
+                        stable_opportunities = stable_current_opportunities(
+                            batch_result.current_opportunities,
+                            batch_result.current_runs,
+                            min_run_observations=min_run_observations,
+                            min_run_seconds=min_run_seconds,
+                        )
+                        stable_selection = select_paper_trades(
+                            stable_opportunities,
+                            max_capital_per_trade=max_capital_per_trade,
+                            bankroll=bankroll,
+                            min_quantity=min_paper_quantity,
+                            min_roi=min_paper_roi,
+                            min_edge=min_paper_edge,
+                        )
+                        row = _realtime_monitor_iteration_row(
+                            iteration,
+                            message_count,
+                            len(snapshot_rows),
+                            store,
+                            replay_state,
+                            batch_result.current_opportunities,
+                            stable_opportunities,
+                            stable_selection,
+                            batch_result.current_runs,
+                            max_opportunities_per_iteration,
+                        )
+                        _write_rows(report_handle, [row])
+                        if progress:
+                            progress(row)
+                        if max_iterations is not None and iteration >= max_iterations:
+                            break
+
+                if max_messages is not None and message_count >= max_messages:
+                    break
+    finally:
+        for handle in [snapshots_handle, updates_handle, report_handle]:
+            if handle:
+                handle.close()
+
+    summary = _realtime_monitor_summary_row(
+        watchlist_path,
+        report_out_path,
+        snapshots_out_path,
+        updates_out_path,
+        message_count,
+        iteration,
+        snapshots_collected,
+        replay_state,
+    )
+    _append_jsonl_row(report_out_path, summary)
+    return summary
+
+
+def _validate_realtime_limits(
+    max_messages: Optional[int],
+    max_iterations: Optional[int],
+    snapshot_interval_seconds: Optional[float],
+    min_run_observations: int,
+    min_run_seconds: float,
+    max_opportunities_per_iteration: int,
+) -> None:
+    if max_messages is not None and max_messages < 1:
+        raise ValueError("max_messages must be at least 1")
+    if max_iterations is not None and max_iterations < 1:
+        raise ValueError("max_iterations must be at least 1")
+    if snapshot_interval_seconds is not None and snapshot_interval_seconds < 0:
+        raise ValueError("snapshot_interval_seconds must be non-negative")
+    if min_run_observations < 1:
+        raise ValueError("min_run_observations must be at least 1")
+    if min_run_seconds < 0:
+        raise ValueError("min_run_seconds must be non-negative")
+    if max_opportunities_per_iteration < 0:
+        raise ValueError("max_opportunities_per_iteration must be non-negative")
+
+
+def _realtime_monitor_iteration_row(
+    iteration: int,
+    messages_seen: int,
+    snapshots_collected: int,
+    store: RealtimeOrderBookStore,
+    result: IncrementalReplayState,
+    current_opportunities: list,
+    stable_opportunities: list,
+    stable_selection,
+    current_runs: list,
+    max_opportunities_per_iteration: int,
+) -> dict:
+    stable_paper_capital_used = sum(trade.capital_used for trade in stable_selection.trades)
+    stable_paper_edge = sum(trade.edge for trade in stable_selection.trades)
+    top_current = _top_opportunity_rows(current_opportunities, max_opportunities_per_iteration)
+    top_stable = _top_opportunity_rows(stable_opportunities, max_opportunities_per_iteration)
+    top_stable_trades = [
+        trade_to_row(trade)
+        for trade in sorted(stable_selection.trades, key=lambda trade: trade.roi, reverse=True)[
+            :max_opportunities_per_iteration
+        ]
+    ]
+    return {
+        "type": "realtime_monitor_iteration",
+        "ts": _utc_now(),
+        "iteration": iteration,
+        "messages_seen": messages_seen,
+        "known_token_count": store.token_count,
+        "snapshots_collected": snapshots_collected,
+        "snapshot_count": result.snapshot_count,
+        "opportunity_count": result.opportunity_count,
+        "current_opportunity_count": len(current_opportunities),
+        "stable_opportunity_count": len(stable_opportunities),
+        "paper_trade_count": result.paper_trade_count,
+        "paper_rejection_count": len(result.paper_rejections),
+        "paper_capital_used": result.paper_capital_used,
+        "paper_edge": result.paper_edge,
+        "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
+        "stable_paper_trade_count": len(stable_selection.trades),
+        "stable_paper_rejection_count": len(stable_selection.rejections),
+        "stable_paper_capital_used": stable_paper_capital_used,
+        "stable_paper_edge": stable_paper_edge,
+        "stable_paper_roi": stable_paper_edge / stable_paper_capital_used if stable_paper_capital_used > 0 else 0.0,
+        "last_snapshot_ts": result.last_snapshot_ts,
+        "current_opportunities": top_current,
+        "stable_opportunities": top_stable,
+        "stable_paper_trades": top_stable_trades,
+        "current_runs": [_run_to_row(run) for run in current_runs],
+    }
+
+
+def _realtime_monitor_summary_row(
+    watchlist_path: Path,
+    report_out_path: Path,
+    snapshots_out_path: Optional[Path],
+    updates_out_path: Optional[Path],
+    messages_seen: int,
+    iterations_completed: int,
+    snapshots_collected: int,
+    result: IncrementalReplayState,
+) -> dict:
+    return {
+        "type": "realtime_monitor_summary",
+        "ts": _utc_now(),
+        "watchlist_path": str(watchlist_path),
+        "report_path": str(report_out_path),
+        "snapshots_path": str(snapshots_out_path) if snapshots_out_path else None,
+        "updates_path": str(updates_out_path) if updates_out_path else None,
+        "messages_seen": messages_seen,
+        "iterations_completed": iterations_completed,
+        "snapshots_collected": snapshots_collected,
+        "snapshot_count": result.snapshot_count,
+        "opportunity_count": result.opportunity_count,
+        "paper_trade_count": result.paper_trade_count,
+        "paper_capital_used": result.paper_capital_used,
+        "paper_edge": result.paper_edge,
+        "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
+        "last_snapshot_ts": result.last_snapshot_ts,
+        "run_count": len(result.runs),
+    }
+
+
+def _top_opportunity_rows(opportunities: list, limit: int) -> list:
+    if limit == 0:
+        return []
+    return [
+        opportunity_to_row(opportunity)
+        for opportunity in sorted(opportunities, key=lambda opportunity: opportunity.net_edge_per_share, reverse=True)[
+            :limit
+        ]
+    ]
+
+
+def _run_to_row(run) -> dict:
+    return {
+        "key": run.key,
+        "market_id": run.market_id,
+        "start_ts": run.start_ts,
+        "end_ts": run.end_ts,
+        "observation_count": run.observation_count,
+        "duration_seconds": run.duration_seconds,
+        "max_edge_per_share": run.max_edge_per_share,
+    }
+
+
+def _write_rows(handle, rows: Iterable[dict]) -> None:
+    if not handle:
+        return
+    wrote = False
+    for row in rows:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+        wrote = True
+    if wrote:
+        handle.flush()
+
+
+def _append_jsonl_row(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def _levels_dict(levels: Iterable[dict]) -> dict:
     return {float(level["price"]): float(level["size"]) for level in levels if float(level.get("size", 0)) > 0}
 
@@ -253,6 +588,34 @@ def _should_write_snapshot(last_snapshot_at: Optional[float], interval_seconds: 
     if last_snapshot_at is None:
         return True
     return time.monotonic() - last_snapshot_at >= interval_seconds
+
+
+def _initial_next_snapshot_at(interval_seconds: Optional[float]) -> Optional[float]:
+    if interval_seconds is None or interval_seconds == 0:
+        return None
+    return time.monotonic() + interval_seconds
+
+
+def _advance_next_snapshot_at(interval_seconds: Optional[float]) -> Optional[float]:
+    if interval_seconds is None or interval_seconds == 0:
+        return None
+    return time.monotonic() + interval_seconds
+
+
+async def _recv_until_next_snapshot(websocket, next_snapshot_at: Optional[float], interval_seconds: Optional[float]):
+    if interval_seconds is None or interval_seconds == 0:
+        return await websocket.recv()
+    timeout = max(0.0, (next_snapshot_at or time.monotonic()) - time.monotonic())
+    try:
+        return await asyncio.wait_for(websocket.recv(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+
+
+def _should_scan_now(raw_message, next_snapshot_at: Optional[float], interval_seconds: Optional[float]) -> bool:
+    if interval_seconds is None or interval_seconds == 0:
+        return raw_message is not None
+    return time.monotonic() >= (next_snapshot_at or 0.0)
 
 
 def _update_row(venue: str, token_id: str, market: Optional[str], event_type: str, book: dict, ts: str, raw: dict) -> dict:

@@ -950,6 +950,84 @@ class CliTests(unittest.TestCase):
         )
         self.assertIn("messages=2", stdout.getvalue())
 
+    def test_realtime_monitor_watchlist_command_invokes_monitor(self):
+        summary = {
+            "messages_seen": 5,
+            "iterations_completed": 2,
+            "snapshots_collected": 4,
+            "opportunity_count": 1,
+            "paper_edge": 0.12,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            watchlist = Path(tmp) / "watchlist.json"
+            rules = Path(tmp) / "rules.json"
+            gamma = Path(tmp) / "gamma.ndjson"
+            report = Path(tmp) / "report.jsonl"
+            updates = Path(tmp) / "updates.ndjson"
+            snapshots = Path(tmp) / "snapshots.ndjson"
+
+            stdout = io.StringIO()
+            with patch("poly_strategy.cli.monitor_polymarket_watchlist", return_value=summary) as monitor:
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "realtime-monitor-watchlist",
+                            "--watchlist",
+                            str(watchlist),
+                            "--rules",
+                            str(rules),
+                            "--gamma",
+                            str(gamma),
+                            "--report-out",
+                            str(report),
+                            "--updates-out",
+                            str(updates),
+                            "--snapshots-out",
+                            str(snapshots),
+                            "--snapshot-interval",
+                            "2",
+                            "--max-messages",
+                            "5",
+                            "--max-iterations",
+                            "2",
+                            "--min-net-edge",
+                            "0.002",
+                            "--max-capital-per-trade",
+                            "20",
+                            "--bankroll",
+                            "100",
+                            "--min-paper-roi",
+                            "0.01",
+                            "--min-run-observations",
+                            "2",
+                            "--min-run-seconds",
+                            "3",
+                            "--max-opportunities-per-iteration",
+                            "5",
+                            "--url",
+                            "wss://example.test/ws",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        monitor.assert_called_once()
+        kwargs = monitor.call_args.kwargs
+        self.assertEqual(monitor.call_args.args[0], watchlist)
+        self.assertEqual(monitor.call_args.args[1], report)
+        self.assertEqual(kwargs["rules_path"], rules)
+        self.assertEqual(kwargs["gamma_path"], gamma)
+        self.assertEqual(kwargs["updates_out_path"], updates)
+        self.assertEqual(kwargs["snapshots_out_path"], snapshots)
+        self.assertEqual(kwargs["max_messages"], 5)
+        self.assertEqual(kwargs["max_iterations"], 2)
+        self.assertEqual(kwargs["snapshot_interval_seconds"], 2.0)
+        self.assertEqual(kwargs["min_net_edge"], 0.002)
+        self.assertEqual(kwargs["min_paper_roi"], 0.01)
+        self.assertEqual(kwargs["min_run_observations"], 2)
+        self.assertEqual(kwargs["min_run_seconds"], 3.0)
+        self.assertEqual(kwargs["max_opportunities_per_iteration"], 5)
+        self.assertIn("iterations=2", stdout.getvalue())
+
     def test_discover_rules_command_requires_model(self):
         stderr = io.StringIO()
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):

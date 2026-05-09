@@ -1,12 +1,16 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from poly_strategy.realtime import (
     RealtimeOrderBookStore,
     kalshi_orderbook_subscription_payload,
     load_watchlist_markets,
+    monitor_polymarket_watchlist,
     polymarket_subscription_payload,
     token_ids_from_watchlist,
 )
@@ -123,6 +127,111 @@ class RealtimeTests(unittest.TestCase):
             markets = load_watchlist_markets(path)
 
         self.assertEqual(token_ids_from_watchlist(markets), ["yes-token", "no-token", "other-no"])
+
+    def test_monitor_polymarket_watchlist_scans_live_snapshots(self):
+        messages = [
+            [
+                {
+                    "event_type": "book",
+                    "asset_id": "yes-token",
+                    "market": "market-1",
+                    "timestamp": "1710000000000",
+                    "bids": [{"price": "0.44", "size": "5"}],
+                    "asks": [{"price": "0.45", "size": "10"}],
+                },
+                {
+                    "event_type": "book",
+                    "asset_id": "no-token",
+                    "market": "market-1",
+                    "timestamp": "1710000000000",
+                    "bids": [{"price": "0.52", "size": "5"}],
+                    "asks": [{"price": "0.53", "size": "7"}],
+                },
+            ]
+        ]
+        fake_socket = _FakeWebSocket(messages)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watchlist = tmp_path / "watchlist.json"
+            rules = tmp_path / "rules.json"
+            report = tmp_path / "report.jsonl"
+            updates = tmp_path / "updates.ndjson"
+            snapshots = tmp_path / "snapshots.ndjson"
+            watchlist.write_text(
+                json.dumps(
+                    {
+                        "type": "polymarket_watchlist",
+                        "markets": [
+                            {
+                                "market_id": "market-1",
+                                "question": "Sample?",
+                                "fee_rate": 0.0,
+                                "yes_token_id": "yes-token",
+                                "no_token_id": "no-token",
+                            }
+                        ],
+                    }
+                )
+            )
+            rules.write_text(json.dumps({}))
+            progress_rows = []
+
+            with patch.dict(
+                sys.modules,
+                {"websockets": SimpleNamespace(connect=lambda url: fake_socket)},
+            ):
+                summary = monitor_polymarket_watchlist(
+                    watchlist,
+                    report,
+                    rules_path=rules,
+                    updates_out_path=updates,
+                    snapshots_out_path=snapshots,
+                    max_messages=1,
+                    snapshot_interval_seconds=0,
+                    min_net_edge=0.0,
+                    progress=progress_rows.append,
+                )
+
+            report_rows = [json.loads(line) for line in report.read_text().splitlines()]
+            update_rows = [json.loads(line) for line in updates.read_text().splitlines()]
+            snapshot_rows = [json.loads(line) for line in snapshots.read_text().splitlines()]
+
+        self.assertEqual(summary["type"], "realtime_monitor_summary")
+        self.assertEqual(summary["iterations_completed"], 1)
+        self.assertEqual(summary["opportunity_count"], 1)
+        self.assertEqual(progress_rows[0]["current_opportunity_count"], 1)
+        self.assertEqual(report_rows[0]["type"], "realtime_monitor_iteration")
+        self.assertEqual(report_rows[1]["type"], "realtime_monitor_summary")
+        self.assertEqual(len(update_rows), 2)
+        self.assertEqual(snapshot_rows[0]["type"], "binary_snapshot")
+        self.assertEqual(json.loads(fake_socket.sent[0])["assets_ids"], ["yes-token", "no-token"])
+
+
+class _FakeWebSocket:
+    def __init__(self, messages):
+        self._messages = list(messages)
+        self.sent = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self.recv()
+
+    async def recv(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return json.dumps(self._messages.pop(0))
 
 
 if __name__ == "__main__":
