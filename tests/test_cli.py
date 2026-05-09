@@ -594,8 +594,49 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["dry_run"])
+        self.assertTrue(rows[0]["pretrade_check"]["passed"])
         self.assertEqual([order["token_id"] for order in rows[0]["orders"]], ["yes-token", "no-token"])
         self.assertIn("wrote=1", stdout.getvalue())
+
+    def test_execute_latest_can_require_pretrade_check_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.ndjson"
+            out = Path(tmp) / "plans.ndjson"
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"token_id": "yes-token", "asks": [[0.45, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "execute-latest",
+                        str(path),
+                        "--out",
+                        str(out),
+                        "--max-capital-per-trade",
+                        "9.80",
+                        "--max-leg-count",
+                        "1",
+                        "--require-pretrade-pass",
+                    ]
+                )
+            plan_text = out.read_text()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(plan_text, "")
+        self.assertIn("wrote=0", stdout.getvalue())
 
     def test_execute_latest_can_require_stable_run_observations(self):
         with tempfile.TemporaryDirectory() as tmp:

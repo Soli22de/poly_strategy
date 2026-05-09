@@ -30,6 +30,7 @@ from poly_strategy.execution import (
     build_execution_plan,
     plan_to_row,
 )
+from poly_strategy.execution_checks import pretrade_check_row
 from poly_strategy.external_signals import external_signal_report, ingest_external_signals
 from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to_row
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
@@ -509,6 +510,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--live", action="store_true", help="submit orders through py-clob-client-v2")
     execute.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
     execute.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
+    _add_pretrade_check_args(execute)
 
     execute_once = subparsers.add_parser(
         "execute-rules-once",
@@ -540,6 +542,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--live", action="store_true", help="submit orders through py-clob-client-v2")
     execute_once.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
     execute_once.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
+    _add_pretrade_check_args(execute_once)
 
     discover = subparsers.add_parser("discover-rules", help="discover implication rules with an OpenAI-compatible API")
     discover.add_argument("--raw", required=True, help="input raw Polymarket Gamma NDJSON path")
@@ -611,6 +614,13 @@ def _add_paper_filter_args(parser) -> None:
         default=1e-9,
         help="minimum selected paper trade quantity",
     )
+
+
+def _add_pretrade_check_args(parser) -> None:
+    parser.add_argument("--max-leg-count", type=int, help="fail pretrade check if a plan has more legs")
+    parser.add_argument("--max-worst-price", type=float, help="fail pretrade check if any buy reference price exceeds this value")
+    parser.add_argument("--require-single-level", action="store_true", help="fail pretrade check if a leg crosses multiple price levels")
+    parser.add_argument("--require-pretrade-pass", action="store_true", help="skip execution plans that fail pretrade checks")
 
 
 def _run_paper_monitor(args) -> int:
@@ -982,8 +992,11 @@ def _execution_plan_rows(result, args) -> list:
         min_roi=args.min_paper_roi,
         min_edge=args.min_paper_edge,
     )
-    plans = [
-        build_execution_plan(
+    runs_by_key = {run.key: run for run in getattr(result, "runs", [])}
+    rows = []
+    plans = []
+    for trade in selection.trades[: args.max_trades]:
+        plan = build_execution_plan(
             trade,
             slippage_bps=args.slippage_bps,
             tick_size=args.tick_size,
@@ -991,9 +1004,19 @@ def _execution_plan_rows(result, args) -> list:
             order_type=args.order_type,
             dry_run=not args.live,
         )
-        for trade in selection.trades[: args.max_trades]
-    ]
-    rows = [plan_to_row(plan) for plan in plans]
+        check = pretrade_check_row(
+            trade,
+            run=runs_by_key.get(opportunity_key(trade.opportunity)),
+            max_leg_count=args.max_leg_count,
+            max_worst_price=args.max_worst_price,
+            require_single_level=args.require_single_level,
+        )
+        if args.require_pretrade_pass and not check["passed"]:
+            continue
+        row = plan_to_row(plan)
+        row["pretrade_check"] = check
+        rows.append(row)
+        plans.append(plan)
     if args.live and rows:
         if not args.allow_live:
             raise ExecutionConfigError("--allow-live is required with --live")
