@@ -61,6 +61,32 @@ def write_alerts(
     return len(rows)
 
 
+def read_opportunity_alerts(path: Path) -> list:
+    rows = []
+    if not path.exists():
+        return rows
+    with path.open() as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("type") == "opportunity_alert":
+                rows.append(row)
+    return rows
+
+
+def latest_alert_market_ids(path: Path, max_alerts: int = 20) -> list:
+    if max_alerts < 0:
+        raise ValueError("max_alerts must be non-negative")
+    market_ids = []
+    for row in read_opportunity_alerts(path)[-max_alerts:]:
+        for market_id in row.get("market_ids", []):
+            if market_id:
+                market_ids.append(str(market_id))
+    return list(dict.fromkeys(market_ids))
+
+
 def _latest_iteration_row(report_path: Path) -> Optional[dict]:
     latest = None
     with report_path.open() as handle:

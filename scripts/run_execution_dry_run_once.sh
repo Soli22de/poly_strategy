@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
+ALERTS_PATH="${ALERTS_PATH:-data/realtime-monitor-24h-v1-alerts.ndjson}"
+GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"
+RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
+SNAPSHOTS_OUT="${SNAPSHOTS_OUT:-data/realtime-alert-execution-refresh.ndjson}"
+PLANS_OUT="${PLANS_OUT:-data/realtime-alert-execution-plans.ndjson}"
+PROXY="${PROXY:-127.0.0.1:10808}"
+TIMEOUT="${TIMEOUT:-10}"
+BOOK_WORKERS="${BOOK_WORKERS:-4}"
+MAX_ALERTS="${MAX_ALERTS:-20}"
+MIN_NET_EDGE="${MIN_NET_EDGE:-0.002}"
+MAX_CAPITAL_PER_TRADE="${MAX_CAPITAL_PER_TRADE:-10}"
+BANKROLL="${BANKROLL:-50}"
+MIN_PAPER_ROI="${MIN_PAPER_ROI:-0.01}"
+MIN_RUN_OBSERVATIONS="${MIN_RUN_OBSERVATIONS:-1}"
+MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-0}"
+MAX_TRADES="${MAX_TRADES:-3}"
+SLIPPAGE_BPS="${SLIPPAGE_BPS:-50}"
+TICK_SIZE="${TICK_SIZE:-0.01}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "missing python: $PYTHON_BIN" >&2
+  exit 1
+fi
+
+if [[ ! -s "$ALERTS_PATH" ]]; then
+  echo "alerts=0 snapshots=0 plans=0 out=$PLANS_OUT"
+  exit 0
+fi
+
+exec "$PYTHON_BIN" -m poly_strategy.cli execute-alerts "$ALERTS_PATH" \
+  --gamma "$GAMMA" \
+  --rules "$RULES" \
+  --snapshots-out "$SNAPSHOTS_OUT" \
+  --out "$PLANS_OUT" \
+  --max-alerts "$MAX_ALERTS" \
+  --timeout "$TIMEOUT" \
+  --proxy "$PROXY" \
+  --book-workers "$BOOK_WORKERS" \
+  --skip-book-errors \
+  --refresh-missing-gamma \
+  --min-net-edge "$MIN_NET_EDGE" \
+  --max-capital-per-trade "$MAX_CAPITAL_PER_TRADE" \
+  --bankroll "$BANKROLL" \
+  --min-paper-roi "$MIN_PAPER_ROI" \
+  --min-run-observations "$MIN_RUN_OBSERVATIONS" \
+  --min-run-seconds "$MIN_RUN_SECONDS" \
+  --max-trades "$MAX_TRADES" \
+  --slippage-bps "$SLIPPAGE_BPS" \
+  --tick-size "$TICK_SIZE" \
+  --require-single-level \
+  --require-pretrade-pass

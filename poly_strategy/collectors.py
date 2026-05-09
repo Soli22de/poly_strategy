@@ -203,6 +203,45 @@ def collect_polymarket_binary_snapshots_for_rules(
     )
 
 
+def collect_polymarket_binary_snapshots_for_market_ids(
+    path: Path,
+    gamma_path: Path,
+    market_ids: Iterable[str],
+    timeout: float,
+    proxy: Optional[str] = None,
+    max_workers: int = 1,
+    skip_book_errors: bool = False,
+    errors: Optional[list] = None,
+    expand_neg_risk_groups: bool = True,
+    refresh_missing_gamma: bool = False,
+) -> int:
+    markets = raw_gamma_markets_from_ndjson(gamma_path)
+    selected_market_ids = {str(market_id) for market_id in market_ids if market_id}
+    known_market_ids = {str(market.get("id") or market.get("conditionId") or "") for market in markets}
+    missing_market_ids = sorted(selected_market_ids - known_market_ids)
+    if missing_market_ids and refresh_missing_gamma:
+        collect_polymarket_gamma_markets_by_id(gamma_path, missing_market_ids, timeout, proxy)
+        markets = raw_gamma_markets_from_ndjson(gamma_path)
+
+    if expand_neg_risk_groups:
+        selected_market_ids = expand_market_ids_with_neg_risk_groups(markets, selected_market_ids)
+
+    def fetch_book(token_id: str) -> dict:
+        book_params = urlencode({"token_id": token_id})
+        return _fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{book_params}", timeout, proxy=proxy)
+
+    return collect_polymarket_binary_snapshots_for_markets(
+        path,
+        markets,
+        selected_market_ids,
+        fetch_book,
+        ts=_utc_now(),
+        max_workers=max_workers,
+        skip_book_errors=skip_book_errors,
+        errors=errors,
+    )
+
+
 def collect_polymarket_binary_snapshots_for_rules_loop(
     path: Path,
     gamma_path: Path,

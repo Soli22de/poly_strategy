@@ -857,6 +857,64 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["orders"][0]["token_id"], "yes-token")
         self.assertIn("snapshots=1 plans=1", stdout.getvalue())
 
+    def test_execute_alerts_refreshes_alert_markets_before_planning(self):
+        def collect_once(path, gamma, market_ids, timeout, proxy, max_workers, **kwargs):
+            self.assertEqual(market_ids, ["sample"])
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"token_id": "yes-token", "asks": [[0.45, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+            return 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            alerts = Path(tmp) / "alerts.ndjson"
+            gamma = Path(tmp) / "gamma.ndjson"
+            rules = Path(tmp) / "rules.json"
+            snapshots = Path(tmp) / "fresh.ndjson"
+            out = Path(tmp) / "plans.ndjson"
+            alerts.write_text(json.dumps({"type": "opportunity_alert", "market_ids": ["sample"]}) + "\n")
+            gamma.write_text("")
+            rules.write_text("{}")
+
+            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_market_ids", side_effect=collect_once) as collect:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "execute-alerts",
+                            str(alerts),
+                            "--gamma",
+                            str(gamma),
+                            "--rules",
+                            str(rules),
+                            "--snapshots-out",
+                            str(snapshots),
+                            "--out",
+                            str(out),
+                            "--max-capital-per-trade",
+                            "9.80",
+                            "--require-pretrade-pass",
+                        ]
+                    )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_alert_market_ids"], ["sample"])
+        self.assertTrue(rows[0]["pretrade_check"]["passed"])
+        self.assertIn("snapshots=1 plans=1", stdout.getvalue())
+
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):
         result = SimpleNamespace(
             markets_read=2,

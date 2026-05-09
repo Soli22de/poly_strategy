@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 
-from poly_strategy.alerts import latest_monitor_alerts, write_alerts
+from poly_strategy.alerts import latest_alert_market_ids, latest_monitor_alerts, write_alerts
 from poly_strategy.backtest import load_rule_set, replay_ndjson, snapshots_from_ndjson_lines
 from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_loop,
+    collect_polymarket_binary_snapshots_for_market_ids,
     collect_polymarket_binary_snapshots_for_rules,
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
@@ -252,6 +253,48 @@ def main(argv=None) -> int:
             _write_jsonl_or_stdout(rows, args.out)
             if args.out:
                 print(f"snapshots={count} plans={len(rows)} out={args.out}")
+            return 0
+        if args.command == "execute-alerts":
+            market_ids = latest_alert_market_ids(Path(args.alerts), max_alerts=args.max_alerts)
+            if not market_ids:
+                _write_jsonl_or_stdout([], args.out)
+                if args.out:
+                    print(f"alerts=0 snapshots=0 plans=0 out={args.out}")
+                return 0
+            collection_errors = []
+            count = collect_polymarket_binary_snapshots_for_market_ids(
+                Path(args.snapshots_out),
+                Path(args.gamma),
+                market_ids,
+                args.timeout,
+                args.proxy,
+                args.book_workers,
+                skip_book_errors=args.skip_book_errors,
+                errors=collection_errors,
+                expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                refresh_missing_gamma=args.refresh_missing_gamma,
+            )
+            result = replay_ndjson(
+                Path(args.snapshots_out),
+                min_net_edge=args.min_net_edge,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+                rules_path=Path(args.rules),
+                gamma_path=Path(args.gamma),
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
+            )
+            rows = _execution_plan_rows(result, args)
+            for row in rows:
+                row["source_alerts_path"] = args.alerts
+                row["source_alert_market_ids"] = market_ids
+                row["refreshed_snapshot_count"] = count
+                if collection_errors:
+                    row["collection_errors"] = collection_errors
+            _write_jsonl_or_stdout(rows, args.out)
+            if args.out:
+                print(f"alerts={len(market_ids)} snapshots={count} plans={len(rows)} out={args.out}")
             return 0
         if args.command == "discover-rules":
             model = args.model or os.environ.get("OPENAI_MODEL")
@@ -651,6 +694,46 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
     execute_once.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
     _add_pretrade_check_args(execute_once)
+
+    execute_alerts = subparsers.add_parser(
+        "execute-alerts",
+        help="refresh alert market books, then build dry-run execution plans with pretrade checks",
+    )
+    execute_alerts.add_argument("alerts", help="opportunity_alert NDJSON path")
+    execute_alerts.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    execute_alerts.add_argument("--rules", required=True, help="rule JSON path")
+    execute_alerts.add_argument("--snapshots-out", required=True, help="append refreshed alert snapshots here")
+    execute_alerts.add_argument("--out", help="output NDJSON execution plan path")
+    execute_alerts.add_argument("--max-alerts", type=int, default=20, help="latest alerts to refresh")
+    execute_alerts.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    execute_alerts.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+    execute_alerts.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    execute_alerts.add_argument("--skip-book-errors", action="store_true", help="continue when individual books fail")
+    execute_alerts.add_argument(
+        "--refresh-missing-gamma",
+        action="store_true",
+        help="fetch missing Gamma market metadata by alert market id before refreshing quotes",
+    )
+    execute_alerts.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not automatically collect known markets sharing a referenced negRiskMarketID",
+    )
+    execute_alerts.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
+    execute_alerts.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
+    execute_alerts.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    _add_paper_filter_args(execute_alerts)
+    execute_alerts.add_argument("--min-run-observations", type=int, default=1, help="minimum latest-run observations before planning")
+    execute_alerts.add_argument("--min-run-seconds", type=float, default=0.0, help="minimum latest-run duration before planning")
+    execute_alerts.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
+    execute_alerts.add_argument("--slippage-bps", type=float, default=50.0, help="buy limit cushion in basis points")
+    execute_alerts.add_argument("--tick-size", default="0.01", help="CLOB market tick size")
+    execute_alerts.add_argument("--order-type", default="FOK", help="SDK order type, default FOK")
+    execute_alerts.add_argument("--neg-risk", action="store_true", help="set neg_risk option for SDK order creation")
+    execute_alerts.add_argument("--live", action="store_true", help="submit orders through py-clob-client-v2")
+    execute_alerts.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
+    execute_alerts.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
+    _add_pretrade_check_args(execute_alerts)
 
     discover = subparsers.add_parser("discover-rules", help="discover implication rules with an OpenAI-compatible API")
     discover.add_argument("--raw", required=True, help="input raw Polymarket Gamma NDJSON path")

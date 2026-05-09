@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from poly_strategy.alerts import latest_monitor_alerts, write_alerts
+from poly_strategy.alerts import latest_alert_market_ids, latest_monitor_alerts, read_opportunity_alerts, write_alerts
 
 
 class AlertTests(unittest.TestCase):
@@ -79,6 +79,24 @@ class AlertTests(unittest.TestCase):
         self.assertEqual(first_count, 1)
         self.assertEqual(second_count, 0)
         self.assertEqual(len(written), 1)
+
+    def test_latest_alert_market_ids_reads_recent_alerts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "alerts.ndjson"
+            path.write_text(
+                json.dumps({"type": "opportunity_alert", "market_ids": ["old"]})
+                + "\n"
+                + json.dumps({"type": "opportunity_alert", "market_ids": ["m1", "m2"]})
+                + "\n"
+                + json.dumps({"type": "opportunity_alert", "market_ids": ["m2", "m3"]})
+                + "\n"
+            )
+
+            rows = read_opportunity_alerts(path)
+            market_ids = latest_alert_market_ids(path, max_alerts=2)
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(market_ids, ["m1", "m2", "m3"])
 
 
 def _trade(key: str, paper_roi: float, paper_edge: float) -> dict:

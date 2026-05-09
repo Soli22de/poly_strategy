@@ -2,9 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from poly_strategy.collectors import (
     binary_snapshot_rows_from_gamma_markets,
+    collect_polymarket_binary_snapshots_for_market_ids,
     collect_polymarket_binary_snapshots_for_markets,
     collect_polymarket_binary_snapshots_loop,
     collect_polymarket_gamma_pages,
@@ -340,6 +342,38 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual({row["market_id"] for row in rows}, {"a", "b"})
         self.assertEqual({row["ts"] for row in rows}, {"2026-05-08T00:00:00Z"})
 
+    def test_collect_polymarket_binary_snapshots_for_market_ids_expands_groups(self):
+        gamma_rows = [
+            _raw_gamma("a", "group", ["a-yes", "a-no"]),
+            _raw_gamma("b", "group", ["b-yes", "b-no"]),
+            _raw_gamma("unused", "", ["unused-yes", "unused-no"]),
+        ]
+        books = {
+            token_id: {"asks": [{"price": "0.50", "size": "10"}], "bids": []}
+            for token_id in ["a-yes", "a-no", "b-yes", "b-no"]
+        }
+
+        def fetch_json(url, timeout, proxy=None):
+            token_id = url.split("token_id=", 1)[1]
+            return books[token_id]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "snapshots.ndjson"
+            gamma.write_text("\n".join(json.dumps(row) for row in gamma_rows) + "\n")
+            with patch("poly_strategy.collectors._fetch_json", side_effect=fetch_json):
+                count = collect_polymarket_binary_snapshots_for_market_ids(
+                    out,
+                    gamma,
+                    ["a"],
+                    timeout=5.0,
+                    expand_neg_risk_groups=True,
+                )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual({row["market_id"] for row in rows}, {"a", "b"})
+
     def test_raw_gamma_markets_from_ndjson_dedupes_repeated_collections(self):
         rows = [
             {"type": "raw_polymarket_gamma_market", "market_id": "a", "raw": {"id": "a", "question": "old"}},
@@ -355,6 +389,23 @@ class CollectorTests(unittest.TestCase):
 
         self.assertEqual([market["id"] for market in markets], ["a", "b"])
         self.assertEqual(markets[0]["question"], "new")
+
+
+def _raw_gamma(market_id: str, group_id: str, token_ids: list) -> dict:
+    return {
+        "type": "raw_polymarket_gamma_market",
+        "market_id": market_id,
+        "raw": {
+            "id": market_id,
+            "question": f"{market_id}?",
+            "closed": False,
+            "enableOrderBook": True,
+            "acceptingOrders": True,
+            "outcomes": json.dumps(["Yes", "No"]),
+            "clobTokenIds": json.dumps(token_ids),
+            "negRiskMarketID": group_id or None,
+        },
+    }
 
 
 if __name__ == "__main__":
