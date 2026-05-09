@@ -58,6 +58,28 @@ class AlertTests(unittest.TestCase):
 
         self.assertEqual([alert["alert_kind"] for alert in alerts], ["stable_opportunity", "current_opportunity"])
 
+    def test_write_alerts_suppresses_duplicates_with_cooldown_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "alerts.ndjson"
+            state = Path(tmp) / "state.json"
+            rows = [
+                {
+                    "type": "opportunity_alert",
+                    "alert_kind": "stable_paper_trade",
+                    "kind": "yes_no_bundle",
+                    "key": "same",
+                    "market_ids": ["m1"],
+                }
+            ]
+
+            first_count = write_alerts(rows, out, state_path=state, cooldown_seconds=60)
+            second_count = write_alerts(rows, out, state_path=state, cooldown_seconds=60)
+            written = out.read_text().splitlines()
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(len(written), 1)
+
 
 def _trade(key: str, paper_roi: float, paper_edge: float) -> dict:
     row = _opportunity(key)

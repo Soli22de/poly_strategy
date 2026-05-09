@@ -189,6 +189,7 @@ class RealtimeTests(unittest.TestCase):
                     snapshots_out_path=snapshots,
                     max_messages=1,
                     snapshot_interval_seconds=0,
+                    stale_timeout_seconds=30,
                     min_net_edge=0.0,
                     progress=progress_rows.append,
                 )
@@ -200,12 +201,85 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(summary["type"], "realtime_monitor_summary")
         self.assertEqual(summary["iterations_completed"], 1)
         self.assertEqual(summary["opportunity_count"], 1)
+        self.assertEqual(summary["connection_count"], 1)
+        self.assertEqual(summary["reconnect_count"], 0)
         self.assertEqual(progress_rows[0]["current_opportunity_count"], 1)
-        self.assertEqual(report_rows[0]["type"], "realtime_monitor_iteration")
-        self.assertEqual(report_rows[1]["type"], "realtime_monitor_summary")
+        self.assertEqual(report_rows[0]["type"], "realtime_monitor_connection_event")
+        self.assertEqual(report_rows[0]["event"], "connecting")
+        self.assertEqual(report_rows[1]["event"], "connected")
+        self.assertEqual(report_rows[2]["type"], "realtime_monitor_iteration")
+        self.assertEqual(report_rows[3]["type"], "realtime_monitor_summary")
         self.assertEqual(len(update_rows), 2)
         self.assertEqual(snapshot_rows[0]["type"], "binary_snapshot")
         self.assertEqual(json.loads(fake_socket.sent[0])["assets_ids"], ["yes-token", "no-token"])
+
+    def test_monitor_polymarket_watchlist_reconnects_after_recv_error(self):
+        good_messages = [
+            [
+                {
+                    "event_type": "book",
+                    "asset_id": "yes-token",
+                    "market": "market-1",
+                    "timestamp": "1710000000000",
+                    "bids": [{"price": "0.44", "size": "5"}],
+                    "asks": [{"price": "0.45", "size": "10"}],
+                },
+                {
+                    "event_type": "book",
+                    "asset_id": "no-token",
+                    "market": "market-1",
+                    "timestamp": "1710000000000",
+                    "bids": [{"price": "0.52", "size": "5"}],
+                    "asks": [{"price": "0.53", "size": "7"}],
+                },
+            ]
+        ]
+        sockets = [_FailingWebSocket(RuntimeError("boom")), _FakeWebSocket(good_messages)]
+
+        def connect(url):
+            return sockets.pop(0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watchlist = tmp_path / "watchlist.json"
+            rules = tmp_path / "rules.json"
+            report = tmp_path / "report.jsonl"
+            watchlist.write_text(
+                json.dumps(
+                    {
+                        "type": "polymarket_watchlist",
+                        "markets": [
+                            {
+                                "market_id": "market-1",
+                                "fee_rate": 0.0,
+                                "yes_token_id": "yes-token",
+                                "no_token_id": "no-token",
+                            }
+                        ],
+                    }
+                )
+            )
+            rules.write_text(json.dumps({}))
+
+            with patch.dict(sys.modules, {"websockets": SimpleNamespace(connect=connect)}):
+                summary = monitor_polymarket_watchlist(
+                    watchlist,
+                    report,
+                    rules_path=rules,
+                    max_messages=1,
+                    snapshot_interval_seconds=0,
+                    reconnect_delay_seconds=0,
+                    max_reconnects=1,
+                )
+            rows = [json.loads(line) for line in report.read_text().splitlines()]
+
+        self.assertEqual(summary["connection_count"], 2)
+        self.assertEqual(summary["reconnect_count"], 1)
+        self.assertEqual(summary["opportunity_count"], 1)
+        self.assertEqual(
+            [row["event"] for row in rows if row["type"] == "realtime_monitor_connection_event"],
+            ["connecting", "connected", "disconnected", "reconnect_sleep", "connecting", "connected"],
+        )
 
 
 class _FakeWebSocket:
@@ -232,6 +306,23 @@ class _FakeWebSocket:
         if not self._messages:
             raise StopAsyncIteration
         return json.dumps(self._messages.pop(0))
+
+
+class _FailingWebSocket:
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def send(self, payload):
+        return None
+
+    async def recv(self):
+        raise self._exc
 
 
 if __name__ == "__main__":

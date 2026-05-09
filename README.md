@@ -166,7 +166,8 @@ python3 -m poly_strategy.cli stream-polymarket-watchlist \
 This command requires the optional live dependency:
 
 ```bash
-python3 -m pip install -r requirements-live.txt
+/opt/homebrew/bin/python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements-live.txt
 ```
 
 The snapshot rows keep the watchlist `fee_rate`, so they can be replayed by the same `backtest`, `paper-report`, and `execute-latest` commands used for HTTP-collected snapshots.
@@ -192,15 +193,44 @@ python3 -m poly_strategy.cli realtime-monitor-watchlist \
 
 Use `--max-messages` or `--max-iterations` for bounded smoke tests. The realtime monitor uses the same rule set, neg-risk baskets, stable-run filters, conflict-aware paper selection, and quality filters as the HTTP `paper-monitor`, but avoids polling each CLOB book over HTTP.
 
+For a standardized long-running monitor through the project virtualenv:
+
+```bash
+REPORT_OUT=data/realtime-monitor-24h-v1.jsonl \
+SNAPSHOTS_OUT=data/realtime-monitor-24h-v1-snapshots.ndjson \
+SNAPSHOT_INTERVAL=2 \
+STALE_TIMEOUT=30 \
+RECONNECT_DELAY=2 \
+scripts/run_realtime_monitor.sh
+```
+
+The script rebuilds `data/watchlist-current.json`, uses `.venv/bin/python`, reconnects on stale WebSocket feeds, and does not write raw update rows unless `UPDATES_OUT=...` is set.
+
+Current macOS launchd form:
+
+```bash
+launchctl submit -l poly_strategy_realtime_monitor_24h -- /bin/zsh -lc \
+  'cd /Users/ww/Project/poly_strategy && PYTHONUNBUFFERED=1 REPORT_OUT=data/realtime-monitor-24h-v1.jsonl SNAPSHOTS_OUT=data/realtime-monitor-24h-v1-snapshots.ndjson SNAPSHOT_INTERVAL=2 STALE_TIMEOUT=30 RECONNECT_DELAY=2 MIN_NET_EDGE=0.002 MAX_CAPITAL_PER_TRADE=10 BANKROLL=50 MIN_PAPER_ROI=0.01 MIN_RUN_OBSERVATIONS=2 MIN_RUN_SECONDS=3 scripts/run_realtime_monitor.sh > data/realtime-monitor-24h-v1.log 2>&1'
+```
+
 Extract standardized alert rows from the latest monitor iteration:
 
 ```bash
 python3 -m poly_strategy.cli monitor-alerts data/realtime-monitor.jsonl \
   --min-paper-roi 0.01 \
-  --out data/opportunity-alerts.ndjson
+  --out data/opportunity-alerts.ndjson \
+  --state data/opportunity-alerts-state.json \
+  --cooldown-seconds 60
 ```
 
 `monitor-alerts` reads either `paper-monitor` or `realtime-monitor-watchlist` reports and emits `opportunity_alert` JSONL rows from the latest stable paper trades. Add `--include-current` if you also want non-paper-selected current opportunities for diagnostics or notifications.
+
+For the current realtime run, a 60 second alert loop can be started with:
+
+```bash
+launchctl submit -l poly_strategy_realtime_alerts_60s -- /bin/zsh -lc \
+  'cd /Users/ww/Project/poly_strategy && while true; do PYTHONUNBUFFERED=1 scripts/run_monitor_alerts_once.sh >> data/realtime-monitor-24h-v1-alerts.log 2>&1; sleep 60; done'
+```
 
 Watch those markets repeatedly and replay opportunities:
 

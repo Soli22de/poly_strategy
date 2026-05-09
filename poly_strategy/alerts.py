@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -42,8 +43,17 @@ def latest_monitor_alerts(
     return alerts[:max_alerts]
 
 
-def write_alerts(rows: Iterable[dict], out_path: Path) -> int:
+def write_alerts(
+    rows: Iterable[dict],
+    out_path: Path,
+    state_path: Optional[Path] = None,
+    cooldown_seconds: float = 0.0,
+) -> int:
+    if cooldown_seconds < 0:
+        raise ValueError("cooldown_seconds must be non-negative")
     rows = list(rows)
+    if state_path:
+        rows = _filter_alerts_with_cooldown(rows, state_path, cooldown_seconds)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("a") as handle:
         for row in rows:
@@ -105,4 +115,41 @@ def _alert_sort_key(row: dict) -> tuple:
         -float(net_edge or 0.0),
         -float(total_edge or 0.0),
         str(row.get("key") or ""),
+    )
+
+
+def _filter_alerts_with_cooldown(rows: list, state_path: Path, cooldown_seconds: float) -> list:
+    now = time.time()
+    state = _read_alert_state(state_path)
+    emitted = []
+    for row in rows:
+        key = _alert_state_key(row)
+        last_emitted_at = float(state.get(key, 0.0) or 0.0)
+        if cooldown_seconds > 0 and now - last_emitted_at < cooldown_seconds:
+            continue
+        emitted.append(row)
+        state[key] = now
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    return emitted
+
+
+def _read_alert_state(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        row = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return row if isinstance(row, dict) else {}
+
+
+def _alert_state_key(row: dict) -> str:
+    return "|".join(
+        [
+            str(row.get("alert_kind") or ""),
+            str(row.get("kind") or ""),
+            str(row.get("key") or ""),
+            ",".join(row.get("market_ids") or []),
+        ]
     )

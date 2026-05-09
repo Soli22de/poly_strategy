@@ -986,6 +986,12 @@ class CliTests(unittest.TestCase):
                             str(snapshots),
                             "--snapshot-interval",
                             "2",
+                            "--stale-timeout",
+                            "30",
+                            "--reconnect-delay",
+                            "1",
+                            "--max-reconnects",
+                            "3",
                             "--max-messages",
                             "5",
                             "--max-iterations",
@@ -1021,6 +1027,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(kwargs["max_messages"], 5)
         self.assertEqual(kwargs["max_iterations"], 2)
         self.assertEqual(kwargs["snapshot_interval_seconds"], 2.0)
+        self.assertEqual(kwargs["stale_timeout_seconds"], 30.0)
+        self.assertEqual(kwargs["reconnect_delay_seconds"], 1.0)
+        self.assertEqual(kwargs["max_reconnects"], 3)
         self.assertEqual(kwargs["min_net_edge"], 0.002)
         self.assertEqual(kwargs["min_paper_roi"], 0.01)
         self.assertEqual(kwargs["min_run_observations"], 2)
@@ -1032,6 +1041,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "report.jsonl"
             out = Path(tmp) / "alerts.ndjson"
+            state = Path(tmp) / "alerts-state.json"
             report.write_text(
                 json.dumps(
                     {
@@ -1055,12 +1065,27 @@ class CliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
-                code = main(["monitor-alerts", str(report), "--out", str(out), "--min-paper-roi", "0.01"])
+                code = main(
+                    [
+                        "monitor-alerts",
+                        str(report),
+                        "--out",
+                        str(out),
+                        "--min-paper-roi",
+                        "0.01",
+                        "--state",
+                        str(state),
+                        "--cooldown-seconds",
+                        "60",
+                    ]
+                )
             rows = [json.loads(line) for line in out.read_text().splitlines()]
+            state_exists = state.exists()
 
         self.assertEqual(code, 0)
         self.assertEqual(rows[0]["type"], "opportunity_alert")
         self.assertEqual(rows[0]["key"], "arb-1")
+        self.assertTrue(state_exists)
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_discover_rules_command_requires_model(self):

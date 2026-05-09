@@ -375,6 +375,9 @@ def main(argv=None) -> int:
                 max_messages=args.max_messages,
                 max_iterations=args.max_iterations,
                 snapshot_interval_seconds=args.snapshot_interval,
+                stale_timeout_seconds=args.stale_timeout,
+                reconnect_delay_seconds=args.reconnect_delay,
+                max_reconnects=args.max_reconnects,
                 min_net_edge=args.min_net_edge,
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
@@ -402,7 +405,12 @@ def main(argv=None) -> int:
                 max_alerts=args.max_alerts,
             )
             if args.out:
-                count = write_alerts(rows, Path(args.out))
+                count = write_alerts(
+                    rows,
+                    Path(args.out),
+                    state_path=Path(args.state) if args.state else None,
+                    cooldown_seconds=args.cooldown_seconds,
+                )
                 print(f"wrote={count} out={args.out}")
             else:
                 for row in rows:
@@ -710,6 +718,9 @@ def _build_parser() -> argparse.ArgumentParser:
     realtime_monitor.add_argument("--updates-out", help="append normalized realtime orderbook updates here")
     realtime_monitor.add_argument("--snapshots-out", help="append backtestable binary snapshots here")
     realtime_monitor.add_argument("--snapshot-interval", type=float, default=2.0, help="seconds between scan iterations")
+    realtime_monitor.add_argument("--stale-timeout", type=float, default=30.0, help="reconnect if no WS messages arrive for this many seconds")
+    realtime_monitor.add_argument("--reconnect-delay", type=float, default=2.0, help="seconds to wait before reconnecting after a WS error")
+    realtime_monitor.add_argument("--max-reconnects", type=int, help="maximum reconnect attempts before failing; default is unlimited")
     realtime_monitor.add_argument("--max-messages", type=int, help="stop after this many raw WebSocket messages")
     realtime_monitor.add_argument("--max-iterations", type=int, help="stop after this many scan iterations")
     realtime_monitor.add_argument("--url", default=POLYMARKET_MARKET_WS_URL, help="Polymarket market WebSocket URL")
@@ -736,6 +747,8 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor_alerts.add_argument("--min-paper-edge", type=float, help="minimum stable paper trade edge")
     monitor_alerts.add_argument("--include-current", action="store_true", help="also alert on latest current/stable opportunities")
     monitor_alerts.add_argument("--max-alerts", type=int, default=20, help="maximum alert rows to emit")
+    monitor_alerts.add_argument("--state", help="optional alert cooldown state JSON path")
+    monitor_alerts.add_argument("--cooldown-seconds", type=float, default=0.0, help="suppress duplicate alerts for this many seconds when --state is set")
 
     return parser
 

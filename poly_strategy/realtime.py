@@ -16,6 +16,10 @@ KALSHI_PROD_WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 KALSHI_DEMO_WS_URL = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 
 
+class RealtimeStaleError(RuntimeError):
+    pass
+
+
 def polymarket_subscription_payload(asset_ids: Iterable[str], custom_feature_enabled: bool = True) -> dict:
     ids = [str(asset_id) for asset_id in dict.fromkeys(asset_ids) if asset_id]
     if not ids:
@@ -199,6 +203,9 @@ def monitor_polymarket_watchlist(
     max_messages: Optional[int] = None,
     max_iterations: Optional[int] = None,
     snapshot_interval_seconds: Optional[float] = 2.0,
+    stale_timeout_seconds: Optional[float] = 30.0,
+    reconnect_delay_seconds: float = 2.0,
+    max_reconnects: Optional[int] = None,
     min_net_edge: float = 0.0,
     max_capital_per_trade: Optional[float] = None,
     bankroll: Optional[float] = None,
@@ -222,6 +229,9 @@ def monitor_polymarket_watchlist(
             max_messages=max_messages,
             max_iterations=max_iterations,
             snapshot_interval_seconds=snapshot_interval_seconds,
+            stale_timeout_seconds=stale_timeout_seconds,
+            reconnect_delay_seconds=reconnect_delay_seconds,
+            max_reconnects=max_reconnects,
             min_net_edge=min_net_edge,
             max_capital_per_trade=max_capital_per_trade,
             bankroll=bankroll,
@@ -300,6 +310,9 @@ async def _monitor_polymarket_watchlist(
     max_messages: Optional[int],
     max_iterations: Optional[int],
     snapshot_interval_seconds: Optional[float],
+    stale_timeout_seconds: Optional[float],
+    reconnect_delay_seconds: float,
+    max_reconnects: Optional[int],
     min_net_edge: float,
     max_capital_per_trade: Optional[float],
     bankroll: Optional[float],
@@ -316,6 +329,9 @@ async def _monitor_polymarket_watchlist(
         max_messages=max_messages,
         max_iterations=max_iterations,
         snapshot_interval_seconds=snapshot_interval_seconds,
+        stale_timeout_seconds=stale_timeout_seconds,
+        reconnect_delay_seconds=reconnect_delay_seconds,
+        max_reconnects=max_reconnects,
         min_run_observations=min_run_observations,
         min_run_seconds=min_run_seconds,
         max_opportunities_per_iteration=max_opportunities_per_iteration,
@@ -341,72 +357,105 @@ async def _monitor_polymarket_watchlist(
     iteration = 0
     snapshots_collected = 0
     next_snapshot_at = _initial_next_snapshot_at(snapshot_interval_seconds)
+    connection_count = 0
+    reconnect_count = 0
+    stop_requested = False
+    last_error = None
     report_handle = report_out_path.open("a")
     updates_handle = updates_out_path.open("a") if updates_out_path else None
     snapshots_handle = snapshots_out_path.open("a") if snapshots_out_path else None
     try:
-        async with websockets.connect(url) as websocket:
-            await websocket.send(json.dumps(payload))
-            while True:
-                raw_message = await _recv_until_next_snapshot(websocket, next_snapshot_at, snapshot_interval_seconds)
-                if raw_message is not None:
-                    message_count += 1
-                    message = json.loads(raw_message)
-                    update_rows = store.apply_polymarket_message(message)
-                    _write_rows(updates_handle, update_rows)
+        while not stop_requested:
+            connection_count += 1
+            connection_started_at = time.monotonic()
+            last_message_at = connection_started_at
+            _write_rows(report_handle, [_connection_event_row("connecting", connection_count, reconnect_count)])
+            try:
+                async with websockets.connect(url) as websocket:
+                    await websocket.send(json.dumps(payload))
+                    _write_rows(report_handle, [_connection_event_row("connected", connection_count, reconnect_count)])
+                    while True:
+                        deadline_at = _next_realtime_deadline(
+                            next_snapshot_at,
+                            last_message_at,
+                            stale_timeout_seconds,
+                        )
+                        raw_message = await _recv_until_deadline(websocket, deadline_at)
+                        if raw_message is not None:
+                            message_count += 1
+                            last_message_at = time.monotonic()
+                            message = json.loads(raw_message)
+                            update_rows = store.apply_polymarket_message(message)
+                            _write_rows(updates_handle, update_rows)
 
-                if _should_scan_now(raw_message, next_snapshot_at, snapshot_interval_seconds):
-                    snapshot_rows = store.binary_snapshot_rows(markets)
-                    next_snapshot_at = _advance_next_snapshot_at(snapshot_interval_seconds)
-                    if snapshot_rows:
-                        iteration += 1
-                        snapshots_collected += len(snapshot_rows)
-                        _write_rows(snapshots_handle, snapshot_rows)
-                        snapshots = [snapshot_from_row(row) for row in snapshot_rows]
-                        batch_result = replay_state.apply_snapshots(
-                            snapshots,
-                            rule_set,
-                            min_net_edge=min_net_edge,
-                            max_capital_per_trade=max_capital_per_trade,
-                            bankroll=bankroll,
-                            min_paper_roi=min_paper_roi,
-                            min_paper_edge=min_paper_edge,
-                            min_paper_quantity=min_paper_quantity,
-                        )
-                        stable_opportunities = stable_current_opportunities(
-                            batch_result.current_opportunities,
-                            batch_result.current_runs,
-                            min_run_observations=min_run_observations,
-                            min_run_seconds=min_run_seconds,
-                        )
-                        stable_selection = select_paper_trades(
-                            stable_opportunities,
-                            max_capital_per_trade=max_capital_per_trade,
-                            bankroll=bankroll,
-                            min_quantity=min_paper_quantity,
-                            min_roi=min_paper_roi,
-                            min_edge=min_paper_edge,
-                        )
-                        row = _realtime_monitor_iteration_row(
-                            iteration,
-                            message_count,
-                            len(snapshot_rows),
-                            store,
-                            replay_state,
-                            batch_result.current_opportunities,
-                            stable_opportunities,
-                            stable_selection,
-                            batch_result.current_runs,
-                            max_opportunities_per_iteration,
-                        )
-                        _write_rows(report_handle, [row])
-                        if progress:
-                            progress(row)
-                        if max_iterations is not None and iteration >= max_iterations:
+                        if _is_stale(last_message_at, stale_timeout_seconds):
+                            raise RealtimeStaleError("Polymarket WebSocket did not receive messages before stale timeout")
+
+                        if _should_scan_now(raw_message, next_snapshot_at, snapshot_interval_seconds):
+                            snapshot_rows = store.binary_snapshot_rows(markets)
+                            next_snapshot_at = _advance_next_snapshot_at(snapshot_interval_seconds)
+                            if snapshot_rows:
+                                iteration += 1
+                                snapshots_collected += len(snapshot_rows)
+                                _write_rows(snapshots_handle, snapshot_rows)
+                                snapshots = [snapshot_from_row(row) for row in snapshot_rows]
+                                batch_result = replay_state.apply_snapshots(
+                                    snapshots,
+                                    rule_set,
+                                    min_net_edge=min_net_edge,
+                                    max_capital_per_trade=max_capital_per_trade,
+                                    bankroll=bankroll,
+                                    min_paper_roi=min_paper_roi,
+                                    min_paper_edge=min_paper_edge,
+                                    min_paper_quantity=min_paper_quantity,
+                                )
+                                stable_opportunities = stable_current_opportunities(
+                                    batch_result.current_opportunities,
+                                    batch_result.current_runs,
+                                    min_run_observations=min_run_observations,
+                                    min_run_seconds=min_run_seconds,
+                                )
+                                stable_selection = select_paper_trades(
+                                    stable_opportunities,
+                                    max_capital_per_trade=max_capital_per_trade,
+                                    bankroll=bankroll,
+                                    min_quantity=min_paper_quantity,
+                                    min_roi=min_paper_roi,
+                                    min_edge=min_paper_edge,
+                                )
+                                row = _realtime_monitor_iteration_row(
+                                    iteration,
+                                    message_count,
+                                    len(snapshot_rows),
+                                    store,
+                                    replay_state,
+                                    batch_result.current_opportunities,
+                                    stable_opportunities,
+                                    stable_selection,
+                                    batch_result.current_runs,
+                                    max_opportunities_per_iteration,
+                                    connection_count,
+                                    reconnect_count,
+                                    _message_age_seconds(last_message_at),
+                                )
+                                _write_rows(report_handle, [row])
+                                if progress:
+                                    progress(row)
+                                if max_iterations is not None and iteration >= max_iterations:
+                                    stop_requested = True
+                                    break
+
+                        if max_messages is not None and message_count >= max_messages:
+                            stop_requested = True
                             break
-
-                if max_messages is not None and message_count >= max_messages:
-                    break
+            except Exception as exc:
+                last_error = f"{exc.__class__.__name__}: {exc}"
+                _write_rows(report_handle, [_connection_event_row("disconnected", connection_count, reconnect_count, exc)])
+                reconnect_count += 1
+                if max_reconnects is not None and reconnect_count > max_reconnects:
+                    raise
+                _write_rows(report_handle, [_connection_event_row("reconnect_sleep", connection_count, reconnect_count)])
+                await asyncio.sleep(reconnect_delay_seconds)
     finally:
         for handle in [snapshots_handle, updates_handle, report_handle]:
             if handle:
@@ -421,6 +470,9 @@ async def _monitor_polymarket_watchlist(
         iteration,
         snapshots_collected,
         replay_state,
+        connection_count,
+        reconnect_count,
+        last_error,
     )
     _append_jsonl_row(report_out_path, summary)
     return summary
@@ -430,6 +482,9 @@ def _validate_realtime_limits(
     max_messages: Optional[int],
     max_iterations: Optional[int],
     snapshot_interval_seconds: Optional[float],
+    stale_timeout_seconds: Optional[float],
+    reconnect_delay_seconds: float,
+    max_reconnects: Optional[int],
     min_run_observations: int,
     min_run_seconds: float,
     max_opportunities_per_iteration: int,
@@ -440,6 +495,12 @@ def _validate_realtime_limits(
         raise ValueError("max_iterations must be at least 1")
     if snapshot_interval_seconds is not None and snapshot_interval_seconds < 0:
         raise ValueError("snapshot_interval_seconds must be non-negative")
+    if stale_timeout_seconds is not None and stale_timeout_seconds < 0:
+        raise ValueError("stale_timeout_seconds must be non-negative")
+    if reconnect_delay_seconds < 0:
+        raise ValueError("reconnect_delay_seconds must be non-negative")
+    if max_reconnects is not None and max_reconnects < 0:
+        raise ValueError("max_reconnects must be non-negative")
     if min_run_observations < 1:
         raise ValueError("min_run_observations must be at least 1")
     if min_run_seconds < 0:
@@ -459,6 +520,9 @@ def _realtime_monitor_iteration_row(
     stable_selection,
     current_runs: list,
     max_opportunities_per_iteration: int,
+    connection_count: int,
+    reconnect_count: int,
+    last_message_age_seconds: float,
 ) -> dict:
     stable_paper_capital_used = sum(trade.capital_used for trade in stable_selection.trades)
     stable_paper_edge = sum(trade.edge for trade in stable_selection.trades)
@@ -475,6 +539,9 @@ def _realtime_monitor_iteration_row(
         "ts": _utc_now(),
         "iteration": iteration,
         "messages_seen": messages_seen,
+        "connection_count": connection_count,
+        "reconnect_count": reconnect_count,
+        "last_message_age_seconds": last_message_age_seconds,
         "known_token_count": store.token_count,
         "snapshots_collected": snapshots_collected,
         "snapshot_count": result.snapshot_count,
@@ -508,6 +575,9 @@ def _realtime_monitor_summary_row(
     iterations_completed: int,
     snapshots_collected: int,
     result: IncrementalReplayState,
+    connection_count: int,
+    reconnect_count: int,
+    last_error: Optional[str],
 ) -> dict:
     return {
         "type": "realtime_monitor_summary",
@@ -517,6 +587,9 @@ def _realtime_monitor_summary_row(
         "snapshots_path": str(snapshots_out_path) if snapshots_out_path else None,
         "updates_path": str(updates_out_path) if updates_out_path else None,
         "messages_seen": messages_seen,
+        "connection_count": connection_count,
+        "reconnect_count": reconnect_count,
+        "last_error": last_error,
         "iterations_completed": iterations_completed,
         "snapshots_collected": snapshots_collected,
         "snapshot_count": result.snapshot_count,
@@ -551,6 +624,25 @@ def _run_to_row(run) -> dict:
         "duration_seconds": run.duration_seconds,
         "max_edge_per_share": run.max_edge_per_share,
     }
+
+
+def _connection_event_row(
+    event: str,
+    connection_count: int,
+    reconnect_count: int,
+    exc: Optional[Exception] = None,
+) -> dict:
+    row = {
+        "type": "realtime_monitor_connection_event",
+        "ts": _utc_now(),
+        "event": event,
+        "connection_count": connection_count,
+        "reconnect_count": reconnect_count,
+    }
+    if exc is not None:
+        row["error_type"] = exc.__class__.__name__
+        row["message"] = str(exc)
+    return row
 
 
 def _write_rows(handle, rows: Iterable[dict]) -> None:
@@ -610,6 +702,39 @@ async def _recv_until_next_snapshot(websocket, next_snapshot_at: Optional[float]
         return await asyncio.wait_for(websocket.recv(), timeout=timeout)
     except asyncio.TimeoutError:
         return None
+
+
+async def _recv_until_deadline(websocket, deadline_at: Optional[float]):
+    if deadline_at is None:
+        return await websocket.recv()
+    timeout = max(0.0, deadline_at - time.monotonic())
+    try:
+        return await asyncio.wait_for(websocket.recv(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+
+
+def _next_realtime_deadline(
+    next_snapshot_at: Optional[float],
+    last_message_at: float,
+    stale_timeout_seconds: Optional[float],
+) -> Optional[float]:
+    deadlines = []
+    if next_snapshot_at is not None:
+        deadlines.append(next_snapshot_at)
+    if stale_timeout_seconds is not None:
+        deadlines.append(last_message_at + stale_timeout_seconds)
+    return min(deadlines) if deadlines else None
+
+
+def _is_stale(last_message_at: float, stale_timeout_seconds: Optional[float]) -> bool:
+    if stale_timeout_seconds is None:
+        return False
+    return _message_age_seconds(last_message_at) >= stale_timeout_seconds
+
+
+def _message_age_seconds(last_message_at: float) -> float:
+    return max(0.0, time.monotonic() - last_message_at)
 
 
 def _should_scan_now(raw_message, next_snapshot_at: Optional[float], interval_seconds: Optional[float]) -> bool:
