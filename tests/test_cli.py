@@ -307,6 +307,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "paper-monitor.jsonl"
             out = Path(tmp) / "analysis.json"
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            rules = Path(tmp) / "rules.json"
             report.write_text(
                 "\n".join(
                     json.dumps(row)
@@ -365,10 +367,42 @@ class CliTests(unittest.TestCase):
                 )
                 + "\n"
             )
+            snapshots.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "m1",
+                        "fee_rate": 0.03,
+                        "yes": {"token_id": "yes-token", "asks": [[0.004, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.997, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+            rules.write_text("{}")
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
-                code = main(["paper-analyze", str(report), "--out", str(out), "--top", "1"])
+                code = main(
+                    [
+                        "paper-analyze",
+                        str(report),
+                        "--out",
+                        str(out),
+                        "--top",
+                        "1",
+                        "--snapshots",
+                        str(snapshots),
+                        "--rules",
+                        str(rules),
+                        "--near-miss-top",
+                        "1",
+                        "--near-miss-min-net-edge",
+                        "0.002",
+                    ]
+                )
             row = json.loads(out.read_text())
 
         self.assertEqual(code, 0)
@@ -379,6 +413,8 @@ class CliTests(unittest.TestCase):
         self.assertAlmostEqual(row["stable_paper_roi"], 0.02)
         self.assertEqual(row["top_stable_markets"][0]["market_id"], "m1")
         self.assertEqual(row["error_summary"]["by_phase"][0]["phase"], "collect")
+        self.assertEqual(row["near_miss"]["top"][0]["kind"], "yes_no_bundle")
+        self.assertGreater(row["near_miss"]["top"][0]["distance_to_min_net_edge"], 0)
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_paper_report_command_writes_json_report(self):

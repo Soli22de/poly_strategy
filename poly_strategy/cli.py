@@ -152,7 +152,14 @@ def main(argv=None) -> int:
                 print(json.dumps(row, sort_keys=True))
             return 0
         if args.command == "paper-analyze":
-            row = analyze_paper_monitor_report(Path(args.path), top_n=args.top)
+            row = analyze_paper_monitor_report(
+                Path(args.path),
+                top_n=args.top,
+                snapshots_path=Path(args.snapshots) if args.snapshots else None,
+                rules_path=Path(args.rules) if args.rules else None,
+                near_miss_top_n=args.near_miss_top,
+                near_miss_min_net_edge=args.near_miss_min_net_edge,
+            )
             if args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
@@ -353,6 +360,15 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("path", help="paper-monitor JSONL report path")
     analyze.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
     analyze.add_argument("--top", type=int, default=10, help="top opportunities and markets to include")
+    analyze.add_argument("--snapshots", help="optional snapshot NDJSON path for near-miss diagnostics")
+    analyze.add_argument("--rules", help="optional rule JSON path for relation near-miss diagnostics")
+    analyze.add_argument("--near-miss-top", type=int, default=10, help="near-miss rows to include")
+    analyze.add_argument(
+        "--near-miss-min-net-edge",
+        type=float,
+        default=0.0,
+        help="minimum net edge threshold used to classify near misses",
+    )
 
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")

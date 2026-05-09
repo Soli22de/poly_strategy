@@ -4,10 +4,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
+from poly_strategy.near_miss import near_miss_report
 
-def analyze_paper_monitor_report(path: Path, top_n: int = 10) -> dict:
+
+def analyze_paper_monitor_report(
+    path: Path,
+    top_n: int = 10,
+    snapshots_path: Optional[Path] = None,
+    rules_path: Optional[Path] = None,
+    near_miss_top_n: int = 10,
+    near_miss_min_net_edge: float = 0.0,
+) -> dict:
     if top_n < 0:
         raise ValueError("top_n must be non-negative")
+    if near_miss_top_n < 0:
+        raise ValueError("near_miss_top_n must be non-negative")
 
     rows = list(_read_jsonl(path))
     iteration_rows = [row for row in rows if row.get("type") == "paper_monitor_iteration"]
@@ -28,7 +39,7 @@ def analyze_paper_monitor_report(path: Path, top_n: int = 10) -> dict:
     stable_paper_capital_used = sum(float(row.get("stable_paper_capital_used") or 0.0) for row in iteration_rows)
     stable_paper_edge = sum(float(row.get("stable_paper_edge") or 0.0) for row in iteration_rows)
 
-    return {
+    report = {
         "type": "paper_monitor_analysis",
         "report_path": str(path),
         "row_count": len(rows),
@@ -55,6 +66,14 @@ def analyze_paper_monitor_report(path: Path, top_n: int = 10) -> dict:
         "error_summary": _error_summary(error_rows, iteration_rows),
         "latest_summary": latest_summary,
     }
+    if snapshots_path:
+        report["near_miss"] = near_miss_report(
+            snapshots_path,
+            rules_path=rules_path,
+            top_n=near_miss_top_n,
+            min_net_edge=near_miss_min_net_edge,
+        )
+    return report
 
 
 def _read_jsonl(path: Path) -> Iterable[dict]:

@@ -144,7 +144,19 @@ python3 -m poly_strategy.cli paper-analyze data/paper-monitor-report.jsonl \
   --top 10
 ```
 
-The analysis report includes error rate, runtime, opportunity observations, stable opportunity observations, stable paper ROI, edge distributions, top recurring opportunities, and top stable markets.
+Add `--snapshots` and `--rules` to include near-miss diagnostics for the latest snapshot batch:
+
+```bash
+python3 -m poly_strategy.cli paper-analyze data/paper-monitor-report.jsonl \
+  --snapshots data/paper-monitor-snapshots.ndjson \
+  --rules rules/candidate-implications.json \
+  --near-miss-min-net-edge 0.002 \
+  --out data/paper-monitor-analysis.json \
+  --top 20 \
+  --near-miss-top 20
+```
+
+The analysis report includes error rate, runtime, opportunity observations, stable opportunity observations, stable paper ROI, edge distributions, top recurring opportunities, and top stable markets. With near-miss diagnostics, it also reports the closest fee-adjusted candidates, the raw gross edge before fees, fee drag, top-of-book size, and candidates where a raw price edge disappears after Polymarket taker fees.
 
 Write a conflict-aware paper trading report. This sorts opportunities by edge per capital, reserves overlapping leg liquidity so the same visible ask depth is not counted twice, and applies both per-trade and per-iteration bankroll caps:
 
