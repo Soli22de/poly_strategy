@@ -733,6 +733,47 @@ class CliTests(unittest.TestCase):
         self.assertIn("collectively_exhaustive=4", stdout.getvalue())
         self.assertIn("complements=5", stdout.getvalue())
 
+    def test_external_signal_commands_ingest_and_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "signals.ndjson"
+            out = Path(tmp) / "external.ndjson"
+            report = Path(tmp) / "report.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "id": "sig-1",
+                        "kind": "cross_platform",
+                        "legs": [
+                            {"venue": "polymarket", "market_id": "poly-1", "token": "YES"},
+                            {"venue": "kalshi", "market_id": "kalshi-1", "token": "NO"},
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                ingest_code = main(
+                    [
+                        "ingest-external-signals",
+                        "--source",
+                        "oddpool",
+                        "--input",
+                        str(source),
+                        "--out",
+                        str(out),
+                    ]
+                )
+                report_code = main(["external-signal-report", str(out), "--out", str(report)])
+            row = json.loads(report.read_text())
+
+        self.assertEqual(ingest_code, 0)
+        self.assertEqual(report_code, 0)
+        self.assertEqual(row["signal_count"], 1)
+        self.assertEqual(row["by_source"][0]["source"], "oddpool")
+        self.assertIn("wrote=1", stdout.getvalue())
+
     def test_discover_rules_command_requires_model(self):
         stderr = io.StringIO()
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):

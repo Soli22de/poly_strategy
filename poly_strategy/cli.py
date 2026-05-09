@@ -30,6 +30,7 @@ from poly_strategy.execution import (
     build_execution_plan,
     plan_to_row,
 )
+from poly_strategy.external_signals import external_signal_report, ingest_external_signals
 from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to_row
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
@@ -309,6 +310,28 @@ def main(argv=None) -> int:
                 f"skipped_existing={result.skipped_existing_count} out={args.rules_out}"
             )
             return 0
+        if args.command == "ingest-external-signals":
+            headers = _headers_from_args(args.header)
+            count = ingest_external_signals(
+                Path(args.out),
+                args.source,
+                input_path=Path(args.input) if args.input else None,
+                url=args.url,
+                timeout=args.timeout,
+                proxy=args.proxy,
+                headers=headers,
+            )
+            print(f"wrote={count} out={args.out}")
+            return 0
+        if args.command == "external-signal-report":
+            row = external_signal_report(Path(args.path))
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"wrote=1 out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
     except (
         OSError,
         URLError,
@@ -553,6 +576,28 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_groups.add_argument("--max-output-tokens", type=int, default=2000, help="Responses API max_output_tokens")
     verify_groups.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
     verify_groups.add_argument("--verbosity", help="optional Responses API text verbosity")
+
+    ingest_signals = subparsers.add_parser(
+        "ingest-external-signals",
+        help="normalize external scanner alerts into external_signal NDJSON",
+    )
+    ingest_signals.add_argument("--source", required=True, help="signal source name, for example oddpool")
+    ingest_signals.add_argument("--out", required=True, help="append normalized external signals here")
+    input_group = ingest_signals.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", help="input JSON or NDJSON path")
+    input_group.add_argument("--url", help="input JSON URL")
+    ingest_signals.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds for URL input")
+    ingest_signals.add_argument("--proxy", help="HTTP proxy for URL input, for example 127.0.0.1:10808")
+    ingest_signals.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        help="HTTP header for URL input, formatted as Name=Value; can be repeated",
+    )
+
+    signal_report = subparsers.add_parser("external-signal-report", help="summarize normalized external signals")
+    signal_report.add_argument("path", help="external signal NDJSON path")
+    signal_report.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
 
     return parser
 
@@ -970,6 +1015,19 @@ def _write_jsonl_or_stdout(rows: list, out: str) -> None:
     else:
         for row in rows:
             print(json.dumps(row, sort_keys=True))
+
+
+def _headers_from_args(values: list) -> dict:
+    headers = {}
+    for value in values or []:
+        if "=" not in value:
+            raise ValueError("--header must be formatted as Name=Value")
+        name, header_value = value.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError("--header name cannot be empty")
+        headers[name] = header_value
+    return headers
 
 
 def _append_jsonl_row(path: Path, row: dict) -> None:
