@@ -337,7 +337,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(find_exhaustive_group_arbs([snapshot], [ExhaustiveGroupRule([])]), [])
         self.assertEqual(find_exhaustive_group_arbs([snapshot], [ExhaustiveGroupRule(["a", "a"])]), [])
 
-    def test_neg_risk_group_arbs_scan_yes_and_no_baskets(self):
+    def test_neg_risk_group_arbs_scan_no_basket_only(self):
         first = BinaryMarketSnapshot(
             market_id="a",
             venue="polymarket",
@@ -363,11 +363,9 @@ class ScannerTests(unittest.TestCase):
 
         opportunities = find_neg_risk_group_arbs([first, second, third], [rule], min_net_edge=0.0)
 
-        self.assertEqual([opportunity.kind for opportunity in opportunities], ["neg_risk_group_yes_basket", "neg_risk_group_no_basket"])
-        self.assertAlmostEqual(opportunities[0].cost_per_share, 0.90)
-        self.assertAlmostEqual(opportunities[0].net_edge_per_share, 0.10)
-        self.assertAlmostEqual(opportunities[1].cost_per_share, 1.95)
-        self.assertAlmostEqual(opportunities[1].net_edge_per_share, 0.05)
+        self.assertEqual([opportunity.kind for opportunity in opportunities], ["neg_risk_group_no_basket"])
+        self.assertAlmostEqual(opportunities[0].cost_per_share, 1.95)
+        self.assertAlmostEqual(opportunities[0].net_edge_per_share, 0.05)
 
     def test_complement_arb_checks_yes_bundle_and_no_bundle(self):
         first = BinaryMarketSnapshot(

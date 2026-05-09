@@ -169,6 +169,7 @@ def main(argv=None) -> int:
                 args.iterations,
                 max_workers=args.book_workers,
                 expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                max_markets=args.max_markets,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -183,6 +184,7 @@ def main(argv=None) -> int:
                     args.proxy,
                     args.book_workers,
                     expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                    max_markets=args.max_markets,
                 )
                 result = replay_ndjson(
                     Path(args.out),
@@ -278,6 +280,7 @@ def main(argv=None) -> int:
                 args.proxy,
                 args.book_workers,
                 expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                max_markets=args.max_markets,
             )
             result = replay_ndjson(
                 Path(args.snapshots_out),
@@ -374,6 +377,7 @@ def main(argv=None) -> int:
                     max_output_tokens=args.max_output_tokens,
                     reasoning_effort=args.reasoning_effort,
                     verbosity=args.verbosity,
+                    api_mode=args.api_mode,
                 )
             fallback_client = None
             if args.fallback_model:
@@ -385,6 +389,7 @@ def main(argv=None) -> int:
                     max_output_tokens=args.max_output_tokens,
                     reasoning_effort=args.reasoning_effort,
                     verbosity=args.verbosity,
+                    api_mode=args.api_mode,
                 )
             result = discover_rules(
                 Path(args.raw),
@@ -420,6 +425,7 @@ def main(argv=None) -> int:
                 Path(args.rules_in),
                 min_net_edge=args.min_net_edge,
                 top_n=args.top,
+                gamma_path=Path(args.gamma),
             ) == 0:
                 row = {
                     "type": "exhaustive_group_promotion",
@@ -452,6 +458,7 @@ def main(argv=None) -> int:
                 max_output_tokens=args.max_output_tokens,
                 reasoning_effort=args.reasoning_effort,
                 verbosity=args.verbosity,
+                api_mode=args.api_mode,
             )
             result = promote_exhaustive_groups(
                 Path(args.gamma),
@@ -718,6 +725,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_rule_markets.add_argument("--iterations", type=int, default=1, help="number of collection iterations")
     collect_rule_markets.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
     collect_rule_markets.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    collect_rule_markets.add_argument("--max-markets", type=int, help="cap collected rule markets for a small run")
     collect_rule_markets.add_argument(
         "--no-expand-neg-risk-groups",
         action="store_true",
@@ -733,6 +741,7 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--iterations", type=int, default=1, help="number of monitor iterations")
     monitor.add_argument("--interval", type=float, default=5.0, help="seconds between iterations")
     monitor.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    monitor.add_argument("--max-markets", type=int, help="cap collected rule markets for a small run")
     monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
@@ -758,6 +767,7 @@ def _build_parser() -> argparse.ArgumentParser:
     paper_monitor.add_argument("--iterations", type=int, default=1, help="number of monitor iterations")
     paper_monitor.add_argument("--interval", type=float, default=5.0, help="seconds between iterations")
     paper_monitor.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    paper_monitor.add_argument("--max-markets", type=int, help="cap collected rule markets for a small run")
     paper_monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     paper_monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     paper_monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
@@ -860,6 +870,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     execute_once.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     execute_once.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    execute_once.add_argument("--max-markets", type=int, help="cap collected rule markets for a small run")
     execute_once.add_argument(
         "--no-expand-neg-risk-groups",
         action="store_true",
@@ -934,6 +945,7 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
     discover.add_argument("--fallback-model", help="OpenAI model name for retrying remaining failed batches")
     discover.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
+    discover.add_argument("--api-mode", choices=["responses", "chat"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
     discover.add_argument("--batch-size", type=int, default=10, help="markets per LLM discovery batch")
     discover.add_argument("--min-confidence", type=float, default=0.95, help="minimum candidate confidence")
     discover.add_argument("--max-markets", type=int, help="limit input markets for a small run")
@@ -941,8 +953,8 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--context-market-limit", type=int, default=40, help="old markets to include with each new-market LLM batch")
     discover.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")
     discover.add_argument("--retries", type=int, default=2, help="retry count for retryable OpenAI-compatible API errors")
-    discover.add_argument("--max-output-tokens", type=int, default=4000, help="Responses API max_output_tokens")
-    discover.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
+    discover.add_argument("--max-output-tokens", type=int, default=4000, help="maximum model output tokens")
+    discover.add_argument("--reasoning-effort", default="medium", help="OpenAI-compatible reasoning effort")
     discover.add_argument("--verbosity", help="optional Responses API text verbosity")
     discover.add_argument("--client-workers", type=int, default=1, help="parallel LLM discovery batch workers")
     discover.add_argument(
@@ -991,13 +1003,14 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_groups.add_argument("--report-out", help="optional JSON verification report path")
     verify_groups.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
     verify_groups.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
+    verify_groups.add_argument("--api-mode", choices=["responses", "chat"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
     verify_groups.add_argument("--min-net-edge", type=float, default=0.002, help="minimum diagnostic net edge to verify")
     verify_groups.add_argument("--top", type=int, default=10, help="maximum diagnostic groups to verify")
     verify_groups.add_argument("--min-confidence", type=float, default=0.95, help="minimum verification confidence")
     verify_groups.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")
     verify_groups.add_argument("--retries", type=int, default=2, help="retry count for retryable OpenAI-compatible API errors")
-    verify_groups.add_argument("--max-output-tokens", type=int, default=2000, help="Responses API max_output_tokens")
-    verify_groups.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
+    verify_groups.add_argument("--max-output-tokens", type=int, default=2000, help="maximum model output tokens")
+    verify_groups.add_argument("--reasoning-effort", default="medium", help="OpenAI-compatible reasoning effort")
     verify_groups.add_argument("--verbosity", help="optional Responses API text verbosity")
     verify_groups.add_argument("--state", help="promotion cache JSON path for rejected/added groups")
     verify_groups.add_argument("--recheck-hours", type=float, default=24.0, help="hours before rechecking a rejected group")
@@ -1220,6 +1233,7 @@ def _run_paper_monitor(args) -> int:
                 skip_book_errors=args.skip_book_errors,
                 errors=collection_errors,
                 expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                max_markets=args.max_markets,
             )
             total_snapshots_collected += snapshots_collected
             phase = "scan"

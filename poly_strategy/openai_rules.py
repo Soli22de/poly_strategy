@@ -9,6 +9,20 @@ from poly_strategy.rule_discovery import MarketText, RelationCandidate, market_t
 
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_API_MODE = "responses"
+
+
+def _model_supports_reasoning(model: str) -> bool:
+    return "non-reasoning" not in model.lower()
+
+
+def _normalize_api_mode(api_mode: Optional[str]) -> str:
+    value = (api_mode or os.environ.get("OPENAI_API_MODE") or DEFAULT_API_MODE).strip().lower()
+    if value in {"responses", "response"}:
+        return "responses"
+    if value in {"chat", "chat_completions", "chat-completions", "chatcompletions"}:
+        return "chat"
+    raise OpenAIConfigError(f"unsupported OPENAI_API_MODE: {api_mode!r}")
 
 
 class OpenAIConfigError(RuntimeError):
@@ -30,6 +44,7 @@ class OpenAIRuleDiscoveryClient:
         max_output_tokens: Optional[int] = 4000,
         reasoning_effort: Optional[str] = "medium",
         verbosity: Optional[str] = None,
+        api_mode: Optional[str] = None,
         transport: Optional[Callable[[dict, float], dict]] = None,
     ):
         self.model = model
@@ -42,10 +57,51 @@ class OpenAIRuleDiscoveryClient:
         self.max_output_tokens = max_output_tokens
         self.reasoning_effort = reasoning_effort
         self.verbosity = verbosity
-        self._transport = transport or self._post_responses
+        self.api_mode = _normalize_api_mode(api_mode)
+        self._transport = transport or (self._post_chat_completions if self.api_mode == "chat" else self._post_responses)
 
     def build_payload(self, markets: Iterable[MarketText]) -> dict:
+        return self._build_payload(
+            markets,
+            system_prompt=_SYSTEM_PROMPT,
+            schema_name="polymarket_relation_discovery",
+            schema=_RESPONSE_SCHEMA,
+        )
+
+    def _build_payload(self, markets: Iterable[MarketText], system_prompt: str, schema_name: str, schema: dict) -> dict:
         market_rows = market_texts_to_prompt_rows(list(markets))
+        prompt_text = json.dumps({"markets": market_rows}, ensure_ascii=True, sort_keys=True)
+        if self.api_mode == "chat":
+            chat_system_prompt = (
+                f"{system_prompt}\n\n"
+                "Return exactly one JSON object matching this schema. Do not echo the input markets.\n"
+                f"{json.dumps(schema, ensure_ascii=True, sort_keys=True)}"
+            )
+            chat_user_prompt = (
+                "Do not answer the prediction market question and do not estimate probabilities. "
+                "Apply the verification/discovery task from the system message. "
+                "Return only one JSON object matching the schema; no markdown, no prose, no input echo.\n\n"
+                f"Input markets JSON:\n{prompt_text}"
+            )
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": chat_system_prompt},
+                    {"role": "user", "content": chat_user_prompt},
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+            }
+            if self.max_output_tokens is not None:
+                payload["max_completion_tokens"] = self.max_output_tokens
+            return payload
+
         payload = {
             "model": self.model,
             "input": [
@@ -54,7 +110,7 @@ class OpenAIRuleDiscoveryClient:
                     "content": [
                         {
                             "type": "input_text",
-                            "text": _SYSTEM_PROMPT,
+                            "text": system_prompt,
                         }
                     ],
                 },
@@ -63,7 +119,7 @@ class OpenAIRuleDiscoveryClient:
                     "content": [
                         {
                             "type": "input_text",
-                            "text": json.dumps({"markets": market_rows}, ensure_ascii=True, sort_keys=True),
+                            "text": prompt_text,
                         }
                     ],
                 },
@@ -71,15 +127,15 @@ class OpenAIRuleDiscoveryClient:
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "polymarket_relation_discovery",
+                    "name": schema_name,
                     "strict": True,
-                    "schema": _RESPONSE_SCHEMA,
+                    "schema": schema,
                 }
             },
         }
         if self.max_output_tokens is not None:
             payload["max_output_tokens"] = self.max_output_tokens
-        if self.reasoning_effort:
+        if self.reasoning_effort and _model_supports_reasoning(self.model):
             payload["reasoning"] = {"effort": self.reasoning_effort}
         if self.verbosity:
             payload.setdefault("text", {})["verbosity"] = self.verbosity
@@ -92,6 +148,21 @@ class OpenAIRuleDiscoveryClient:
     def _post_responses(self, payload: dict, timeout: float) -> dict:
         request = Request(
             _responses_url(self.base_url),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "authorization": f"Bearer {self.api_key}",
+                "content-type": "application/json",
+                "accept": "application/json",
+                "user-agent": "poly-strategy/0.1",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _post_chat_completions(self, payload: dict, timeout: float) -> dict:
+        request = Request(
+            _chat_completions_url(self.base_url),
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "authorization": f"Bearer {self.api_key}",
@@ -119,45 +190,12 @@ class OpenAIRuleDiscoveryClient:
 
 class OpenAIExhaustiveGroupVerifierClient(OpenAIRuleDiscoveryClient):
     def build_payload(self, markets: Iterable[MarketText]) -> dict:
-        market_rows = market_texts_to_prompt_rows(list(markets))
-        payload = {
-            "model": self.model,
-            "input": [
-                {
-                    "role": "system",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": _GROUP_SYSTEM_PROMPT,
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": json.dumps({"markets": market_rows}, ensure_ascii=True, sort_keys=True),
-                        }
-                    ],
-                },
-            ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "polymarket_exhaustive_group_verification",
-                    "strict": True,
-                    "schema": _GROUP_RESPONSE_SCHEMA,
-                }
-            },
-        }
-        if self.max_output_tokens is not None:
-            payload["max_output_tokens"] = self.max_output_tokens
-        if self.reasoning_effort:
-            payload["reasoning"] = {"effort": self.reasoning_effort}
-        if self.verbosity:
-            payload.setdefault("text", {})["verbosity"] = self.verbosity
-        return payload
+        return self._build_payload(
+            markets,
+            system_prompt=_GROUP_SYSTEM_PROMPT,
+            schema_name="polymarket_exhaustive_group_verification",
+            schema=_GROUP_RESPONSE_SCHEMA,
+        )
 
     def verify_group(self, markets: Iterable[MarketText]) -> dict:
         payload = self.build_payload(list(markets))
@@ -323,26 +361,53 @@ def _responses_url(base_url: str) -> str:
     return f"{normalized}/v1/responses"
 
 
+def _chat_completions_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
+
+
 def _extract_output_text(response: dict) -> str:
     output_text = response.get("output_text")
     if isinstance(output_text, str) and output_text:
         return output_text
 
     output = response.get("output")
-    if not isinstance(output, list):
-        raise OpenAIResponseError("OpenAI response is missing output")
-
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
                 continue
-            if part.get("type") == "output_text" and isinstance(part.get("text"), str):
-                return part["text"]
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    return part["text"]
+
+    choices = response.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                return content
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") in {"text", "output_text"} and isinstance(part.get("text"), str):
+                        return part["text"]
+            if isinstance(message.get("text"), str) and message["text"]:
+                return message["text"]
     raise OpenAIResponseError("OpenAI response is missing output text")
 
 
@@ -362,7 +427,7 @@ def _call_parser_with_retries(call_fn: Callable[[dict], dict], payload: dict, re
 def _parse_relation_response(response: dict) -> List[RelationCandidate]:
     content = _extract_output_text(response)
     try:
-        parsed = json.loads(content)
+        parsed = _loads_json_payload(content)
     except json.JSONDecodeError as exc:
         raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
     if isinstance(parsed, list):
@@ -387,10 +452,34 @@ def _parse_relation_response(response: dict) -> List[RelationCandidate]:
 def _parse_group_response(response: dict) -> dict:
     content = _extract_output_text(response)
     try:
-        parsed = json.loads(content)
+        parsed = _loads_json_payload(content)
     except json.JSONDecodeError as exc:
         raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise OpenAIResponseError("OpenAI exhaustive group verification is not a JSON object")
     return _group_verification_from_row(parsed)
+
+
+def _loads_json_payload(content: str):
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            return json.loads("\n".join(lines).strip())
+        starts = [index for index in (stripped.find("{"), stripped.find("[")) if index >= 0]
+        if not starts:
+            raise
+        start = min(starts)
+        end = max(stripped.rfind("}"), stripped.rfind("]"))
+        if end <= start:
+            raise
+        return json.loads(stripped[start : end + 1])
 
 
 def _candidate_from_row(row: dict) -> RelationCandidate:
@@ -426,10 +515,15 @@ def _group_verification_from_row(row: dict) -> dict:
         trade_allowed = row["trade_allowed"]
         if not isinstance(trade_allowed, bool):
             raise ValueError("trade_allowed must be a boolean")
-        confidence = float(row["confidence"])
+        if "confidence" in row:
+            confidence = float(row["confidence"])
+        elif trade_allowed:
+            raise ValueError("tradeable verification must include confidence")
+        else:
+            confidence = 0.0
         if confidence < 0 or confidence > 1:
             raise ValueError("confidence must be between 0 and 1")
-        verdict = str(row["verdict"])
+        verdict = _normalize_group_verdict(row)
         if verdict not in {"exhaustive_group", "not_exhaustive", "uncertain"}:
             raise ValueError("unsupported verdict")
         return {
@@ -441,6 +535,22 @@ def _group_verification_from_row(row: dict) -> dict:
         }
     except (KeyError, TypeError, ValueError) as exc:
         raise OpenAIResponseError("OpenAI exhaustive group verification is invalid") from exc
+
+
+def _normalize_group_verdict(row: dict) -> str:
+    verdict = row.get("verdict", row.get("status"))
+    if isinstance(verdict, str):
+        normalized = verdict.strip().lower()
+        if normalized in {"exhaustive_group", "not_exhaustive", "uncertain"}:
+            return normalized
+        if normalized in {"exhaustive", "complete"}:
+            return "exhaustive_group"
+        if normalized in {"incomplete", "not exhaustive"}:
+            return "not_exhaustive"
+    exhaustive = row.get("exhaustive_group")
+    if isinstance(exhaustive, bool):
+        return "exhaustive_group" if exhaustive else "not_exhaustive"
+    raise ValueError("missing verdict")
 
 
 def _is_retryable(exc: Exception) -> bool:

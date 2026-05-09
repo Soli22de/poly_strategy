@@ -190,16 +190,6 @@ def find_neg_risk_group_arbs(
         if any(snapshot is None for snapshot in group_snapshots):
             continue
 
-        yes_opportunity = _bundle_candidate(
-            kind="neg_risk_group_yes_basket",
-            leg_specs=[(snapshot, "YES", snapshot.yes.asks) for snapshot in group_snapshots],
-            payout_per_share=1.0,
-            min_net_edge=min_net_edge,
-            ts=group_snapshots[0].ts,
-        )
-        if yes_opportunity is not None:
-            opportunities.append(yes_opportunity)
-
         no_opportunity = _bundle_candidate(
             kind="neg_risk_group_no_basket",
             leg_specs=[(snapshot, "NO", snapshot.no.asks) for snapshot in group_snapshots],

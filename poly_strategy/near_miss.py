@@ -188,14 +188,16 @@ def near_miss_candidates(
         group_snapshots = [by_market_id[market_id] for market_id in market_ids if market_id in by_market_id]
         if len(group_snapshots) != len(market_ids):
             continue
-        candidates.append(
-            _candidate_row(
-                "neg_risk_group_yes_basket",
-                [(snapshot, "YES", snapshot.yes.asks) for snapshot in group_snapshots],
-                payout_per_share=1.0,
-                min_net_edge=min_net_edge,
-            )
+        yes_row = _candidate_row(
+            "potential_exhaustive_yes_basket",
+            [(snapshot, "YES", snapshot.yes.asks) for snapshot in group_snapshots],
+            payout_per_share=1.0,
+            min_net_edge=min_net_edge,
         )
+        if yes_row is not None:
+            yes_row["diagnostic_only"] = True
+            yes_row["risk_note"] = "neg-risk YES basket requires exhaustive-group verification before trading"
+            candidates.append(yes_row)
         candidates.append(
             _candidate_row(
                 "neg_risk_group_no_basket",

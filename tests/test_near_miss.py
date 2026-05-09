@@ -109,8 +109,11 @@ class NearMissTests(unittest.TestCase):
             report = near_miss_report(snapshot_path, gamma_path=gamma_path, top_n=10)
 
         kinds = {row["kind"] for row in report["top"]}
-        self.assertIn("neg_risk_group_yes_basket", kinds)
+        self.assertIn("potential_exhaustive_yes_basket", kinds)
         self.assertIn("neg_risk_group_no_basket", kinds)
+        diagnostic = [row for row in report["top"] if row["kind"] == "potential_exhaustive_yes_basket"][0]
+        self.assertTrue(diagnostic["diagnostic_only"])
+        self.assertEqual(diagnostic["trade_status"], "needs_verification")
 
     def test_near_miss_report_rejects_incomplete_known_neg_risk_groups(self):
         snapshots = [
@@ -212,7 +215,11 @@ class NearMissTests(unittest.TestCase):
 
             report = near_miss_report(snapshot_path, rule_path, gamma_path=gamma_path, top_n=10)
 
-        diagnostic = report["neg_risk_expanded_groups"][0]
+        diagnostic = [
+            row
+            for row in report["neg_risk_expanded_groups"]
+            if row["source_market_ids"] == ["a", "b", "c"]
+        ][0]
         self.assertEqual(diagnostic["status"], "not_single_neg_risk_group")
         self.assertEqual(diagnostic["trade_status"], "needs_verification")
 

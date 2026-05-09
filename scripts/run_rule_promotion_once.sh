@@ -21,6 +21,18 @@ RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
 SNAPSHOTS="${SNAPSHOTS:-data/realtime-monitor-24h-v1-snapshots.ndjson}"
 REPORT_OUT="${REPORT_OUT:-data/exhaustive-group-promotion.json}"
 STATE="${STATE:-data/exhaustive-group-promotion-state.json}"
+PRIMARY_MODEL="${OPENAI_MODEL:-}"
+PRIMARY_BASE_URL="${OPENAI_BASE_URL:-}"
+PRIMARY_API_MODE="${OPENAI_API_MODE:-}"
+PRIMARY_API_KEY="${OPENAI_API_KEY:-}"
+BACKUP_MODEL="${OPENAI_BACKUP_MODEL:-}"
+BACKUP_BASE_URL="${OPENAI_BACKUP_BASE_URL:-}"
+BACKUP_API_MODE="${OPENAI_BACKUP_API_MODE:-}"
+BACKUP_API_KEY="${OPENAI_BACKUP_API_KEY:-}"
+FALLBACK_MODEL="${OPENAI_FALLBACK_MODEL:-${LLM_FALLBACK_MODEL:-}}"
+FALLBACK_BASE_URL="${OPENAI_FALLBACK_BASE_URL:-${OPENAI_BASE_URL:-}}"
+FALLBACK_API_MODE="${OPENAI_FALLBACK_API_MODE:-${OPENAI_API_MODE:-}}"
+FALLBACK_API_KEY="${OPENAI_FALLBACK_API_KEY:-${OPENAI_API_KEY:-}}"
 MIN_NET_EDGE="${MIN_NET_EDGE:-0.002}"
 TOP="${TOP:-5}"
 MIN_CONFIDENCE="${MIN_CONFIDENCE:-0.95}"
@@ -43,13 +55,13 @@ if [[ ! -s "$RULES" || ! -s "$SNAPSHOTS" || ! -s "$GAMMA" ]]; then
   exit 0
 fi
 
-candidate_count="$("$PYTHON_BIN" - "$SNAPSHOTS" "$RULES" "$MIN_NET_EDGE" "$TOP" <<'PY'
+candidate_count="$("$PYTHON_BIN" - "$SNAPSHOTS" "$RULES" "$GAMMA" "$MIN_NET_EDGE" "$TOP" <<'PY'
 import sys
 from pathlib import Path
 from poly_strategy.exhaustive_groups import promotion_candidate_count
 
-snapshots, rules, min_edge, top = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
-print(promotion_candidate_count(Path(snapshots), Path(rules), min_net_edge=min_edge, top_n=top))
+snapshots, rules, gamma, min_edge, top = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), int(sys.argv[5])
+print(promotion_candidate_count(Path(snapshots), Path(rules), min_net_edge=min_edge, top_n=top, gamma_path=Path(gamma)))
 PY
 )"
 if [[ "$candidate_count" == "0" ]]; then
@@ -58,37 +70,64 @@ if [[ "$candidate_count" == "0" ]]; then
 fi
 
 rules_tmp="$(mktemp "${RULES}.promotion.XXXXXX")"
-args=(
-  verify-exhaustive-groups
-  --gamma "$GAMMA"
-  --rules-in "$RULES"
-  --rules-out "$rules_tmp"
-  --snapshots "$SNAPSHOTS"
-  --min-net-edge "$MIN_NET_EDGE"
-  --top "$TOP"
-  --min-confidence "$MIN_CONFIDENCE"
-  --timeout "$TIMEOUT"
-  --retries "$RETRIES"
-  --max-output-tokens "$MAX_OUTPUT_TOKENS"
-  --reasoning-effort "$REASONING_EFFORT"
-  --report-out "$REPORT_OUT"
-  --state "$STATE"
-  --recheck-hours "$RECHECK_HOURS"
-  --skip-when-no-candidates
-)
-if [[ -n "${OPENAI_MODEL:-}" ]]; then
-  args+=(--model "$OPENAI_MODEL")
-fi
-if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
-  args+=(--base-url "$OPENAI_BASE_URL")
-fi
-if [[ -n "$VERBOSITY" ]]; then
-  args+=(--verbosity "$VERBOSITY")
-fi
+
+run_verifier() {
+  local label="$1"
+  local model="$2"
+  local base_url="$3"
+  local api_mode="$4"
+  local api_key="$5"
+  local args=(
+    verify-exhaustive-groups
+    --gamma "$GAMMA"
+    --rules-in "$RULES"
+    --rules-out "$rules_tmp"
+    --snapshots "$SNAPSHOTS"
+    --min-net-edge "$MIN_NET_EDGE"
+    --top "$TOP"
+    --min-confidence "$MIN_CONFIDENCE"
+    --timeout "$TIMEOUT"
+    --retries "$RETRIES"
+    --max-output-tokens "$MAX_OUTPUT_TOKENS"
+    --reasoning-effort "$REASONING_EFFORT"
+    --report-out "$REPORT_OUT"
+    --state "$STATE"
+    --recheck-hours "$RECHECK_HOURS"
+    --skip-when-no-candidates
+  )
+  if [[ -n "$model" ]]; then
+    args+=(--model "$model")
+  fi
+  if [[ -n "$base_url" ]]; then
+    args+=(--base-url "$base_url")
+  fi
+  if [[ -n "$api_mode" ]]; then
+    args+=(--api-mode "$api_mode")
+  fi
+  if [[ -n "$VERBOSITY" ]]; then
+    args+=(--verbosity "$VERBOSITY")
+  fi
+  echo "rule_promotion_provider label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default}"
+  if [[ -n "$api_key" ]]; then
+    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+  else
+    "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+  fi
+}
 
 set +e
-"$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+run_verifier primary "$PRIMARY_MODEL" "$PRIMARY_BASE_URL" "$PRIMARY_API_MODE" "$PRIMARY_API_KEY"
 status=$?
+if [[ "$status" != "0" && -n "$BACKUP_MODEL" ]]; then
+  echo "rule_promotion_retry previous_status=$status next_label=backup next_model=$BACKUP_MODEL"
+  run_verifier backup "$BACKUP_MODEL" "$BACKUP_BASE_URL" "$BACKUP_API_MODE" "$BACKUP_API_KEY"
+  status=$?
+fi
+if [[ "$status" != "0" && -n "$FALLBACK_MODEL" ]]; then
+  echo "rule_promotion_retry previous_status=$status next_label=fallback next_model=$FALLBACK_MODEL"
+  run_verifier fallback "$FALLBACK_MODEL" "$FALLBACK_BASE_URL" "$FALLBACK_API_MODE" "$FALLBACK_API_KEY"
+  status=$?
+fi
 set -e
 if [[ "$status" != "0" ]]; then
   rm -f "$rules_tmp"

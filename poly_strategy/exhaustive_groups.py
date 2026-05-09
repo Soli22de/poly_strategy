@@ -43,7 +43,13 @@ def promote_exhaustive_groups(
     now = now or datetime.now(timezone.utc)
     market_texts = {market.market_id: market for market in read_market_texts(gamma_path)}
     existing_group_keys = _existing_group_keys(rules_row)
-    candidates = potential_exhaustive_group_candidates(snapshots_path, rules_in_path, min_net_edge, top_n)
+    candidates = potential_exhaustive_group_candidates(
+        snapshots_path,
+        rules_in_path,
+        min_net_edge,
+        top_n,
+        gamma_path=gamma_path,
+    )
 
     report_rows = []
     added_rows = []
@@ -129,12 +135,13 @@ def potential_exhaustive_group_candidates(
     rules_path: Path,
     min_net_edge: float = 0.0,
     top_n: int = 10,
+    gamma_path: Optional[Path] = None,
 ) -> List[dict]:
     if top_n < 0:
         raise ValueError("top_n must be non-negative")
 
     snapshots = _latest_snapshot_batch(snapshots_path)
-    rule_set = load_rule_set(rules_path) if rules_path else RuleSet()
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path) if rules_path else RuleSet()
     rows = near_miss_candidates(snapshots, rule_set, min_net_edge=min_net_edge)
     rows = [
         row
@@ -182,8 +189,9 @@ def promotion_candidate_count(
     rules_path: Path,
     min_net_edge: float = 0.0,
     top_n: int = 10,
+    gamma_path: Optional[Path] = None,
 ) -> int:
-    return len(potential_exhaustive_group_candidates(snapshots_path, rules_path, min_net_edge, top_n))
+    return len(potential_exhaustive_group_candidates(snapshots_path, rules_path, min_net_edge, top_n, gamma_path))
 
 
 def _latest_snapshot_batch(path: Path):

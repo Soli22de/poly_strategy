@@ -13,6 +13,7 @@ from poly_strategy.collectors import (
     collect_polymarket_gamma_markets_by_id,
     kalshi_binary_snapshot_rows_from_orderbooks,
     expand_market_ids_with_neg_risk_groups,
+    limit_market_ids_by_gamma_order,
     market_ids_from_rule_file,
     raw_gamma_markets_from_ndjson,
     write_kalshi_binary_snapshots,
@@ -79,6 +80,17 @@ class CollectorTests(unittest.TestCase):
         market_ids = expand_market_ids_with_neg_risk_groups(markets, {"a"})
 
         self.assertEqual(market_ids, {"a", "b"})
+
+    def test_limit_market_ids_by_gamma_order_caps_with_stable_order(self):
+        markets = [{"id": "b"}, {"id": "a"}, {"id": "c"}]
+
+        market_ids = limit_market_ids_by_gamma_order(markets, {"a", "b", "c", "unknown"}, 2)
+
+        self.assertEqual(market_ids, {"b", "a"})
+
+    def test_limit_market_ids_by_gamma_order_rejects_non_positive_limit(self):
+        with self.assertRaises(ValueError):
+            limit_market_ids_by_gamma_order([], {"a"}, 0)
 
     def test_binary_snapshot_rows_from_gamma_markets_fetches_yes_and_no_books(self):
         market = {

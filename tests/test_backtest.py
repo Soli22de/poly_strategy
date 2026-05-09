@@ -599,7 +599,6 @@ class BacktestTests(unittest.TestCase):
             result = replay_ndjson(snapshots_path, gamma_path=gamma_path)
 
         kinds = sorted(opportunity.kind for opportunity in result.opportunities)
-        self.assertIn("neg_risk_group_yes_basket", kinds)
         self.assertIn("neg_risk_group_no_basket", kinds)
 
     def test_replay_ndjson_scans_all_pair_relation_rules_per_timestamp_batch(self):

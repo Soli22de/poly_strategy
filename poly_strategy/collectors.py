@@ -300,11 +300,13 @@ def collect_polymarket_binary_snapshots_for_rules(
     skip_book_errors: bool = False,
     errors: Optional[list] = None,
     expand_neg_risk_groups: bool = True,
+    max_markets: Optional[int] = None,
 ) -> int:
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     market_ids = market_ids_from_rule_file(rules_path)
     if expand_neg_risk_groups:
         market_ids = expand_market_ids_with_neg_risk_groups(markets, market_ids)
+    market_ids = limit_market_ids_by_gamma_order(markets, market_ids, max_markets)
 
     def fetch_book(token_id: str) -> dict:
         book_params = urlencode({"token_id": token_id})
@@ -333,6 +335,7 @@ def collect_polymarket_binary_snapshots_for_market_ids(
     errors: Optional[list] = None,
     expand_neg_risk_groups: bool = True,
     refresh_missing_gamma: bool = False,
+    max_markets: Optional[int] = None,
 ) -> int:
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     selected_market_ids = {str(market_id) for market_id in market_ids if market_id}
@@ -344,6 +347,7 @@ def collect_polymarket_binary_snapshots_for_market_ids(
 
     if expand_neg_risk_groups:
         selected_market_ids = expand_market_ids_with_neg_risk_groups(markets, selected_market_ids)
+    selected_market_ids = limit_market_ids_by_gamma_order(markets, selected_market_ids, max_markets)
 
     def fetch_book(token_id: str) -> dict:
         book_params = urlencode({"token_id": token_id})
@@ -373,6 +377,7 @@ def collect_polymarket_binary_snapshots_for_rules_loop(
     sleep: Callable[[float], None] = time.sleep,
     max_workers: int = 1,
     expand_neg_risk_groups: bool = True,
+    max_markets: Optional[int] = None,
 ) -> int:
     if iterations < 1:
         raise ValueError("iterations must be at least 1")
@@ -389,6 +394,7 @@ def collect_polymarket_binary_snapshots_for_rules_loop(
             proxy,
             max_workers,
             expand_neg_risk_groups=expand_neg_risk_groups,
+            max_markets=max_markets,
         )
         if index < iterations - 1 and interval_seconds > 0:
             sleep(interval_seconds)
@@ -659,6 +665,31 @@ def expand_market_ids_with_neg_risk_groups(markets: Iterable[dict], market_ids: 
         if str(market.get("negRiskMarketID") or "").strip() in group_ids:
             expanded.add(market_id)
     return expanded
+
+
+def limit_market_ids_by_gamma_order(
+    markets: Iterable[dict],
+    market_ids: Iterable[str],
+    max_markets: Optional[int],
+) -> set:
+    selected_market_ids = {str(market_id) for market_id in market_ids if market_id}
+    if max_markets is None:
+        return selected_market_ids
+    if max_markets < 1:
+        raise ValueError("max_markets must be at least 1")
+
+    ordered = []
+    for market in markets:
+        market_id = str(market.get("id") or market.get("conditionId") or "")
+        if market_id and market_id in selected_market_ids:
+            ordered.append(market_id)
+            if len(ordered) >= max_markets:
+                return set(ordered)
+
+    if len(ordered) >= max_markets:
+        return set(ordered)
+    remaining = sorted(selected_market_ids - set(ordered))
+    return set(ordered + remaining[: max_markets - len(ordered)])
 
 
 def _add_if_present(target: set, row: dict, key: str) -> None:

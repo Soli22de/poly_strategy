@@ -272,6 +272,8 @@ class CliTests(unittest.TestCase):
                         "3",
                         "--book-workers",
                         "5",
+                        "--max-markets",
+                        "20",
                     ]
                 )
 
@@ -285,6 +287,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[5], 3.0)
         self.assertEqual(args[6], 2)
         self.assertEqual(collect.call_args.kwargs["max_workers"], 5)
+        self.assertEqual(collect.call_args.kwargs["max_markets"], 20)
         self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         self.assertIn("wrote=4", stdout.getvalue())
 
@@ -314,12 +317,15 @@ class CliTests(unittest.TestCase):
                             "20",
                             "--book-workers",
                             "3",
+                            "--max-markets",
+                            "30",
                         ]
                     )
 
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 3)
+        self.assertEqual(collect.call_args.kwargs["max_markets"], 30)
         self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         replay.assert_called_once()
         self.assertEqual(replay.call_args.kwargs["min_net_edge"], 0.002)
@@ -371,6 +377,8 @@ class CliTests(unittest.TestCase):
                             "0",
                             "--book-workers",
                             "4",
+                            "--max-markets",
+                            "12",
                             "--skip-book-errors",
                         ]
                     )
@@ -379,6 +387,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 4)
+        self.assertEqual(collect.call_args.kwargs["max_markets"], 12)
         self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         self.assertTrue(collect.call_args.kwargs["skip_book_errors"])
         self.assertEqual(rows[0]["type"], "paper_monitor_iteration")
@@ -742,7 +751,7 @@ class CliTests(unittest.TestCase):
                             "market_id": market_id,
                             "fee_rate": 0.0,
                             "yes": {"token_id": f"{market_id}-yes", "asks": [[yes_price, 100]], "bids": []},
-                            "no": {"token_id": f"{market_id}-no", "asks": [[0.70, 100]], "bids": []},
+                            "no": {"token_id": f"{market_id}-no", "asks": [[0.40, 100]], "bids": []},
                         }
                     )
                     for market_id, yes_price in [("a", 0.40), ("b", 0.50)]
@@ -789,7 +798,7 @@ class CliTests(unittest.TestCase):
             row = json.loads(out.read_text().splitlines()[0])
 
         self.assertEqual(code, 0)
-        self.assertEqual(row["opportunity_kind"], "neg_risk_group_yes_basket")
+        self.assertEqual(row["opportunity_kind"], "neg_risk_group_no_basket")
         self.assertTrue(row["pretrade_check"]["passed"])
         self.assertIn("wrote=1", stdout.getvalue())
 
@@ -876,6 +885,8 @@ class CliTests(unittest.TestCase):
                             "9.80",
                             "--book-workers",
                             "4",
+                            "--max-markets",
+                            "8",
                         ]
                     )
             rows = [json.loads(line) for line in out.read_text().splitlines()]
@@ -883,6 +894,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 4)
+        self.assertEqual(collect.call_args.kwargs["max_markets"], 8)
         self.assertTrue(collect.call_args.kwargs["expand_neg_risk_groups"])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["orders"][0]["token_id"], "yes-token")

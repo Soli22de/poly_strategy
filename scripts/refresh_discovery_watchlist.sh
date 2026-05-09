@@ -30,9 +30,6 @@ CONTEXT_MARKET_LIMIT="${CONTEXT_MARKET_LIMIT:-10}"
 LLM_WORKERS="${LLM_WORKERS:-4}"
 LLM_ERROR_RETRIES="${LLM_ERROR_RETRIES:-2}"
 LLM_ERROR_RETRY_BATCH_SIZE="${LLM_ERROR_RETRY_BATCH_SIZE:-1}"
-LLM_FALLBACK_MODEL="${LLM_FALLBACK_MODEL:-}"
-LLM_FALLBACK_ERROR_RETRIES="${LLM_FALLBACK_ERROR_RETRIES:-1}"
-LLM_FALLBACK_ERROR_RETRY_BATCH_SIZE="${LLM_FALLBACK_ERROR_RETRY_BATCH_SIZE:-1}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
 LLM_RETRIES="${LLM_RETRIES:-2}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
@@ -46,10 +43,22 @@ INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
 MIN_LIQUIDITY="${MIN_LIQUIDITY:-0}"
 MIN_VOLUME_24H="${MIN_VOLUME_24H:-0}"
 MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-250}"
-RESTART_ON_CHANGE="${RESTART_ON_CHANGE:-1}"
+RESTART_ON_CHANGE="${RESTART_ON_CHANGE:-0}"
 RESTART_SCRIPT="${RESTART_SCRIPT:-scripts/restart_realtime_monitor.sh}"
 SKIP_GAMMA="${SKIP_GAMMA:-0}"
 SKIP_LLM="${SKIP_LLM:-0}"
+PRIMARY_MODEL="${OPENAI_MODEL:-}"
+PRIMARY_BASE_URL="${OPENAI_BASE_URL:-}"
+PRIMARY_API_MODE="${OPENAI_API_MODE:-}"
+PRIMARY_API_KEY="${OPENAI_API_KEY:-}"
+BACKUP_MODEL="${OPENAI_BACKUP_MODEL:-}"
+BACKUP_BASE_URL="${OPENAI_BACKUP_BASE_URL:-}"
+BACKUP_API_MODE="${OPENAI_BACKUP_API_MODE:-}"
+BACKUP_API_KEY="${OPENAI_BACKUP_API_KEY:-}"
+FALLBACK_MODEL="${OPENAI_FALLBACK_MODEL:-${LLM_FALLBACK_MODEL:-}}"
+FALLBACK_BASE_URL="${OPENAI_FALLBACK_BASE_URL:-${OPENAI_BASE_URL:-}}"
+FALLBACK_API_MODE="${OPENAI_FALLBACK_API_MODE:-${OPENAI_API_MODE:-}}"
+FALLBACK_API_KEY="${OPENAI_FALLBACK_API_KEY:-${OPENAI_API_KEY:-}}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -68,53 +77,113 @@ if [[ "$SKIP_GAMMA" != "1" ]]; then
     --proxy "$PROXY"
 fi
 
-if [[ "$SKIP_LLM" != "1" && -n "${OPENAI_MODEL:-}" ]]; then
-  rules_tmp="$(mktemp "${RULES}.tmp.XXXXXX")"
-  discover_args=(
+discovery_error_count() {
+  local path="$1"
+  "$PYTHON_BIN" - "$path" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists() or not path.read_text().strip():
+    print(0)
+else:
+    row = json.loads(path.read_text())
+    print(len(row.get("discovery_errors") or []))
+PY
+}
+
+run_discovery_provider() {
+  local label="$1"
+  local model="$2"
+  local base_url="$3"
+  local api_mode="$4"
+  local api_key="$5"
+  local cache_path="$6"
+  local out_path="$7"
+  local args=(
     discover-rules
-    --raw "$GAMMA" \
-    --out "$rules_tmp" \
-    --cache "$RULES" \
-    --batch-size "$BATCH_SIZE" \
-    --context-market-limit "$CONTEXT_MARKET_LIMIT" \
-    --client-workers "$LLM_WORKERS" \
-    --retry-failed-batches "$LLM_ERROR_RETRIES" \
-    --retry-failed-batch-size "$LLM_ERROR_RETRY_BATCH_SIZE" \
-    --min-confidence "$MIN_CONFIDENCE" \
-    --timeout "$LLM_TIMEOUT" \
-    --retries "$LLM_RETRIES" \
-    --max-output-tokens "$LLM_MAX_OUTPUT_TOKENS" \
-    --reasoning-effort "$LLM_REASONING_EFFORT" \
+    --raw "$GAMMA"
+    --out "$out_path"
+    --cache "$cache_path"
+    --batch-size "$BATCH_SIZE"
+    --context-market-limit "$CONTEXT_MARKET_LIMIT"
+    --client-workers "$LLM_WORKERS"
+    --retry-failed-batches "$LLM_ERROR_RETRIES"
+    --retry-failed-batch-size "$LLM_ERROR_RETRY_BATCH_SIZE"
+    --min-confidence "$MIN_CONFIDENCE"
+    --timeout "$LLM_TIMEOUT"
+    --retries "$LLM_RETRIES"
+    --max-output-tokens "$LLM_MAX_OUTPUT_TOKENS"
+    --reasoning-effort "$LLM_REASONING_EFFORT"
     --continue-on-client-error
   )
+  if [[ -n "$model" ]]; then
+    args+=(--model "$model")
+  fi
+  if [[ -n "$base_url" ]]; then
+    args+=(--base-url "$base_url")
+  fi
+  if [[ -n "$api_mode" ]]; then
+    args+=(--api-mode "$api_mode")
+  fi
   if [[ -n "$LLM_VERBOSITY" ]]; then
-    discover_args+=(--verbosity "$LLM_VERBOSITY")
+    args+=(--verbosity "$LLM_VERBOSITY")
   fi
   if [[ "$LLM_TOPIC_CLUSTER" == "1" ]]; then
-    discover_args+=(--topic-cluster)
+    args+=(--topic-cluster)
   fi
-  if [[ -n "$LLM_FALLBACK_MODEL" ]]; then
-    discover_args+=(
-      --fallback-model "$LLM_FALLBACK_MODEL"
-      --fallback-retry-failed-batches "$LLM_FALLBACK_ERROR_RETRIES"
-      --fallback-retry-failed-batch-size "$LLM_FALLBACK_ERROR_RETRY_BATCH_SIZE"
-    )
-  fi
-  set +e
-  "$PYTHON_BIN" -m poly_strategy.cli "${discover_args[@]}"
-  status=$?
-  set -e
-  if [[ "$status" == "0" ]]; then
-    mv "$rules_tmp" "$RULES"
-  elif [[ -s "$rules_tmp" ]]; then
-    echo "discover_rules_partial status=$status path=$rules_tmp promoted_to=$RULES" >&2
-    mv "$rules_tmp" "$RULES"
-  elif [[ "$ALLOW_LLM_FAILURE" == "1" && -s "$RULES" ]]; then
-    echo "discover_rules_failed status=$status using_existing_rules=$RULES" >&2
-    rm -f "$rules_tmp"
+  echo "discover_provider label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default} cache=$cache_path out=$out_path"
+  if [[ -n "$api_key" ]]; then
+    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   else
-    rm -f "$rules_tmp"
-    exit "$status"
+    "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+  fi
+}
+
+if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
+  current_cache="$RULES"
+  current_rules=""
+  tmp_paths=()
+  final_status=0
+  for spec in \
+    "primary|$PRIMARY_MODEL|$PRIMARY_BASE_URL|$PRIMARY_API_MODE|$PRIMARY_API_KEY" \
+    "backup|$BACKUP_MODEL|$BACKUP_BASE_URL|$BACKUP_API_MODE|$BACKUP_API_KEY" \
+    "fallback|$FALLBACK_MODEL|$FALLBACK_BASE_URL|$FALLBACK_API_MODE|$FALLBACK_API_KEY"; do
+    IFS='|' read -r label model base_url api_mode api_key <<< "$spec"
+    [[ -n "$model" ]] || continue
+    stage_out="$(mktemp "${RULES}.tmp.XXXXXX")"
+    tmp_paths+=("$stage_out")
+    set +e
+    run_discovery_provider "$label" "$model" "$base_url" "$api_mode" "$api_key" "$current_cache" "$stage_out"
+    status=$?
+    set -e
+    stage_used=0
+    if [[ "$status" == "0" || -s "$stage_out" ]]; then
+      current_cache="$stage_out"
+      current_rules="$stage_out"
+      stage_used=1
+    fi
+    final_status="$status"
+    if [[ "$stage_used" == "0" ]]; then
+      echo "discover_provider_done label=$label status=$status unresolved_errors=unknown output_written=0"
+      continue
+    fi
+    errors="$(discovery_error_count "$current_cache")"
+    echo "discover_provider_done label=$label status=$status unresolved_errors=$errors output_written=1"
+    if [[ "$errors" == "0" ]]; then
+      final_status=0
+      break
+    fi
+  done
+  if [[ -n "$current_rules" && -s "$current_rules" ]]; then
+    mv "$current_rules" "$RULES"
+    for path in "${tmp_paths[@]}"; do
+      [[ "$path" == "$current_rules" ]] || rm -f "$path"
+    done
+  elif [[ "$ALLOW_LLM_FAILURE" == "1" && -s "$RULES" ]]; then
+    echo "discover_rules_failed status=$final_status using_existing_rules=$RULES" >&2
+  else
+    for path in "${tmp_paths[@]}"; do rm -f "$path"; done
+    exit "$final_status"
   fi
 else
   echo "skip_llm=1 or OPENAI_MODEL is empty; reusing existing rule cache: $RULES"

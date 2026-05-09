@@ -212,6 +212,29 @@ class ExhaustiveGroupTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
 
+    def test_promotion_candidate_count_can_use_gamma_neg_risk_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots_path = root / "snapshots.ndjson"
+            rules_path = root / "rules.json"
+            gamma_path = root / "gamma.ndjson"
+            snapshots_path.write_text(
+                "\n".join(json.dumps(row) for row in [_snapshot("a", 0.20), _snapshot("b", 0.30), _snapshot("c", 0.40)])
+                + "\n"
+            )
+            rules_path.write_text("{}")
+            gamma_path.write_text("\n".join(json.dumps(_gamma_row(market_id)) for market_id in ["a", "b", "c"]) + "\n")
+
+            count = promotion_candidate_count(
+                snapshots_path,
+                rules_path,
+                min_net_edge=0.0,
+                top_n=5,
+                gamma_path=gamma_path,
+            )
+
+        self.assertEqual(count, 1)
+
 
 class FakeVerifier:
     def __init__(self, response):
@@ -266,6 +289,7 @@ def _gamma_row(market_id: str):
             "question": f"Will candidate {market_id.upper()} win the final?",
             "description": "Resolves based on the final winner.",
             "outcomes": json.dumps(["Yes", "No"]),
+            "clobTokenIds": json.dumps([f"{market_id}-yes", f"{market_id}-no"]),
             "endDate": "2026-06-01T00:00:00Z",
             "category": "sports",
             "slug": f"candidate-{market_id}-wins",
