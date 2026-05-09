@@ -1,5 +1,6 @@
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ class DiscoveredRuleSet:
     equivalents: List[DiscoveredMutualExclusion] = field(default_factory=list)
     collectively_exhaustive: List[DiscoveredMutualExclusion] = field(default_factory=list)
     complements: List[DiscoveredMutualExclusion] = field(default_factory=list)
+    discovery_errors: List[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class DiscoveryResult:
     equivalents_written: int = 0
     collectively_exhaustive_written: int = 0
     complements_written: int = 0
+    failed_batches: int = 0
 
 
 def read_market_texts(path: Path) -> List[MarketText]:
@@ -170,6 +173,7 @@ def write_discovered_rules(path: Path, ruleset: DiscoveredRuleSet) -> int:
         "mutually_exclusive": [_mutual_exclusion_to_row(rule) for rule in mutual_exclusions],
         "collectively_exhaustive": [_mutual_exclusion_to_row(rule) for rule in collectively_exhaustive],
         "complement": [_mutual_exclusion_to_row(rule) for rule in complements],
+        "discovery_errors": list(ruleset.discovery_errors),
         "candidates": [_candidate_to_row(candidate) for candidate in ruleset.candidates],
     }
     path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
@@ -186,6 +190,10 @@ def discover_rules(
     cache_path: Optional[Path] = None,
     context_market_limit: int = 40,
     generated_at: Optional[str] = None,
+    continue_on_client_error: bool = False,
+    client_workers: int = 1,
+    retry_failed_batches: int = 0,
+    retry_failed_batch_size: int = 1,
 ) -> DiscoveryResult:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -193,6 +201,12 @@ def discover_rules(
         raise ValueError("max_markets must be at least 1")
     if context_market_limit < 0:
         raise ValueError("context_market_limit must be non-negative")
+    if client_workers < 1:
+        raise ValueError("client_workers must be at least 1")
+    if retry_failed_batches < 0:
+        raise ValueError("retry_failed_batches must be non-negative")
+    if retry_failed_batch_size < 1:
+        raise ValueError("retry_failed_batch_size must be at least 1")
 
     markets = read_market_texts(raw_path)
     if max_markets is not None:
@@ -206,12 +220,89 @@ def discover_rules(
 
     deterministic_candidates = deterministic_relation_candidates(markets)
     market_map = {market.market_id: market for market in markets}
-    llm_candidates: List[RelationCandidate] = []
-    for batch in _batches(new_markets, batch_size):
-        discovery_batch = _batch_with_context(batch, markets, context_market_limit)
-        llm_candidates.extend(secondary_verify_candidates(client.discover_relations(discovery_batch), market_map))
+    completed_market_ids: Set[str] = set()
+    discovery_errors: List[dict] = []
+    batch_results: dict[tuple[int, int], List[RelationCandidate]] = {}
+    generated = generated_at or _utc_now()
+
+    def discover_batch(batch_index: int, batch_markets: Sequence[MarketText]) -> List[RelationCandidate]:
+        discovery_batch = _batch_with_context(batch_markets, markets, context_market_limit)
+        return secondary_verify_candidates(client.discover_relations(discovery_batch), market_map)
+
+    def checkpoint() -> None:
+        _write_rules_checkpoint(
+            out_path,
+            deterministic_candidates,
+            _ordered_batch_candidates(batch_results),
+            cache_row,
+            markets,
+            cached_market_ids | completed_market_ids,
+            min_confidence,
+            generated,
+            _unresolved_discovery_errors(discovery_errors, completed_market_ids),
+        )
+
+    def record_success(attempt: int, batch_index: int, batch: Sequence[MarketText], candidates: List[RelationCandidate]) -> None:
+        batch_results[(attempt, batch_index)] = candidates
+        completed_market_ids.update(market.market_id for market in batch)
+        checkpoint()
+
+    def record_failure(attempt: int, batch_index: int, batch: Sequence[MarketText], exc: Exception) -> None:
+        discovery_errors.append(
+            {
+                "attempt": attempt,
+                "batch_index": batch_index,
+                "market_ids": [market.market_id for market in batch],
+                "error": str(exc),
+            }
+        )
+        checkpoint()
+
+    def run_batches(batches_to_run: List[List[MarketText]], attempt: int) -> None:
+        if not batches_to_run:
+            return
+        if client_workers == 1:
+            for batch_index, batch in enumerate(batches_to_run):
+                try:
+                    candidates = discover_batch(batch_index, batch)
+                except Exception as exc:
+                    record_failure(attempt, batch_index, batch, exc)
+                    if continue_on_client_error:
+                        continue
+                    raise
+                record_success(attempt, batch_index, batch, candidates)
+            return
+
+        with ThreadPoolExecutor(max_workers=min(client_workers, len(batches_to_run))) as executor:
+            future_map = {
+                executor.submit(discover_batch, index, batch): (index, batch)
+                for index, batch in enumerate(batches_to_run)
+            }
+            for future in as_completed(future_map):
+                batch_index, batch = future_map[future]
+                try:
+                    candidates = future.result()
+                except Exception as exc:
+                    record_failure(attempt, batch_index, batch, exc)
+                    if continue_on_client_error:
+                        continue
+                    for pending in future_map:
+                        if pending is not future:
+                            pending.cancel()
+                    raise
+                record_success(attempt, batch_index, batch, candidates)
+
+    run_batches(list(_batches(new_markets, batch_size)), attempt=0)
+    if continue_on_client_error:
+        for retry_attempt in range(1, retry_failed_batches + 1):
+            pending_markets = [market for market in new_markets if market.market_id not in completed_market_ids]
+            if not pending_markets:
+                break
+            run_batches(list(_batches(pending_markets, retry_failed_batch_size)), attempt=retry_attempt)
 
     known_market_ids = {market.market_id for market in markets}
+    llm_candidates = _ordered_batch_candidates(batch_results)
+    unresolved_errors = _unresolved_discovery_errors(discovery_errors, completed_market_ids)
     candidates = _merge_candidates(deterministic_candidates + llm_candidates, cache_row.get("candidates", []) if cache_row else [])
     implications = filter_implications(candidates, known_market_ids, min_confidence)
     mutual_exclusions = filter_mutual_exclusions(candidates, known_market_ids, min_confidence)
@@ -219,15 +310,16 @@ def discover_rules(
     collectively_exhaustive = filter_collectively_exhaustive(candidates, known_market_ids, min_confidence)
     complements = filter_complements(candidates, known_market_ids, min_confidence)
     ruleset = DiscoveredRuleSet(
-        generated_at=generated_at or _utc_now(),
+        generated_at=generated,
         min_confidence=min_confidence,
         candidates=candidates,
         implications=implications,
-        processed_market_ids=sorted(cached_market_ids | known_market_ids),
+        processed_market_ids=sorted(cached_market_ids | completed_market_ids),
         mutual_exclusions=mutual_exclusions,
         equivalents=equivalents,
         collectively_exhaustive=collectively_exhaustive,
         complements=complements,
+        discovery_errors=unresolved_errors,
     )
     implications_written = write_discovered_rules(out_path, ruleset)
     return DiscoveryResult(
@@ -238,7 +330,56 @@ def discover_rules(
         equivalents_written=len(equivalents),
         collectively_exhaustive_written=len(collectively_exhaustive),
         complements_written=len(complements),
+        failed_batches=len(unresolved_errors),
     )
+
+
+def _write_rules_checkpoint(
+    out_path: Path,
+    deterministic_candidates: List[RelationCandidate],
+    llm_candidates: List[RelationCandidate],
+    cache_row: Optional[dict],
+    markets: Sequence[MarketText],
+    processed_market_ids: Set[str],
+    min_confidence: float,
+    generated_at: str,
+    discovery_errors: Optional[List[dict]] = None,
+) -> None:
+    known_market_ids = {market.market_id for market in markets}
+    candidates = _merge_candidates(deterministic_candidates + llm_candidates, cache_row.get("candidates", []) if cache_row else [])
+    ruleset = DiscoveredRuleSet(
+        generated_at=generated_at,
+        min_confidence=min_confidence,
+        candidates=candidates,
+        implications=filter_implications(candidates, known_market_ids, min_confidence),
+        processed_market_ids=sorted(processed_market_ids),
+        mutual_exclusions=filter_mutual_exclusions(candidates, known_market_ids, min_confidence),
+        equivalents=filter_equivalents(candidates, known_market_ids, min_confidence),
+        collectively_exhaustive=filter_collectively_exhaustive(candidates, known_market_ids, min_confidence),
+        complements=filter_complements(candidates, known_market_ids, min_confidence),
+        discovery_errors=list(discovery_errors or []),
+    )
+    write_discovered_rules(out_path, ruleset)
+
+
+def _ordered_batch_candidates(batch_results: dict[tuple[int, int], List[RelationCandidate]]) -> List[RelationCandidate]:
+    candidates: List[RelationCandidate] = []
+    for batch_key in sorted(batch_results):
+        candidates.extend(batch_results[batch_key])
+    return candidates
+
+
+def _unresolved_discovery_errors(discovery_errors: List[dict], completed_market_ids: Set[str]) -> List[dict]:
+    latest_by_market_id: dict[str, tuple[int, dict]] = {}
+    for row in discovery_errors:
+        for market_id in row.get("market_ids", []):
+            normalized_market_id = str(market_id)
+            if normalized_market_id in completed_market_ids:
+                continue
+            unresolved_row = dict(row)
+            unresolved_row["market_ids"] = [normalized_market_id]
+            latest_by_market_id[normalized_market_id] = (len(latest_by_market_id), unresolved_row)
+    return [row for _, row in sorted(latest_by_market_id.values(), key=lambda item: item[0])]
 
 
 def market_texts_to_prompt_rows(markets: Sequence[MarketText]) -> List[dict]:

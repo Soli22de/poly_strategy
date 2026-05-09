@@ -321,6 +321,181 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual({(row["antecedent"], row["consequent"]) for row in written["implications"]}, {("a", "b"), ("c", "d")})
         self.assertEqual(written["processed_market_ids"], ["a", "b", "c", "d"])
 
+    def test_discover_rules_writes_checkpoint_after_each_completed_batch(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = 0
+
+            def discover_relations(self, markets):
+                self.calls += 1
+                if self.calls == 1:
+                    return [RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "a implies b")]
+                raise RuntimeError("second batch failed")
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c", "d"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            client = FakeClient()
+
+            with self.assertRaises(RuntimeError):
+                discover_rules(
+                    raw,
+                    out,
+                    client,
+                    batch_size=2,
+                    min_confidence=0.95,
+                    context_market_limit=0,
+                    generated_at="2026-05-08T00:00:00Z",
+                )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(written["processed_market_ids"], ["a", "b"])
+        self.assertEqual(written["implications"][0]["antecedent"], "a")
+        self.assertEqual(written["implications"][0]["consequent"], "b")
+
+    def test_discover_rules_can_continue_after_failed_client_batch(self):
+        class FakeClient:
+            def discover_relations(self, markets):
+                ids = [market.market_id for market in markets]
+                if ids == ["a", "b"]:
+                    raise RuntimeError("bad response")
+                return [RelationCandidate("implies", ids[0], ids[1], "a_implies_b", 0.99, True, [], "later batch")]
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c", "d"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            result = discover_rules(
+                raw,
+                out,
+                FakeClient(),
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                continue_on_client_error=True,
+                client_workers=2,
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.failed_batches, 2)
+        self.assertEqual(written["processed_market_ids"], ["c", "d"])
+        self.assertEqual(
+            {tuple(row["market_ids"]) for row in written["discovery_errors"]},
+            {("a",), ("b",)},
+        )
+        self.assertEqual(written["implications"][0]["antecedent"], "c")
+        self.assertEqual(written["implications"][0]["consequent"], "d")
+
+    def test_discover_rules_retries_failed_markets_with_smaller_batches(self):
+        class FakeClient:
+            def discover_relations(self, markets):
+                ids = [market.market_id for market in markets]
+                if ids == ["a", "b"]:
+                    raise RuntimeError("batch too large")
+                if ids == ["a"]:
+                    return [RelationCandidate("implies", "a", "c", "a_implies_b", 0.99, True, [], "retry a")]
+                return []
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            result = discover_rules(
+                raw,
+                out,
+                FakeClient(),
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                continue_on_client_error=True,
+                retry_failed_batches=1,
+                retry_failed_batch_size=1,
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.failed_batches, 0)
+        self.assertEqual(written["processed_market_ids"], ["a", "b", "c"])
+        self.assertEqual(written["discovery_errors"], [])
+        self.assertEqual(written["implications"][0]["antecedent"], "a")
+        self.assertEqual(written["implications"][0]["consequent"], "c")
+
+    def test_discover_rules_keeps_only_latest_unresolved_error_per_market(self):
+        class FakeClient:
+            def discover_relations(self, markets):
+                ids = [market.market_id for market in markets]
+                if ids == ["a", "b"]:
+                    raise RuntimeError("initial batch failed")
+                if ids == ["a"]:
+                    raise RuntimeError("retry failed")
+                return []
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            result = discover_rules(
+                raw,
+                out,
+                FakeClient(),
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                continue_on_client_error=True,
+                retry_failed_batches=1,
+                retry_failed_batch_size=1,
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.failed_batches, 1)
+        self.assertEqual(written["processed_market_ids"], ["b"])
+        self.assertEqual(len(written["discovery_errors"]), 1)
+        self.assertEqual(written["discovery_errors"][0]["attempt"], 1)
+        self.assertEqual(written["discovery_errors"][0]["market_ids"], ["a"])
+        self.assertEqual(written["discovery_errors"][0]["error"], "retry failed")
+
     def test_discover_rules_cache_tracks_markets_with_no_relations(self):
         rows = [
             {

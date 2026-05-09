@@ -17,11 +17,25 @@ RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
 WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
 EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-}"
 PROXY="${PROXY:-127.0.0.1:10808}"
+if [[ -n "$PROXY" && -z "${HTTPS_PROXY:-}" ]]; then
+  export HTTPS_PROXY="http://${PROXY}"
+  export HTTP_PROXY="http://${PROXY}"
+fi
 LIMIT="${LIMIT:-100}"
 PAGES="${PAGES:-5}"
 OFFSET="${OFFSET:-0}"
 TIMEOUT="${TIMEOUT:-15}"
 BATCH_SIZE="${BATCH_SIZE:-10}"
+CONTEXT_MARKET_LIMIT="${CONTEXT_MARKET_LIMIT:-10}"
+LLM_WORKERS="${LLM_WORKERS:-4}"
+LLM_ERROR_RETRIES="${LLM_ERROR_RETRIES:-2}"
+LLM_ERROR_RETRY_BATCH_SIZE="${LLM_ERROR_RETRY_BATCH_SIZE:-1}"
+LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
+LLM_RETRIES="${LLM_RETRIES:-2}"
+LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
+LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-high}"
+LLM_VERBOSITY="${LLM_VERBOSITY:-}"
+ALLOW_LLM_FAILURE="${ALLOW_LLM_FAILURE:-1}"
 MIN_CONFIDENCE="${MIN_CONFIDENCE:-0.95}"
 INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
 INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
@@ -52,13 +66,42 @@ fi
 
 if [[ "$SKIP_LLM" != "1" && -n "${OPENAI_MODEL:-}" ]]; then
   rules_tmp="$(mktemp "${RULES}.tmp.XXXXXX")"
-  "$PYTHON_BIN" -m poly_strategy.cli discover-rules \
+  discover_args=(
+    discover-rules
     --raw "$GAMMA" \
     --out "$rules_tmp" \
     --cache "$RULES" \
     --batch-size "$BATCH_SIZE" \
-    --min-confidence "$MIN_CONFIDENCE"
-  mv "$rules_tmp" "$RULES"
+    --context-market-limit "$CONTEXT_MARKET_LIMIT" \
+    --client-workers "$LLM_WORKERS" \
+    --retry-failed-batches "$LLM_ERROR_RETRIES" \
+    --retry-failed-batch-size "$LLM_ERROR_RETRY_BATCH_SIZE" \
+    --min-confidence "$MIN_CONFIDENCE" \
+    --timeout "$LLM_TIMEOUT" \
+    --retries "$LLM_RETRIES" \
+    --max-output-tokens "$LLM_MAX_OUTPUT_TOKENS" \
+    --reasoning-effort "$LLM_REASONING_EFFORT" \
+    --continue-on-client-error
+  )
+  if [[ -n "$LLM_VERBOSITY" ]]; then
+    discover_args+=(--verbosity "$LLM_VERBOSITY")
+  fi
+  set +e
+  "$PYTHON_BIN" -m poly_strategy.cli "${discover_args[@]}"
+  status=$?
+  set -e
+  if [[ "$status" == "0" ]]; then
+    mv "$rules_tmp" "$RULES"
+  elif [[ -s "$rules_tmp" ]]; then
+    echo "discover_rules_partial status=$status path=$rules_tmp promoted_to=$RULES" >&2
+    mv "$rules_tmp" "$RULES"
+  elif [[ "$ALLOW_LLM_FAILURE" == "1" && -s "$RULES" ]]; then
+    echo "discover_rules_failed status=$status using_existing_rules=$RULES" >&2
+    rm -f "$rules_tmp"
+  else
+    rm -f "$rules_tmp"
+    exit "$status"
+  fi
 else
   echo "skip_llm=1 or OPENAI_MODEL is empty; reusing existing rule cache: $RULES"
 fi

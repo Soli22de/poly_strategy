@@ -87,16 +87,7 @@ class OpenAIRuleDiscoveryClient:
 
     def discover_relations(self, markets: Iterable[MarketText]) -> List[RelationCandidate]:
         payload = self.build_payload(list(markets))
-        response = self._call_with_retries(payload)
-        content = _extract_output_text(response)
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
-        relations = parsed.get("relations")
-        if not isinstance(relations, list):
-            raise OpenAIResponseError("OpenAI response is missing relations")
-        return [_candidate_from_row(row) for row in relations if isinstance(row, dict)]
+        return _call_parser_with_retries(self._call_with_retries, payload, self.retries, _parse_relation_response)
 
     def _post_responses(self, payload: dict, timeout: float) -> dict:
         request = Request(
@@ -170,13 +161,7 @@ class OpenAIExhaustiveGroupVerifierClient(OpenAIRuleDiscoveryClient):
 
     def verify_group(self, markets: Iterable[MarketText]) -> dict:
         payload = self.build_payload(list(markets))
-        response = self._call_with_retries(payload)
-        content = _extract_output_text(response)
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
-        return _group_verification_from_row(parsed)
+        return _call_parser_with_retries(self._call_with_retries, payload, self.retries, _parse_group_response)
 
 
 _SYSTEM_PROMPT = """You identify conservative logical relations between binary prediction markets.
@@ -359,6 +344,53 @@ def _extract_output_text(response: dict) -> str:
             if part.get("type") == "output_text" and isinstance(part.get("text"), str):
                 return part["text"]
     raise OpenAIResponseError("OpenAI response is missing output text")
+
+
+def _call_parser_with_retries(call_fn: Callable[[dict], dict], payload: dict, retries: int, parser: Callable[[dict], object]):
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return parser(call_fn(payload))
+        except OpenAIResponseError as exc:
+            last_error = exc
+            if attempt >= retries:
+                raise
+            time.sleep(min(2 ** attempt, 5))
+    raise OpenAIResponseError(str(last_error))
+
+
+def _parse_relation_response(response: dict) -> List[RelationCandidate]:
+    content = _extract_output_text(response)
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
+    if isinstance(parsed, list):
+        relations = parsed
+    elif isinstance(parsed, dict):
+        relations = parsed.get("relations")
+    else:
+        raise OpenAIResponseError("OpenAI response was not a JSON object or relation list")
+    if not isinstance(relations, list):
+        raise OpenAIResponseError("OpenAI response is missing relations")
+    candidates = []
+    for row in relations:
+        if not isinstance(row, dict):
+            continue
+        try:
+            candidates.append(_candidate_from_row(row))
+        except OpenAIResponseError:
+            continue
+    return candidates
+
+
+def _parse_group_response(response: dict) -> dict:
+    content = _extract_output_text(response)
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
+    return _group_verification_from_row(parsed)
 
 
 def _candidate_from_row(row: dict) -> RelationCandidate:

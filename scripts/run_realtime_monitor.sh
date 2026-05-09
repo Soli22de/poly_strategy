@@ -11,6 +11,11 @@ if [[ -f .env.local ]]; then
   set +a
 fi
 
+if [[ -n "${PROXY:-}" && -z "${HTTPS_PROXY:-}" ]]; then
+  export HTTPS_PROXY="http://${PROXY}"
+  export HTTP_PROXY="http://${PROXY}"
+fi
+
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
 GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"

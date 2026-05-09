@@ -381,6 +381,10 @@ def main(argv=None) -> int:
                 max_markets=args.max_markets,
                 cache_path=Path(args.cache) if args.cache else None,
                 context_market_limit=args.context_market_limit,
+                continue_on_client_error=args.continue_on_client_error,
+                client_workers=args.client_workers,
+                retry_failed_batches=args.retry_failed_batches,
+                retry_failed_batch_size=args.retry_failed_batch_size,
             )
             print(
                 f"markets={result.markets_read} candidates={result.candidates_found} "
@@ -388,7 +392,8 @@ def main(argv=None) -> int:
                 f"mutual_exclusions={result.mutual_exclusions_written} "
                 f"equivalents={result.equivalents_written} "
                 f"collectively_exhaustive={result.collectively_exhaustive_written} "
-                f"complements={result.complements_written} out={args.out}"
+                f"complements={result.complements_written} "
+                f"failed_batches={getattr(result, 'failed_batches', 0)} out={args.out}"
             )
             return 0
         if args.command == "verify-exhaustive-groups":
@@ -875,6 +880,24 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--max-output-tokens", type=int, default=4000, help="Responses API max_output_tokens")
     discover.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
     discover.add_argument("--verbosity", help="optional Responses API text verbosity")
+    discover.add_argument("--client-workers", type=int, default=1, help="parallel LLM discovery batch workers")
+    discover.add_argument(
+        "--retry-failed-batches",
+        type=int,
+        default=0,
+        help="extra in-run retry passes for failed LLM batches when --continue-on-client-error is set",
+    )
+    discover.add_argument(
+        "--retry-failed-batch-size",
+        type=int,
+        default=1,
+        help="batch size for in-run failed-batch retries",
+    )
+    discover.add_argument(
+        "--continue-on-client-error",
+        action="store_true",
+        help="record failed LLM batches and continue with successful batches",
+    )
 
     verify_groups = subparsers.add_parser(
         "verify-exhaustive-groups",

@@ -82,6 +82,88 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(candidates[0].market_a_id, "a")
         self.assertEqual(calls[0][1], 12)
 
+    def test_discover_relations_retries_invalid_structured_response(self):
+        responses = [
+            {"output_text": json.dumps({"version": "0.1"})},
+            {
+                "output_text": json.dumps(
+                    {
+                        "relations": [
+                            {
+                                "relation_type": "mutually_exclusive",
+                                "market_a_id": "a",
+                                "market_b_id": "b",
+                                "direction": "none",
+                                "confidence": 0.97,
+                                "trade_allowed": True,
+                                "risk_flags": [],
+                                "reason": "both cannot happen",
+                            }
+                        ]
+                    }
+                )
+            },
+        ]
+        calls = []
+
+        def transport(payload, timeout):
+            calls.append((payload, timeout))
+            return responses.pop(0)
+
+        client = OpenAIRuleDiscoveryClient(
+            model="test-model",
+            api_key="test-key",
+            retries=1,
+            transport=transport,
+        )
+        market = MarketText("a", "Will A happen?", "", ["Yes", "No"], "", "", "will-a-happen")
+
+        candidates = client.discover_relations([market])
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].relation_type, "mutually_exclusive")
+        self.assertEqual(len(calls), 2)
+
+    def test_discover_relations_accepts_relation_list_and_skips_invalid_rows(self):
+        response = {
+            "output_text": json.dumps(
+                [
+                    {
+                        "relation_type": "implies",
+                        "market_a_id": "a",
+                        "market_b_id": "b",
+                        "direction": "a_implies_b",
+                        "confidence": 0.98,
+                        "trade_allowed": True,
+                        "risk_flags": [],
+                        "reason": "a implies b",
+                    },
+                    {
+                        "relation_type": "implies",
+                        "market_a_id": "bad",
+                        "market_b_id": "row",
+                        "direction": "a_implies_b",
+                        "confidence": 3.0,
+                        "trade_allowed": True,
+                        "risk_flags": [],
+                        "reason": "invalid confidence",
+                    },
+                ]
+            )
+        }
+
+        client = OpenAIRuleDiscoveryClient(
+            model="test-model",
+            api_key="test-key",
+            transport=lambda payload, timeout: response,
+        )
+        market = MarketText("a", "Will A happen?", "", ["Yes", "No"], "", "", "will-a-happen")
+
+        candidates = client.discover_relations([market])
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].market_a_id, "a")
+
     def test_verify_group_parses_structured_response(self):
         response = {
             "output_text": json.dumps(
@@ -114,6 +196,38 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(result["confidence"], 0.99)
         self.assertEqual(calls[0][1], 12)
         self.assertEqual(calls[0][0]["text"]["format"]["name"], "polymarket_exhaustive_group_verification")
+
+    def test_verify_group_retries_invalid_structured_response(self):
+        responses = [
+            {"output_text": "not-json"},
+            {
+                "output_text": json.dumps(
+                    {
+                        "verdict": "uncertain",
+                        "confidence": 0.2,
+                        "trade_allowed": False,
+                        "risk_flags": ["insufficient_information"],
+                        "reason": "insufficient text",
+                    }
+                )
+            },
+        ]
+
+        def transport(payload, timeout):
+            return responses.pop(0)
+
+        client = OpenAIExhaustiveGroupVerifierClient(
+            model="test-model",
+            api_key="test-key",
+            retries=1,
+            transport=transport,
+        )
+        market = MarketText("a", "Will A win?", "", ["Yes", "No"], "", "", "a-wins")
+
+        result = client.verify_group([market])
+
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertFalse(result["trade_allowed"])
 
     def test_missing_api_key_raises_clear_error(self):
         with patch.dict(os.environ, {}, clear=True):
