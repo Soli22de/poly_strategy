@@ -38,6 +38,7 @@ LLM_RETRIES="${LLM_RETRIES:-2}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
 LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-high}"
 LLM_VERBOSITY="${LLM_VERBOSITY:-}"
+LLM_TOPIC_CLUSTER="${LLM_TOPIC_CLUSTER:-1}"
 ALLOW_LLM_FAILURE="${ALLOW_LLM_FAILURE:-1}"
 MIN_CONFIDENCE="${MIN_CONFIDENCE:-0.95}"
 INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
@@ -88,6 +89,9 @@ if [[ "$SKIP_LLM" != "1" && -n "${OPENAI_MODEL:-}" ]]; then
   )
   if [[ -n "$LLM_VERBOSITY" ]]; then
     discover_args+=(--verbosity "$LLM_VERBOSITY")
+  fi
+  if [[ "$LLM_TOPIC_CLUSTER" == "1" ]]; then
+    discover_args+=(--topic-cluster)
   fi
   if [[ -n "$LLM_FALLBACK_MODEL" ]]; then
     discover_args+=(

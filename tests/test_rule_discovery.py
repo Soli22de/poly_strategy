@@ -7,6 +7,7 @@ from poly_strategy.rule_discovery import (
     DiscoveredRuleSet,
     MarketText,
     RelationCandidate,
+    cluster_markets_by_topic,
     deterministic_relation_candidates,
     discover_rules,
     filter_collectively_exhaustive,
@@ -106,6 +107,44 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].relation_type, "mutually_exclusive")
         self.assertEqual((candidates[0].market_a_id, candidates[0].market_b_id), ("a", "b"))
+
+    def test_deterministic_relation_candidates_adds_exact_duplicate_equivalent(self):
+        markets = [
+            MarketText("a", "Will Bitcoin hit 100k in 2026?", "", ["Yes", "No"], "2026-12-31", "Crypto", ""),
+            MarketText("b", "Will Bitcoin hit 100k in 2026?", "", ["Yes", "No"], "2026-12-31", "Crypto", ""),
+            MarketText("c", "Will Ethereum hit 10k in 2026?", "", ["Yes", "No"], "2026-12-31", "Crypto", ""),
+        ]
+
+        candidates = deterministic_relation_candidates(markets)
+        equivalents = [candidate for candidate in candidates if candidate.relation_type == "equivalent"]
+
+        self.assertEqual(len(equivalents), 1)
+        self.assertEqual((equivalents[0].market_a_id, equivalents[0].market_b_id), ("a", "b"))
+        self.assertTrue(equivalents[0].trade_allowed)
+
+    def test_deterministic_duplicate_equivalent_blocks_fallback_wording(self):
+        markets = [
+            MarketText("a", "Will A happen?", "If neither occurs, this market will resolve to 50-50.", ["Yes", "No"], "", "", ""),
+            MarketText("b", "Will A happen?", "", ["Yes", "No"], "", "", ""),
+        ]
+
+        candidates = deterministic_relation_candidates(markets)
+        equivalent = next(candidate for candidate in candidates if candidate.relation_type == "equivalent")
+
+        self.assertFalse(equivalent.trade_allowed)
+        self.assertIn("conditional_or_fallback_resolution", equivalent.risk_flags)
+
+    def test_cluster_markets_by_topic_groups_related_markets(self):
+        markets = [
+            MarketText("z", "Will the Fed cut rates in June?", "", ["Yes", "No"], "", "Macro", "fed-cut-june"),
+            MarketText("a", "Will Bitcoin hit 100k in 2026?", "", ["Yes", "No"], "", "Crypto", "bitcoin-100k"),
+            MarketText("b", "Will Bitcoin hit 120k in 2026?", "", ["Yes", "No"], "", "Crypto", "bitcoin-120k"),
+        ]
+
+        clustered = cluster_markets_by_topic(markets)
+
+        btc_positions = [index for index, market in enumerate(clustered) if market.market_id in {"a", "b"}]
+        self.assertEqual(btc_positions, list(range(min(btc_positions), max(btc_positions) + 1)))
 
     def test_secondary_verify_candidates_blocks_fallback_based_non_mutual_relations(self):
         from poly_strategy.rule_discovery import secondary_verify_candidates

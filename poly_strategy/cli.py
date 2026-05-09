@@ -400,6 +400,7 @@ def main(argv=None) -> int:
                 fallback_client=fallback_client,
                 fallback_retry_failed_batches=args.fallback_retry_failed_batches,
                 fallback_retry_failed_batch_size=args.fallback_retry_failed_batch_size,
+                topic_cluster=args.topic_cluster,
             )
             print(
                 f"markets={result.markets_read} candidates={result.candidates_found} "
@@ -931,6 +932,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--continue-on-client-error",
         action="store_true",
         help="record failed LLM batches and continue with successful batches",
+    )
+    discover.add_argument(
+        "--topic-cluster",
+        action="store_true",
+        help="group new markets by topic before LLM batching",
     )
 
     verify_groups = subparsers.add_parser(

@@ -25,7 +25,7 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Kalshi/Polymarket cross-platform output must stop hardcoding executable YES/NO legs for unverified matches.
   - [x] Execution must write live-attempt/reconciliation state into the risk ledger after real submissions.
   - [x] Data rotation must run as a persistent LaunchAgent, not only as a manual script.
-  - [ ] Rule discovery must broaden beyond deterministic neg-risk pairs with topic clustering and safer non-neg-risk candidates.
+  - [x] Rule discovery must broaden beyond deterministic neg-risk pairs with topic clustering and safer non-neg-risk candidates.
 - [x] Expand opportunity coverage beyond the current small watchlist.
   - [x] Rank high-liquidity/high-relevance Polymarket markets.
   - [x] Include high-liquidity single-market YES/NO bundles.
@@ -102,10 +102,10 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Classify dry-run/live responses.
   - [x] Detect unknown/partial/failure states requiring reconciliation.
   - [x] Update daily risk state after live submission attempts.
-- [ ] Broaden rule coverage beyond neg-risk.
-  - [ ] Add topic-clustered LLM batching.
-  - [ ] Add conservative deterministic equivalent detection for exact duplicate binary questions.
-  - [ ] Keep ambiguous deterministic candidates blocked unless verified.
+- [x] Broaden rule coverage beyond neg-risk.
+  - [x] Add topic-clustered LLM batching.
+  - [x] Add conservative deterministic equivalent detection for exact duplicate binary questions.
+  - [x] Keep ambiguous deterministic candidates blocked unless verified.
 - [x] Final validation.
   - [x] Unit tests.
   - [x] Smoke tests with current data.

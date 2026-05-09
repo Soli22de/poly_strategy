@@ -197,6 +197,7 @@ def discover_rules(
     fallback_client=None,
     fallback_retry_failed_batches: int = 0,
     fallback_retry_failed_batch_size: int = 1,
+    topic_cluster: bool = False,
 ) -> DiscoveryResult:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -266,6 +267,8 @@ def discover_rules(
         )
         checkpoint()
 
+    discovery_markets = cluster_markets_by_topic(new_markets) if topic_cluster else new_markets
+
     def run_batches(batches_to_run: List[List[MarketText]], attempt: int, batch_client, client_label: str) -> None:
         if not batches_to_run:
             return
@@ -300,10 +303,10 @@ def discover_rules(
                     raise
                 record_success(attempt, batch_index, batch, candidates)
 
-    run_batches(list(_batches(new_markets, batch_size)), attempt=0, batch_client=client, client_label="primary")
+    run_batches(list(_batches(discovery_markets, batch_size)), attempt=0, batch_client=client, client_label="primary")
     if continue_on_client_error:
         for retry_attempt in range(1, retry_failed_batches + 1):
-            pending_markets = [market for market in new_markets if market.market_id not in completed_market_ids]
+            pending_markets = [market for market in discovery_markets if market.market_id not in completed_market_ids]
             if not pending_markets:
                 break
             run_batches(
@@ -314,7 +317,7 @@ def discover_rules(
             )
         if fallback_client is not None:
             for fallback_attempt in range(1, fallback_retry_failed_batches + 1):
-                pending_markets = [market for market in new_markets if market.market_id not in completed_market_ids]
+                pending_markets = [market for market in discovery_markets if market.market_id not in completed_market_ids]
                 if not pending_markets:
                     break
                 run_batches(
@@ -453,6 +456,56 @@ def deterministic_relation_candidates(markets: Sequence[MarketText]) -> List[Rel
                         trade_allowed=True,
                         risk_flags=[],
                         reason=f"Deterministic neg-risk group {group_id}",
+                    )
+                )
+    for candidate in _deterministic_exact_equivalent_candidates(markets):
+        key = (candidate.relation_type, candidate.market_a_id, candidate.market_b_id, candidate.direction)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def cluster_markets_by_topic(markets: Sequence[MarketText]) -> List[MarketText]:
+    return sorted(markets, key=lambda market: (_topic_key(market), market.end_date, market.market_id))
+
+
+def _deterministic_exact_equivalent_candidates(markets: Sequence[MarketText]) -> List[RelationCandidate]:
+    grouped = defaultdict(list)
+    for market in markets:
+        key = (
+            _normalize_question_for_equivalence(market.question),
+            str(market.end_date or ""),
+            tuple(outcome.lower() for outcome in market.outcomes),
+        )
+        if key[0] and key[2] == ("yes", "no"):
+            grouped[key].append(market)
+
+    candidates = []
+    for group_markets in grouped.values():
+        if len(group_markets) < 2:
+            continue
+        sorted_markets = sorted(group_markets, key=lambda market: market.market_id)
+        for index, first in enumerate(sorted_markets):
+            for second in sorted_markets[index + 1 :]:
+                if first.neg_risk_market_id and first.neg_risk_market_id == second.neg_risk_market_id:
+                    continue
+                risk_flags = []
+                trade_allowed = True
+                if _has_fallback_text(first) or _has_fallback_text(second):
+                    risk_flags.append("conditional_or_fallback_resolution")
+                    trade_allowed = False
+                candidates.append(
+                    RelationCandidate(
+                        relation_type="equivalent",
+                        market_a_id=first.market_id,
+                        market_b_id=second.market_id,
+                        direction="bidirectional",
+                        confidence=0.98,
+                        trade_allowed=trade_allowed,
+                        risk_flags=risk_flags,
+                        reason="Deterministic exact duplicate binary question with matching end date",
                     )
                 )
     return candidates
@@ -826,6 +879,34 @@ def _context_rank(batch: Sequence[MarketText], market: MarketText) -> tuple:
     same_neg_risk = market.neg_risk_market_id in batch_neg_risk_ids if market.neg_risk_market_id else False
     same_category = market.category in batch_categories if market.category else False
     return (not same_neg_risk, not same_category, market.market_id)
+
+
+def _topic_key(market: MarketText) -> str:
+    if market.neg_risk_market_id:
+        return f"neg-risk:{market.neg_risk_market_id}"
+    tokens = re.findall(r"[a-z0-9]+", f"{market.category} {market.slug} {market.question}".lower())
+    stop = {
+        "will",
+        "the",
+        "this",
+        "that",
+        "market",
+        "yes",
+        "no",
+        "above",
+        "below",
+        "before",
+        "after",
+        "2026",
+        "2027",
+    }
+    topic_tokens = [token for token in tokens if len(token) > 2 and token not in stop]
+    return " ".join(topic_tokens[:6]) or market.market_id
+
+
+def _normalize_question_for_equivalence(question: str) -> str:
+    tokens = re.findall(r"[a-z0-9]+", question.lower())
+    return " ".join(tokens)
 
 
 def _utc_now() -> str:
