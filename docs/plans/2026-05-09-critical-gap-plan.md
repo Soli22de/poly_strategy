@@ -75,11 +75,11 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Partial-fill/reconciliation placeholders.
   - [x] Balance/API-key safety checks.
   - [x] Failure cooldown/pause mechanism.
-- [ ] Final validation.
-  - [ ] Unit tests.
-  - [ ] Smoke tests with current data.
-  - [ ] Code review checklist.
-  - [ ] Git commit for each key block.
+- [x] Final validation.
+  - [x] Unit tests.
+  - [x] Smoke tests with current data.
+  - [x] Code review checklist.
+  - [x] Git commit for each key block.
 
 ## Execution Notes
 
