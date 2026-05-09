@@ -80,6 +80,7 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Add deterministic semantic verification fields to match reports.
   - [x] Emit only watch/verified binary legs, not hardcoded Polymarket YES / Kalshi NO execution legs.
   - [x] Keep unverified matches as priority/research signals only.
+  - [x] Add a one-shot verified Polymarket/Kalshi HTTP orderbook dry-run scanner.
 - [x] Integrate external tool signals into the realtime loop.
   - [x] Poll generic external signal URLs/files.
   - [x] Normalize Oddpool/PillarLabAI/Polyprophet-style payloads through the existing signal schema.

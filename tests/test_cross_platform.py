@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from poly_strategy.cross_platform import (
+    cross_platform_pairs,
     cross_platform_signal_rows,
     match_polymarket_kalshi_markets,
     write_cross_platform_signal_rows,
@@ -76,6 +77,28 @@ class CrossPlatformTests(unittest.TestCase):
         self.assertEqual(rows[0]["legs"][0]["token"], None)
         self.assertEqual(rows[0]["legs"][0]["side"], "watch")
         self.assertEqual(verified_rows, [])
+
+    def test_cross_platform_pairs_filters_unverified_by_default(self):
+        report = {
+            "top": [
+                {
+                    "polymarket_market_id": "verified-poly",
+                    "kalshi_ticker": "KXVERIFIED",
+                    "trade_allowed": True,
+                },
+                {
+                    "polymarket_market_id": "unverified-poly",
+                    "kalshi_ticker": "KXUNVERIFIED",
+                    "trade_allowed": False,
+                },
+            ]
+        }
+
+        verified = cross_platform_pairs(report)
+        all_pairs = cross_platform_pairs(report, verified_only=False)
+
+        self.assertEqual([pair["polymarket_market_id"] for pair in verified], ["verified-poly"])
+        self.assertEqual(len(all_pairs), 2)
 
 
 if __name__ == "__main__":

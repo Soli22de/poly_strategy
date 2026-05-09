@@ -76,6 +76,29 @@ def cross_platform_signal_rows(match_report: dict, source: str = "kalshi_matcher
     return rows
 
 
+def cross_platform_pairs(match_report: dict, verified_only: bool = True) -> list:
+    pairs = []
+    for match in match_report.get("top", []):
+        if verified_only and not match.get("trade_allowed"):
+            continue
+        poly_market_id = str(match.get("polymarket_market_id") or "").strip()
+        kalshi_ticker = str(match.get("kalshi_ticker") or "").strip()
+        if not poly_market_id or not kalshi_ticker:
+            continue
+        pairs.append(
+            {
+                "polymarket_market_id": poly_market_id,
+                "kalshi_ticker": kalshi_ticker,
+                "status": match.get("status"),
+                "trade_allowed": bool(match.get("trade_allowed")),
+                "score": match.get("score"),
+                "polymarket_title": match.get("polymarket_title"),
+                "kalshi_title": match.get("kalshi_title"),
+            }
+        )
+    return pairs
+
+
 def write_cross_platform_signal_rows(rows: Iterable[dict], out_path: Path) -> int:
     normalized = [_external_signal_row(row) for row in rows]
     out_path.parent.mkdir(parents=True, exist_ok=True)

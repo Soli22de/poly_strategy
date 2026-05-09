@@ -23,6 +23,7 @@ from poly_strategy.collectors import (
     write_sample_snapshot,
 )
 from poly_strategy.cross_platform import (
+    cross_platform_pairs,
     cross_platform_signal_rows,
     match_polymarket_kalshi_markets,
     write_cross_platform_signal_rows,
@@ -56,6 +57,7 @@ from poly_strategy.realtime import (
 )
 from poly_strategy.risk import risk_check_execution_plan, update_risk_state_from_execution_result
 from poly_strategy.rule_discovery import discover_rules
+from poly_strategy.scanner import find_cross_venue_same_binary
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
 
@@ -489,6 +491,18 @@ def main(argv=None) -> int:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
                 print(f"wrote=1 out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "scan-cross-platform-once":
+            row = _scan_cross_platform_once(args)
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(
+                    f"pairs={row['pair_count']} snapshots={row['snapshot_count']} "
+                    f"opportunities={row['opportunity_count']} out={args.out}"
+                )
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
@@ -998,6 +1012,21 @@ def _build_parser() -> argparse.ArgumentParser:
     match_cross.add_argument("--top", type=int, default=100, help="maximum matches to include")
     match_cross.add_argument("--verified-only", action="store_true", help="write only semantically verified same-binary signals")
 
+    scan_cross = subparsers.add_parser(
+        "scan-cross-platform-once",
+        help="refresh verified Polymarket/Kalshi pairs once and scan cross-venue same-binary arbs",
+    )
+    scan_cross.add_argument("--matches", required=True, help="cross_platform_match_report JSON path")
+    scan_cross.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    scan_cross.add_argument("--snapshots-out", required=True, help="append refreshed Polymarket/Kalshi binary snapshots here")
+    scan_cross.add_argument("--kalshi-orderbooks-out", required=True, help="append raw Kalshi orderbooks here")
+    scan_cross.add_argument("--out", help="output JSON scan report path; prints JSON when omitted")
+    scan_cross.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    scan_cross.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+    scan_cross.add_argument("--book-workers", type=int, default=1, help="parallel Polymarket CLOB book fetch workers")
+    scan_cross.add_argument("--min-net-edge", type=float, default=0.0, help="minimum cross-platform edge per share")
+    scan_cross.add_argument("--include-unverified", action="store_true", help="also scan unverified match candidates")
+
     watchlist = subparsers.add_parser("build-watchlist", help="write a standardized Polymarket token watchlist")
     watchlist.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
     watchlist.add_argument("--rules", required=True, help="rule JSON path")
@@ -1242,6 +1271,70 @@ def _run_paper_monitor(args) -> int:
         f"error_iterations={error_iterations} report={args.report_out}"
     )
     return 0
+
+
+def _scan_cross_platform_once(args) -> dict:
+    match_report = json.loads(Path(args.matches).read_text())
+    pairs = cross_platform_pairs(match_report, verified_only=not args.include_unverified)
+    snapshots_path = Path(args.snapshots_out)
+    kalshi_orderbooks_path = Path(args.kalshi_orderbooks_out)
+    snapshot_offset = _file_size(snapshots_path)
+    poly_market_ids = [pair["polymarket_market_id"] for pair in pairs]
+    kalshi_tickers = [pair["kalshi_ticker"] for pair in pairs]
+
+    poly_count = collect_polymarket_binary_snapshots_for_market_ids(
+        snapshots_path,
+        Path(args.gamma),
+        poly_market_ids,
+        args.timeout,
+        args.proxy,
+        args.book_workers,
+        skip_book_errors=True,
+        expand_neg_risk_groups=False,
+        refresh_missing_gamma=True,
+    )
+    kalshi_orderbook_count = collect_kalshi_orderbooks(kalshi_orderbooks_path, kalshi_tickers, args.timeout, args.proxy)
+    kalshi_snapshot_count = write_kalshi_binary_snapshots(kalshi_orderbooks_path, snapshots_path)
+    appended_text, _ = _read_appended_text(snapshots_path, snapshot_offset)
+    snapshots = list(snapshots_from_ndjson_lines(appended_text.splitlines()))
+    by_venue_market = {(snapshot.venue, snapshot.market_id): snapshot for snapshot in snapshots}
+    opportunities = []
+    skipped_pairs = []
+    for pair in pairs:
+        polymarket_snapshot = by_venue_market.get(("polymarket", pair["polymarket_market_id"]))
+        kalshi_snapshot = by_venue_market.get(("kalshi", pair["kalshi_ticker"]))
+        if polymarket_snapshot is None or kalshi_snapshot is None:
+            skipped_pairs.append(
+                {
+                    "pair": pair,
+                    "reason": "missing_snapshot",
+                    "polymarket_snapshot": polymarket_snapshot is not None,
+                    "kalshi_snapshot": kalshi_snapshot is not None,
+                }
+            )
+            continue
+        for opportunity in find_cross_venue_same_binary(polymarket_snapshot, kalshi_snapshot, min_net_edge=args.min_net_edge):
+            opportunity_row = opportunity_to_row(opportunity)
+            opportunity_row["pair"] = pair
+            opportunities.append(opportunity_row)
+
+    opportunities.sort(key=lambda row: (-float(row.get("net_edge_per_share") or 0.0), row.get("key") or ""))
+    return {
+        "type": "cross_platform_scan_report",
+        "matches_path": args.matches,
+        "gamma_path": args.gamma,
+        "snapshots_path": args.snapshots_out,
+        "kalshi_orderbooks_path": args.kalshi_orderbooks_out,
+        "pair_count": len(pairs),
+        "snapshot_count": len(snapshots),
+        "polymarket_snapshot_count": poly_count,
+        "kalshi_orderbook_count": kalshi_orderbook_count,
+        "kalshi_snapshot_count": kalshi_snapshot_count,
+        "opportunity_count": len(opportunities),
+        "skipped_pair_count": len(skipped_pairs),
+        "opportunities": opportunities,
+        "skipped_pairs": skipped_pairs,
+    }
 
 
 def _current_monitor_opportunities(result) -> list:
