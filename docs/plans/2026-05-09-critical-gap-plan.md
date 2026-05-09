@@ -61,9 +61,9 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Compress old raw/snapshot files.
   - [x] Retain reports and alert logs.
   - [x] Guard against disk exhaustion.
-- [ ] Background production data maintenance.
+- [x] Background production data maintenance.
   - [x] Add a persistent macOS LaunchAgent for `scripts/rotate_data.sh`.
-  - [ ] Install/reload it with the existing LaunchAgent installer.
+  - [x] Install/reload it with the existing LaunchAgent installer.
   - [x] Smoke-test rotation in dry-run mode and rotate current oversized snapshot data.
 - [x] Convert background jobs to persistent LaunchAgents.
   - [x] Realtime monitor plist.
