@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 
-from poly_strategy.backtest import replay_ndjson
+from poly_strategy.backtest import load_rule_set, replay_ndjson, snapshots_from_ndjson_lines
 from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_loop,
     collect_polymarket_binary_snapshots_for_rules,
@@ -24,6 +24,8 @@ from poly_strategy.execution import (
     build_execution_plan,
     plan_to_row,
 )
+from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
+from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.rule_discovery import discover_rules
 
@@ -142,6 +144,15 @@ def main(argv=None) -> int:
                 rules_path=Path(args.rules) if args.rules else None,
             )
             row = _paper_report_row(result)
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"wrote=1 out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "paper-analyze":
+            row = analyze_paper_monitor_report(Path(args.path), top_n=args.top)
             if args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
@@ -338,6 +349,11 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     report.add_argument("--bankroll", type=float, help="cap simulated bankroll per timestamp batch")
 
+    analyze = subparsers.add_parser("paper-analyze", help="summarize a paper-monitor JSONL report")
+    analyze.add_argument("path", help="paper-monitor JSONL report path")
+    analyze.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
+    analyze.add_argument("--top", type=int, default=10, help="top opportunities and markets to include")
+
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")
     execute.add_argument("--rules", help="JSON file with discovered rules")
@@ -413,11 +429,13 @@ def _run_paper_monitor(args) -> int:
     snapshots_path = Path(args.snapshots_out)
     report_path = Path(args.report_out)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    rule_set = load_rule_set(Path(args.rules))
+    replay_state = IncrementalReplayState()
+    snapshot_offset = _file_size(snapshots_path)
 
     total_snapshots_collected = 0
     completed_iterations = 0
     error_iterations = 0
-    last_result = None
 
     for index in range(args.iterations):
         iteration = index + 1
@@ -436,19 +454,32 @@ def _run_paper_monitor(args) -> int:
                 errors=collection_errors,
             )
             total_snapshots_collected += snapshots_collected
-            phase = "replay"
-            result = replay_ndjson(
-                snapshots_path,
+            phase = "scan"
+            appended_text, new_snapshot_offset = _read_appended_text(snapshots_path, snapshot_offset)
+            snapshots = list(snapshots_from_ndjson_lines(appended_text.splitlines()))
+            snapshot_offset = new_snapshot_offset
+            if snapshots_collected != len(snapshots):
+                collection_errors.append(
+                    {
+                        "kind": "snapshot_count_mismatch",
+                        "message": "collector count did not match appended binary snapshot rows",
+                        "collector_count": snapshots_collected,
+                        "parsed_count": len(snapshots),
+                    }
+                )
+            batch_result = replay_state.apply_snapshots(
+                snapshots,
+                rule_set,
                 min_net_edge=args.min_net_edge,
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
-                rules_path=Path(args.rules),
             )
-            current_opportunities = _current_monitor_opportunities(result)
-            stable_opportunities = _stable_current_opportunities(
-                result,
-                args.min_run_observations,
-                args.min_run_seconds,
+            current_opportunities = batch_result.current_opportunities
+            stable_opportunities = stable_current_opportunities(
+                current_opportunities,
+                batch_result.current_runs,
+                min_run_observations=args.min_run_observations,
+                min_run_seconds=args.min_run_seconds,
             )
             stable_selection = select_paper_trades(
                 stable_opportunities,
@@ -458,17 +489,17 @@ def _run_paper_monitor(args) -> int:
             row = _paper_monitor_iteration_row(
                 iteration,
                 snapshots_collected,
-                result,
+                replay_state,
                 current_opportunities,
                 stable_opportunities,
                 stable_selection,
+                batch_result.current_runs,
                 collection_errors,
                 args,
             )
             phase = "write_report"
             _append_jsonl_row(report_path, row)
             completed_iterations += 1
-            last_result = result
             print(
                 f"iteration={iteration} snapshots_collected={snapshots_collected} "
                 f"current_opportunities={len(current_opportunities)} "
@@ -492,7 +523,7 @@ def _run_paper_monitor(args) -> int:
         total_snapshots_collected,
         completed_iterations,
         error_iterations,
-        last_result,
+        replay_state,
     )
     _append_jsonl_row(report_path, summary)
     print(
@@ -560,18 +591,7 @@ def _paper_report_row(result) -> dict:
         "opportunities": [opportunity_to_row(opportunity) for opportunity in result.opportunities],
         "paper_trades": [trade_to_row(trade) for trade in result.paper_trades],
         "paper_rejections": [rejection_to_row(rejection) for rejection in result.paper_rejections],
-        "runs": [
-            {
-                "key": run.key,
-                "market_id": run.market_id,
-                "start_ts": run.start_ts,
-                "end_ts": run.end_ts,
-                "observation_count": run.observation_count,
-                "duration_seconds": run.duration_seconds,
-                "max_edge_per_share": run.max_edge_per_share,
-            }
-            for run in result.runs
-        ],
+        "runs": [_run_to_row(run) for run in result.runs],
     }
 
 
@@ -582,6 +602,7 @@ def _paper_monitor_iteration_row(
     current_opportunities: list,
     stable_opportunities: list,
     stable_selection,
+    current_runs: list,
     errors: list,
     args,
 ) -> dict:
@@ -618,6 +639,7 @@ def _paper_monitor_iteration_row(
         "current_opportunities": top_current,
         "stable_opportunities": top_stable,
         "stable_paper_trades": top_stable_trades,
+        "current_runs": [_run_to_row(run) for run in current_runs],
         "error_count": len(errors),
         "errors": errors[: args.max_errors_per_iteration],
     }
@@ -665,6 +687,7 @@ def _paper_monitor_summary_row(args, snapshots_collected: int, completed_iterati
                 "paper_edge": result.paper_edge,
                 "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
                 "last_snapshot_ts": result.last_snapshot_ts,
+                "run_count": len(result.runs),
                 "by_kind": _paper_summary_by_kind(result),
             }
         )
@@ -678,6 +701,18 @@ def _top_opportunity_rows(opportunities: list, limit: int) -> list:
         opportunity_to_row(opportunity)
         for opportunity in sorted(opportunities, key=lambda opportunity: opportunity.net_edge_per_share, reverse=True)[:limit]
     ]
+
+
+def _run_to_row(run) -> dict:
+    return {
+        "key": run.key,
+        "market_id": run.market_id,
+        "start_ts": run.start_ts,
+        "end_ts": run.end_ts,
+        "observation_count": run.observation_count,
+        "duration_seconds": run.duration_seconds,
+        "max_edge_per_share": run.max_edge_per_share,
+    }
 
 
 def _paper_summary_by_kind(result) -> list:
@@ -778,6 +813,21 @@ def _append_jsonl_row(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _file_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return path.stat().st_size
+
+
+def _read_appended_text(path: Path, offset: int) -> tuple:
+    if not path.exists():
+        return "", offset
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read()
+        return data.decode("utf-8"), handle.tell()
 
 
 def _utc_now() -> str:

@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -73,6 +73,15 @@ class ReplayResult:
         return sum(trade.edge for trade in self.paper_trades)
 
 
+@dataclass(frozen=True)
+class RuleSet:
+    implications: List[ImplicationRule] = field(default_factory=list)
+    mutual_exclusions: List[MutualExclusionRule] = field(default_factory=list)
+    equivalences: List[EquivalenceRule] = field(default_factory=list)
+    collectively_exhaustive: List[CollectivelyExhaustiveRule] = field(default_factory=list)
+    complements: List[ComplementRule] = field(default_factory=list)
+
+
 def replay_ndjson(
     path: Path,
     min_net_edge: float = 0.0,
@@ -81,29 +90,11 @@ def replay_ndjson(
     rules_path: Optional[Path] = None,
 ) -> ReplayResult:
     snapshots = list(_read_binary_snapshots(path))
-    rules = load_rules(rules_path) if rules_path else []
-    mutual_exclusion_rules = load_mutually_exclusive_rules(rules_path) if rules_path else []
-    equivalence_rules = load_equivalence_rules(rules_path) if rules_path else []
-    collectively_exhaustive_rules = load_collectively_exhaustive_rules(rules_path) if rules_path else []
-    complement_rules = load_complement_rules(rules_path) if rules_path else []
+    rule_set = load_rule_set(rules_path) if rules_path else RuleSet()
     opportunities: List[Opportunity] = []
     opportunities_by_snapshot: List[List[Opportunity]] = []
     for batch in _batches_by_ts(snapshots):
-        batch_opportunities: List[Opportunity] = []
-        for snapshot in batch:
-            batch_opportunities.extend(find_yes_no_bundle_arbs(snapshot, min_net_edge=min_net_edge))
-        batch_opportunities.extend(find_implication_arbs(batch, rules, min_net_edge=min_net_edge))
-        batch_opportunities.extend(
-            find_mutually_exclusive_arbs(batch, mutual_exclusion_rules, min_net_edge=min_net_edge)
-        )
-        batch_opportunities.extend(
-            find_mutual_exclusion_basket_arbs(batch, mutual_exclusion_rules, min_net_edge=min_net_edge)
-        )
-        batch_opportunities.extend(find_equivalent_arbs(batch, equivalence_rules, min_net_edge=min_net_edge))
-        batch_opportunities.extend(
-            find_collectively_exhaustive_arbs(batch, collectively_exhaustive_rules, min_net_edge=min_net_edge)
-        )
-        batch_opportunities.extend(find_complement_arbs(batch, complement_rules, min_net_edge=min_net_edge))
+        batch_opportunities = scan_snapshot_batch(batch, rule_set, min_net_edge=min_net_edge)
         opportunities_by_snapshot.append(batch_opportunities)
         opportunities.extend(batch_opportunities)
     paper_selection = _paper_selection_by_batch(opportunities_by_snapshot, max_capital_per_trade, bankroll)
@@ -115,6 +106,38 @@ def replay_ndjson(
         runs=_opportunity_runs(opportunities_by_snapshot),
         last_snapshot_ts=snapshots[-1].ts if snapshots else None,
     )
+
+
+def load_rule_set(path: Path, min_confidence: float = 0.95) -> RuleSet:
+    return RuleSet(
+        implications=load_rules(path, min_confidence=min_confidence),
+        mutual_exclusions=load_mutually_exclusive_rules(path, min_confidence=min_confidence),
+        equivalences=load_equivalence_rules(path, min_confidence=min_confidence),
+        collectively_exhaustive=load_collectively_exhaustive_rules(path, min_confidence=min_confidence),
+        complements=load_complement_rules(path, min_confidence=min_confidence),
+    )
+
+
+def scan_snapshot_batch(
+    snapshots: List[BinaryMarketSnapshot],
+    rule_set: Optional[RuleSet] = None,
+    min_net_edge: float = 0.0,
+) -> List[Opportunity]:
+    rules = rule_set or RuleSet()
+    opportunities: List[Opportunity] = []
+    for snapshot in snapshots:
+        opportunities.extend(find_yes_no_bundle_arbs(snapshot, min_net_edge=min_net_edge))
+    opportunities.extend(find_implication_arbs(snapshots, rules.implications, min_net_edge=min_net_edge))
+    opportunities.extend(find_mutually_exclusive_arbs(snapshots, rules.mutual_exclusions, min_net_edge=min_net_edge))
+    opportunities.extend(
+        find_mutual_exclusion_basket_arbs(snapshots, rules.mutual_exclusions, min_net_edge=min_net_edge)
+    )
+    opportunities.extend(find_equivalent_arbs(snapshots, rules.equivalences, min_net_edge=min_net_edge))
+    opportunities.extend(
+        find_collectively_exhaustive_arbs(snapshots, rules.collectively_exhaustive, min_net_edge=min_net_edge)
+    )
+    opportunities.extend(find_complement_arbs(snapshots, rules.complements, min_net_edge=min_net_edge))
+    return opportunities
 
 
 def load_rules(path: Path, min_confidence: float = 0.95) -> List[ImplicationRule]:
@@ -195,17 +218,21 @@ def _rule_is_tradeable(rule: dict, first_key: str, second_key: str, min_confiden
 
 def _read_binary_snapshots(path: Path) -> Iterable[BinaryMarketSnapshot]:
     with path.open() as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            if row.get("type") != "binary_snapshot":
-                continue
-            yield _snapshot_from_row(row)
+        yield from snapshots_from_ndjson_lines(handle)
 
 
-def _snapshot_from_row(row: dict) -> BinaryMarketSnapshot:
+def snapshots_from_ndjson_lines(lines: Iterable[str]) -> Iterable[BinaryMarketSnapshot]:
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if row.get("type") != "binary_snapshot":
+            continue
+        yield snapshot_from_row(row)
+
+
+def snapshot_from_row(row: dict) -> BinaryMarketSnapshot:
     return BinaryMarketSnapshot(
         market_id=row["market_id"],
         venue=row["venue"],

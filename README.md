@@ -113,7 +113,7 @@ python3 -m poly_strategy.cli monitor-rules \
 
 `monitor-rules` appends each targeted snapshot batch, replays the cumulative file, and prints current-iteration opportunities plus active run duration/edge when any opportunity survives the `--min-net-edge` filter.
 
-For a longer paper-trading run, use `paper-monitor`. It keeps the same targeted collection loop, but writes structured JSONL for every iteration plus a final summary. Use `--skip-book-errors` so one failed CLOB book does not discard the whole batch, and `--continue-on-error` for unattended runs:
+For a longer paper-trading run, use `paper-monitor`. It keeps the same targeted collection loop, scans only the newly appended snapshot batch on each iteration, and writes structured JSONL for every iteration plus a final summary. Use `--skip-book-errors` so one failed CLOB book does not discard the whole batch, and `--continue-on-error` for unattended runs:
 
 ```bash
 python3 -m poly_strategy.cli paper-monitor \
@@ -134,7 +134,17 @@ python3 -m poly_strategy.cli paper-monitor \
   --continue-on-error
 ```
 
-At a 5 second interval, `--iterations 17280` is roughly one day. The report rows include current opportunities, stable opportunities after the run-duration filter, simulated stable paper trades, collection error counts, and the cumulative replay totals.
+At a 5 second interval, `--iterations 17280` is roughly one day. The report rows include current opportunities, stable opportunities after the run-duration filter, simulated stable paper trades, collection error counts, active run details, and cumulative paper totals for the current process. Existing rows in `--snapshots-out` are left untouched but are not replayed into the new monitor state, so use a fresh report path for each serious run.
+
+Summarize a paper monitor run:
+
+```bash
+python3 -m poly_strategy.cli paper-analyze data/paper-monitor-report.jsonl \
+  --out data/paper-monitor-analysis.json \
+  --top 10
+```
+
+The analysis report includes error rate, runtime, opportunity observations, stable opportunity observations, stable paper ROI, edge distributions, top recurring opportunities, and top stable markets.
 
 Write a conflict-aware paper trading report. This sorts opportunities by edge per capital, reserves overlapping leg liquidity so the same visible ask depth is not counted twice, and applies both per-trade and per-iteration bankroll caps:
 

@@ -201,54 +201,62 @@ class CliTests(unittest.TestCase):
         self.assertIn("opportunities=1", stdout.getvalue())
 
     def test_paper_monitor_writes_iteration_and_summary_report(self):
-        result = SimpleNamespace(
-            snapshot_count=1,
-            opportunity_count=0,
-            paper_trade_count=0,
-            paper_rejections=[],
-            paper_capital_used=0.0,
-            paper_edge=0.0,
-            last_snapshot_ts=None,
-            opportunities=[],
-            paper_trades=[],
-            runs=[],
-        )
+        def collect_once(path, gamma, rules, timeout, proxy, max_workers, **kwargs):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "ts": "2026-05-09T00:00:00Z",
+                            "type": "binary_snapshot",
+                            "venue": "polymarket",
+                            "market_id": "sample",
+                            "fee_rate": 0.0,
+                            "yes": {"token_id": "yes-token", "asks": [[0.51, 100]], "bids": []},
+                            "no": {"token_id": "no-token", "asks": [[0.51, 100]], "bids": []},
+                        }
+                    )
+                    + "\n"
+                )
+            return 1
+
         with tempfile.TemporaryDirectory() as tmp:
             snapshots = Path(tmp) / "snapshots.ndjson"
             report = Path(tmp) / "paper-monitor.jsonl"
-            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules", return_value=1) as collect:
-                with patch("poly_strategy.cli.replay_ndjson", return_value=result) as replay:
-                    stdout = io.StringIO()
-                    with redirect_stdout(stdout):
-                        code = main(
-                            [
-                                "paper-monitor",
-                                "--gamma",
-                                "data/gamma.ndjson",
-                                "--rules",
-                                "rules/generated.json",
-                                "--snapshots-out",
-                                str(snapshots),
-                                "--report-out",
-                                str(report),
-                                "--iterations",
-                                "1",
-                                "--interval",
-                                "0",
-                                "--book-workers",
-                                "4",
-                                "--skip-book-errors",
-                            ]
-                        )
+            rules = Path(tmp) / "rules.json"
+            rules.write_text("{}")
+            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules", side_effect=collect_once) as collect:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "paper-monitor",
+                            "--gamma",
+                            "data/gamma.ndjson",
+                            "--rules",
+                            str(rules),
+                            "--snapshots-out",
+                            str(snapshots),
+                            "--report-out",
+                            str(report),
+                            "--iterations",
+                            "1",
+                            "--interval",
+                            "0",
+                            "--book-workers",
+                            "4",
+                            "--skip-book-errors",
+                        ]
+                    )
             rows = [json.loads(line) for line in report.read_text().splitlines()]
 
         self.assertEqual(code, 0)
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args[5], 4)
         self.assertTrue(collect.call_args.kwargs["skip_book_errors"])
-        replay.assert_called_once()
         self.assertEqual(rows[0]["type"], "paper_monitor_iteration")
         self.assertEqual(rows[0]["snapshots_collected"], 1)
+        self.assertEqual(rows[0]["snapshot_count"], 1)
         self.assertEqual(rows[1]["type"], "paper_monitor_summary")
         self.assertIn("completed_iterations=1", stdout.getvalue())
 
@@ -256,6 +264,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             snapshots = Path(tmp) / "snapshots.ndjson"
             report = Path(tmp) / "paper-monitor.jsonl"
+            rules = Path(tmp) / "rules.json"
+            rules.write_text("{}")
             with patch(
                 "poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules",
                 side_effect=RuntimeError("temporary failure"),
@@ -270,7 +280,7 @@ class CliTests(unittest.TestCase):
                                 "--gamma",
                                 "data/gamma.ndjson",
                                 "--rules",
-                                "rules/generated.json",
+                                str(rules),
                                 "--snapshots-out",
                                 str(snapshots),
                                 "--report-out",
@@ -292,6 +302,84 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["snapshots_collected"], 0)
         self.assertEqual(rows[1]["type"], "paper_monitor_summary")
         self.assertEqual(rows[1]["error_iterations"], 1)
+
+    def test_paper_analyze_command_writes_monitor_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "paper-monitor.jsonl"
+            out = Path(tmp) / "analysis.json"
+            report.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in [
+                        {
+                            "type": "paper_monitor_iteration",
+                            "ts": "2026-05-09T00:00:00Z",
+                            "iteration": 1,
+                            "snapshots_collected": 2,
+                            "snapshot_count": 2,
+                            "current_opportunity_count": 1,
+                            "stable_opportunity_count": 1,
+                            "stable_paper_trade_count": 1,
+                            "stable_paper_capital_used": 10,
+                            "stable_paper_edge": 0.2,
+                            "current_opportunities": [
+                                {
+                                    "key": "arb:a",
+                                    "kind": "yes_no_bundle",
+                                    "net_edge_per_share": 0.02,
+                                    "total_edge": 0.2,
+                                    "legs": [{"market_id": "m1"}],
+                                }
+                            ],
+                            "stable_opportunities": [
+                                {
+                                    "key": "arb:a",
+                                    "kind": "yes_no_bundle",
+                                    "net_edge_per_share": 0.02,
+                                    "total_edge": 0.2,
+                                    "legs": [{"market_id": "m1"}],
+                                }
+                            ],
+                            "stable_paper_trades": [{"paper_roi": 0.02}],
+                            "errors": [],
+                            "error_count": 0,
+                        },
+                        {
+                            "type": "paper_monitor_iteration_error",
+                            "ts": "2026-05-09T00:00:05Z",
+                            "iteration": 2,
+                            "phase": "collect",
+                            "snapshots_collected": 0,
+                            "error_type": "RuntimeError",
+                            "message": "temporary failure",
+                            "errors": [{"kind": "book_fetch_error"}],
+                            "error_count": 1,
+                        },
+                        {
+                            "type": "paper_monitor_summary",
+                            "ts": "2026-05-09T00:00:06Z",
+                            "snapshot_count": 2,
+                            "opportunity_count": 1,
+                        },
+                    ]
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["paper-analyze", str(report), "--out", str(out), "--top", "1"])
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["type"], "paper_monitor_analysis")
+        self.assertEqual(row["iteration_count"], 1)
+        self.assertEqual(row["error_iteration_count"], 1)
+        self.assertEqual(row["current_opportunity_observations"], 1)
+        self.assertAlmostEqual(row["stable_paper_roi"], 0.02)
+        self.assertEqual(row["top_stable_markets"][0]["market_id"], "m1")
+        self.assertEqual(row["error_summary"]["by_phase"][0]["phase"], "collect")
+        self.assertIn("wrote=1", stdout.getvalue())
 
     def test_paper_report_command_writes_json_report(self):
         with tempfile.TemporaryDirectory() as tmp:
