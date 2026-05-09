@@ -481,8 +481,12 @@ class CliTests(unittest.TestCase):
         self.assertAlmostEqual(row["stable_paper_roi"], 0.02)
         self.assertEqual(row["top_stable_markets"][0]["market_id"], "m1")
         self.assertEqual(row["error_summary"]["by_phase"][0]["phase"], "collect")
+        self.assertEqual(row["zero_current_opportunity_iterations"], 0)
+        self.assertEqual(row["latest_zero_stable_opportunity_streak"], 0)
+        self.assertEqual(row["current_opportunity_by_kind"][0]["kind"], "yes_no_bundle")
         self.assertEqual(row["near_miss"]["top"][0]["kind"], "yes_no_bundle")
         self.assertEqual(row["near_miss"]["gamma_path"], str(gamma))
+        self.assertEqual(row["near_miss_rejection_summary"]["neg_risk_group_count"], 0)
         self.assertGreater(row["near_miss"]["top"][0]["distance_to_min_net_edge"], 0)
         self.assertIn("wrote=1", stdout.getvalue())
 

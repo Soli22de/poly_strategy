@@ -20,7 +20,7 @@ def near_miss_report(
         raise ValueError("top_n must be non-negative")
 
     snapshots = _latest_snapshot_batch(snapshots_path)
-    rule_set = load_rule_set(rules_path) if rules_path else RuleSet()
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
     candidates = near_miss_candidates(snapshots, rule_set, min_net_edge=min_net_edge)
     market_texts = _market_texts_by_id(gamma_path)
     neg_risk_expanded_groups = _annotate_neg_risk_diagnostics(
@@ -172,6 +172,30 @@ def near_miss_candidates(
             )
         )
 
+    for rule in rule_set.neg_risk_groups:
+        market_ids = _unique_market_ids(rule.market_ids)
+        if len(market_ids) < 2:
+            continue
+        group_snapshots = [by_market_id[market_id] for market_id in market_ids if market_id in by_market_id]
+        if len(group_snapshots) != len(market_ids):
+            continue
+        candidates.append(
+            _candidate_row(
+                "neg_risk_group_yes_basket",
+                [(snapshot, "YES", snapshot.yes.asks) for snapshot in group_snapshots],
+                payout_per_share=1.0,
+                min_net_edge=min_net_edge,
+            )
+        )
+        candidates.append(
+            _candidate_row(
+                "neg_risk_group_no_basket",
+                [(snapshot, "NO", snapshot.no.asks) for snapshot in group_snapshots],
+                payout_per_share=len(group_snapshots) - 1,
+                min_net_edge=min_net_edge,
+            )
+        )
+
     for rule in rule_set.complements:
         first = by_market_id.get(rule.first_market_id)
         second = by_market_id.get(rule.second_market_id)
@@ -194,6 +218,20 @@ def near_miss_candidates(
             )
 
     return [candidate for candidate in candidates if candidate is not None]
+
+
+def _unique_market_ids(market_ids: List[str]) -> List[str]:
+    unique = []
+    seen = set()
+    for market_id in market_ids:
+        if not market_id:
+            continue
+        normalized = str(market_id)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
 
 
 def _latest_snapshot_batch(path: Path) -> List[BinaryMarketSnapshot]:

@@ -84,6 +84,28 @@ class NearMissTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["net_edge_per_share"], 0.10)
         self.assertNotIn("diagnostic_only", rows[0])
 
+    def test_near_miss_report_includes_neg_risk_group_candidates_from_gamma(self):
+        snapshots = [
+            _row("a", 0.20, 0.60),
+            _row("b", 0.30, 0.65),
+            _row("c", 0.40, 0.70),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            report = near_miss_report(snapshot_path, gamma_path=gamma_path, top_n=10)
+
+        kinds = {row["kind"] for row in report["top"]}
+        self.assertIn("neg_risk_group_yes_basket", kinds)
+        self.assertIn("neg_risk_group_no_basket", kinds)
+
     def test_near_miss_report_rejects_incomplete_known_neg_risk_groups(self):
         snapshots = [
             _row("a", 0.20, 0.82),
@@ -208,7 +230,11 @@ def _gamma_row(market_id: str, threshold: int, group_id: str = "group-1"):
             "id": market_id,
             "question": f"Will {market_id.upper()} win?",
             "description": "Same event.",
+            "closed": False,
+            "enableOrderBook": True,
+            "acceptingOrders": True,
             "outcomes": json.dumps(["Yes", "No"]),
+            "clobTokenIds": json.dumps([f"{market_id}-yes", f"{market_id}-no"]),
             "endDate": "2026-06-01T00:00:00Z",
             "slug": f"{market_id}-wins",
             "negRisk": True,

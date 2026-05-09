@@ -55,12 +55,18 @@ def analyze_paper_monitor_report(
         "current_opportunity_observations": sum(int(row.get("current_opportunity_count") or 0) for row in iteration_rows),
         "stable_opportunity_observations": sum(int(row.get("stable_opportunity_count") or 0) for row in iteration_rows),
         "stable_paper_trade_observations": sum(int(row.get("stable_paper_trade_count") or 0) for row in iteration_rows),
+        "zero_current_opportunity_iterations": _zero_count(iteration_rows, "current_opportunity_count"),
+        "zero_stable_opportunity_iterations": _zero_count(iteration_rows, "stable_opportunity_count"),
+        "latest_zero_current_opportunity_streak": _latest_zero_streak(iteration_rows, "current_opportunity_count"),
+        "latest_zero_stable_opportunity_streak": _latest_zero_streak(iteration_rows, "stable_opportunity_count"),
         "stable_paper_capital_used": stable_paper_capital_used,
         "stable_paper_edge": stable_paper_edge,
         "stable_paper_roi": stable_paper_edge / stable_paper_capital_used if stable_paper_capital_used > 0 else 0.0,
         "current_edge": _distribution(current_edges),
         "stable_edge": _distribution(stable_edges),
         "stable_paper_roi_distribution": _distribution(stable_trade_rois),
+        "current_opportunity_by_kind": _opportunity_kind_summary(iteration_rows, "current_opportunities"),
+        "stable_opportunity_by_kind": _opportunity_kind_summary(iteration_rows, "stable_opportunities"),
         "top_current_opportunities": _top_opportunities(iteration_rows, "current_opportunities", top_n),
         "top_stable_opportunities": _top_opportunities(iteration_rows, "stable_opportunities", top_n),
         "top_stable_markets": _top_markets(iteration_rows, "stable_opportunities", top_n),
@@ -68,13 +74,15 @@ def analyze_paper_monitor_report(
         "latest_summary": latest_summary,
     }
     if snapshots_path:
-        report["near_miss"] = near_miss_report(
+        near_miss = near_miss_report(
             snapshots_path,
             rules_path=rules_path,
             gamma_path=gamma_path,
             top_n=near_miss_top_n,
             min_net_edge=near_miss_min_net_edge,
         )
+        report["near_miss"] = near_miss
+        report["near_miss_rejection_summary"] = _near_miss_rejection_summary(near_miss)
     return report
 
 
@@ -187,6 +195,61 @@ def _top_markets(rows: list, field: str, top_n: int) -> list:
         }
         for market_id, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:top_n]
     ]
+
+
+def _opportunity_kind_summary(rows: list, field: str) -> list:
+    counts = Counter()
+    max_edge_by_kind = {}
+    max_total_edge_by_kind = {}
+    for row in rows:
+        for opportunity in row.get(field, []):
+            kind = str(opportunity.get("kind") or "unknown")
+            counts[kind] += 1
+            max_edge_by_kind[kind] = max(
+                max_edge_by_kind.get(kind, 0.0),
+                float(opportunity.get("net_edge_per_share") or 0.0),
+            )
+            max_total_edge_by_kind[kind] = max(
+                max_total_edge_by_kind.get(kind, 0.0),
+                float(opportunity.get("total_edge") or 0.0),
+            )
+    return [
+        {
+            "kind": kind,
+            "count": count,
+            "max_edge_per_share": max_edge_by_kind.get(kind, 0.0),
+            "max_total_edge": max_total_edge_by_kind.get(kind, 0.0),
+        }
+        for kind, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _zero_count(rows: list, key: str) -> int:
+    return sum(1 for row in rows if int(row.get(key) or 0) == 0)
+
+
+def _latest_zero_streak(rows: list, key: str) -> int:
+    count = 0
+    for row in reversed(rows):
+        if int(row.get(key) or 0) != 0:
+            break
+        count += 1
+    return count
+
+
+def _near_miss_rejection_summary(near_miss: dict) -> dict:
+    rows = near_miss.get("neg_risk_expanded_groups", [])
+    statuses = Counter(str(row.get("status") or "unknown") for row in rows)
+    trade_statuses = Counter(str(row.get("trade_status") or "unknown") for row in rows)
+    rejection_reasons = Counter(str(row.get("rejection_reason") or "none") for row in rows)
+    return {
+        "neg_risk_group_count": len(rows),
+        "by_status": _counter_rows(statuses, "status"),
+        "by_trade_status": _counter_rows(trade_statuses, "trade_status"),
+        "by_rejection_reason": _counter_rows(rejection_reasons, "rejection_reason"),
+        "missing_snapshot_market_count": sum(len(row.get("missing_snapshot_market_ids") or []) for row in rows),
+        "extra_known_market_count": sum(len(row.get("extra_known_market_ids") or []) for row in rows),
+    }
 
 
 def _market_ids(opportunity: dict) -> set:
