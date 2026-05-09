@@ -91,6 +91,23 @@ Example exhaustive group rule:
 
 Only add an `exhaustive_groups` entry after verifying the markets are the full outcome set for the same resolution event. Near-miss rows named `potential_exhaustive_yes_basket` are diagnostic only until promoted to this reviewed format.
 
+To ask the LLM to verify the strongest diagnostic groups and promote only high-confidence complete sets:
+
+```bash
+python3 -m poly_strategy.cli verify-exhaustive-groups \
+  --gamma data/polymarket-gamma.ndjson \
+  --rules-in rules/candidate-implications.json \
+  --rules-out rules/candidate-implications-with-groups.json \
+  --snapshots data/paper-monitor-snapshots.ndjson \
+  --model gpt-5.5 \
+  --base-url https://api.wwcloud.app \
+  --min-net-edge 0.002 \
+  --top 5 \
+  --report-out data/exhaustive-group-verification.json
+```
+
+This command only writes rule JSON. It does not trade. A group is promoted only when the verifier returns `verdict=exhaustive_group`, `trade_allowed=true`, no risk flags, and confidence above `--min-confidence`.
+
 For incremental discovery, reuse a previous rule file as cache:
 
 ```bash

@@ -673,6 +673,79 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(discover.call_args.args[2])
         self.assertIn("markets=2", stdout.getvalue())
 
+    def test_verify_exhaustive_groups_command_uses_openai_client_and_writes_report(self):
+        result = SimpleNamespace(
+            candidates_found=2,
+            verified_count=1,
+            added_count=1,
+            rejected_count=1,
+            skipped_existing_count=0,
+            out_path=Path("rules/out.json"),
+            rows=[],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "verification.json"
+            with patch("poly_strategy.cli.OpenAIExhaustiveGroupVerifierClient") as client_cls:
+                with patch("poly_strategy.cli.promote_exhaustive_groups", return_value=result) as promote:
+                    stdout = io.StringIO()
+                    with patch.dict("os.environ", {"OPENAI_MODEL": "gpt-5.5", "OPENAI_API_KEY": "test-key"}, clear=True):
+                        with redirect_stdout(stdout):
+                            code = main(
+                                [
+                                    "verify-exhaustive-groups",
+                                    "--gamma",
+                                    "data/gamma.ndjson",
+                                    "--rules-in",
+                                    "rules/in.json",
+                                    "--rules-out",
+                                    "rules/out.json",
+                                    "--snapshots",
+                                    "data/snapshots.ndjson",
+                                    "--report-out",
+                                    str(report),
+                                    "--top",
+                                    "3",
+                                    "--min-net-edge",
+                                    "0.01",
+                                ]
+                            )
+
+            report_row = json.loads(report.read_text())
+
+        self.assertEqual(code, 0)
+        client_cls.assert_called_once()
+        self.assertEqual(client_cls.call_args.kwargs["model"], "gpt-5.5")
+        promote.assert_called_once()
+        self.assertEqual(str(promote.call_args.args[0]), "data/gamma.ndjson")
+        self.assertEqual(str(promote.call_args.args[1]), "rules/in.json")
+        self.assertEqual(str(promote.call_args.args[2]), "rules/out.json")
+        self.assertEqual(str(promote.call_args.args[3]), "data/snapshots.ndjson")
+        self.assertEqual(promote.call_args.kwargs["top_n"], 3)
+        self.assertEqual(promote.call_args.kwargs["min_net_edge"], 0.01)
+        self.assertEqual(report_row["type"], "exhaustive_group_promotion")
+        self.assertIn("added=1", stdout.getvalue())
+
+    def test_verify_exhaustive_groups_command_requires_model(self):
+        stderr = io.StringIO()
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with patch("sys.stderr", stderr):
+                code = main(
+                    [
+                        "verify-exhaustive-groups",
+                        "--gamma",
+                        "data/gamma.ndjson",
+                        "--rules-in",
+                        "rules/in.json",
+                        "--rules-out",
+                        "rules/out.json",
+                        "--snapshots",
+                        "data/snapshots.ndjson",
+                    ]
+                )
+
+        self.assertEqual(code, 1)
+        self.assertIn("model is required", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

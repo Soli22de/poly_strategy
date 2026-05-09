@@ -126,6 +126,59 @@ class OpenAIRuleDiscoveryClient:
         raise OpenAIResponseError(str(last_error))
 
 
+class OpenAIExhaustiveGroupVerifierClient(OpenAIRuleDiscoveryClient):
+    def build_payload(self, markets: Iterable[MarketText]) -> dict:
+        market_rows = market_texts_to_prompt_rows(list(markets))
+        payload = {
+            "model": self.model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": _GROUP_SYSTEM_PROMPT,
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": json.dumps({"markets": market_rows}, ensure_ascii=True, sort_keys=True),
+                        }
+                    ],
+                },
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "polymarket_exhaustive_group_verification",
+                    "strict": True,
+                    "schema": _GROUP_RESPONSE_SCHEMA,
+                }
+            },
+        }
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        if self.verbosity:
+            payload.setdefault("text", {})["verbosity"] = self.verbosity
+        return payload
+
+    def verify_group(self, markets: Iterable[MarketText]) -> dict:
+        payload = self.build_payload(list(markets))
+        response = self._call_with_retries(payload)
+        content = _extract_output_text(response)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
+        return _group_verification_from_row(parsed)
+
+
 _SYSTEM_PROMPT = """You identify conservative logical relations between binary prediction markets.
 
 Definitions:
@@ -150,6 +203,29 @@ Safety:
 - Do not use market prices, liquidity, popularity, or outside assumptions.
 - Use only the provided market IDs.
 - Set trade_allowed=false and add risk_flags when wording, deadlines, resolution sources, or subjects may differ.
+- Return only structured JSON matching the schema.
+"""
+
+
+_GROUP_SYSTEM_PROMPT = """You verify whether a provided set of binary prediction markets is a complete exhaustive outcome set.
+
+Definitions:
+- exhaustive_group means exactly one provided market must resolve YES and every other provided market must resolve NO.
+- The set must cover every possible YES outcome under the written resolution criteria.
+- Shared neg_risk_market_id is useful evidence for mutual exclusion, but it is not enough to prove completeness.
+
+Workflow:
+- Use only the provided market IDs and market text.
+- Compare question, description, end_date, slug, neg_risk_market_id, group_item_title, group_item_threshold, and outcomes.
+- Return exhaustive_group only when all markets clearly describe the same event/resolution source/deadline and no possible winner/outcome is missing.
+- Return not_exhaustive if the provided markets are only a subset, if an unlisted outcome can win, or if multiple listed outcomes could resolve YES.
+- Return uncertain when wording is ambiguous or the market text is insufficient.
+
+Safety:
+- Prefer false negatives over false positives.
+- Do not use prices, liquidity, popularity, or outside assumptions.
+- Set trade_allowed=false unless the group is complete and exactly-one-YES with high confidence.
+- Add risk_flags for any reason a trade could be unsafe.
 - Return only structured JSON matching the schema.
 """
 
@@ -218,6 +294,41 @@ _RESPONSE_SCHEMA = {
 }
 
 
+_GROUP_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["exhaustive_group", "not_exhaustive", "uncertain"],
+        },
+        "confidence": {"type": "number"},
+        "trade_allowed": {"type": "boolean"},
+        "risk_flags": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "incomplete_outcome_set",
+                    "not_same_event",
+                    "not_exactly_one_yes",
+                    "different_resolution_source",
+                    "different_deadline",
+                    "ambiguous_wording",
+                    "conditional_or_fallback_resolution",
+                    "non_binary_or_non_yes_no",
+                    "stale_or_closed_market",
+                    "insufficient_information",
+                    "possible_subject_mismatch",
+                ],
+            },
+        },
+        "reason": {"type": "string"},
+    },
+    "required": ["verdict", "confidence", "trade_allowed", "risk_flags", "reason"],
+}
+
+
 def _responses_url(base_url: str) -> str:
     normalized = base_url.rstrip("/")
     if normalized.endswith("/responses"):
@@ -273,6 +384,31 @@ def _candidate_from_row(row: dict) -> RelationCandidate:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise OpenAIResponseError("OpenAI relation candidate is invalid") from exc
+
+
+def _group_verification_from_row(row: dict) -> dict:
+    try:
+        risk_flags = row.get("risk_flags") or []
+        if not isinstance(risk_flags, list):
+            raise ValueError("risk_flags must be a list")
+        trade_allowed = row["trade_allowed"]
+        if not isinstance(trade_allowed, bool):
+            raise ValueError("trade_allowed must be a boolean")
+        confidence = float(row["confidence"])
+        if confidence < 0 or confidence > 1:
+            raise ValueError("confidence must be between 0 and 1")
+        verdict = str(row["verdict"])
+        if verdict not in {"exhaustive_group", "not_exhaustive", "uncertain"}:
+            raise ValueError("unsupported verdict")
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "trade_allowed": trade_allowed,
+            "risk_flags": [str(flag) for flag in risk_flags],
+            "reason": str(row.get("reason") or ""),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OpenAIResponseError("OpenAI exhaustive group verification is invalid") from exc
 
 
 def _is_retryable(exc: Exception) -> bool:

@@ -16,7 +16,12 @@ from poly_strategy.collectors import (
     collect_polymarket_gamma,
     write_sample_snapshot,
 )
-from poly_strategy.openai_rules import OpenAIConfigError, OpenAIResponseError, OpenAIRuleDiscoveryClient
+from poly_strategy.openai_rules import (
+    OpenAIConfigError,
+    OpenAIExhaustiveGroupVerifierClient,
+    OpenAIResponseError,
+    OpenAIRuleDiscoveryClient,
+)
 from poly_strategy.execution import (
     ExecutionConfigError,
     ExecutionError,
@@ -24,6 +29,7 @@ from poly_strategy.execution import (
     build_execution_plan,
     plan_to_row,
 )
+from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to_row
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
@@ -236,6 +242,40 @@ def main(argv=None) -> int:
                 f"complements={result.complements_written} out={args.out}"
             )
             return 0
+        if args.command == "verify-exhaustive-groups":
+            model = args.model or os.environ.get("OPENAI_MODEL")
+            if not model:
+                print("error: model is required via --model or OPENAI_MODEL", file=sys.stderr)
+                return 1
+            client = OpenAIExhaustiveGroupVerifierClient(
+                model=model,
+                timeout=args.timeout,
+                base_url=args.base_url,
+                retries=args.retries,
+                max_output_tokens=args.max_output_tokens,
+                reasoning_effort=args.reasoning_effort,
+                verbosity=args.verbosity,
+            )
+            result = promote_exhaustive_groups(
+                Path(args.gamma),
+                Path(args.rules_in),
+                Path(args.rules_out),
+                Path(args.snapshots),
+                client,
+                min_net_edge=args.min_net_edge,
+                top_n=args.top,
+                min_confidence=args.min_confidence,
+            )
+            row = result_to_row(result)
+            if args.report_out:
+                Path(args.report_out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.report_out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+            print(
+                f"candidates={result.candidates_found} verified={result.verified_count} "
+                f"added={result.added_count} rejected={result.rejected_count} "
+                f"skipped_existing={result.skipped_existing_count} out={args.rules_out}"
+            )
+            return 0
     except (
         OSError,
         URLError,
@@ -428,6 +468,26 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--max-output-tokens", type=int, default=4000, help="Responses API max_output_tokens")
     discover.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
     discover.add_argument("--verbosity", help="optional Responses API text verbosity")
+
+    verify_groups = subparsers.add_parser(
+        "verify-exhaustive-groups",
+        help="verify near-miss exhaustive group candidates and write promoted rules",
+    )
+    verify_groups.add_argument("--gamma", required=True, help="input raw Polymarket Gamma NDJSON path")
+    verify_groups.add_argument("--rules-in", required=True, help="existing rule JSON path")
+    verify_groups.add_argument("--rules-out", required=True, help="output rule JSON path")
+    verify_groups.add_argument("--snapshots", required=True, help="snapshot NDJSON path for near-miss candidates")
+    verify_groups.add_argument("--report-out", help="optional JSON verification report path")
+    verify_groups.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
+    verify_groups.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
+    verify_groups.add_argument("--min-net-edge", type=float, default=0.002, help="minimum diagnostic net edge to verify")
+    verify_groups.add_argument("--top", type=int, default=10, help="maximum diagnostic groups to verify")
+    verify_groups.add_argument("--min-confidence", type=float, default=0.95, help="minimum verification confidence")
+    verify_groups.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")
+    verify_groups.add_argument("--retries", type=int, default=2, help="retry count for retryable OpenAI-compatible API errors")
+    verify_groups.add_argument("--max-output-tokens", type=int, default=2000, help="Responses API max_output_tokens")
+    verify_groups.add_argument("--reasoning-effort", default="medium", help="Responses API reasoning effort")
+    verify_groups.add_argument("--verbosity", help="optional Responses API text verbosity")
 
     return parser
 

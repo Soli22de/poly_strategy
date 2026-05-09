@@ -3,7 +3,12 @@ import os
 import unittest
 from unittest.mock import patch
 
-from poly_strategy.openai_rules import OpenAIConfigError, OpenAIResponseError, OpenAIRuleDiscoveryClient
+from poly_strategy.openai_rules import (
+    OpenAIConfigError,
+    OpenAIExhaustiveGroupVerifierClient,
+    OpenAIResponseError,
+    OpenAIRuleDiscoveryClient,
+)
 from poly_strategy.rule_discovery import MarketText
 
 
@@ -76,6 +81,39 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].market_a_id, "a")
         self.assertEqual(calls[0][1], 12)
+
+    def test_verify_group_parses_structured_response(self):
+        response = {
+            "output_text": json.dumps(
+                {
+                    "verdict": "exhaustive_group",
+                    "confidence": 0.99,
+                    "trade_allowed": True,
+                    "risk_flags": [],
+                    "reason": "all listed markets form the full outcome set",
+                }
+            )
+        }
+        calls = []
+
+        def transport(payload, timeout):
+            calls.append((payload, timeout))
+            return response
+
+        client = OpenAIExhaustiveGroupVerifierClient(
+            model="test-model",
+            api_key="test-key",
+            timeout=12,
+            transport=transport,
+        )
+        market = MarketText("a", "Will A win?", "", ["Yes", "No"], "", "", "a-wins")
+
+        result = client.verify_group([market])
+
+        self.assertEqual(result["verdict"], "exhaustive_group")
+        self.assertEqual(result["confidence"], 0.99)
+        self.assertEqual(calls[0][1], 12)
+        self.assertEqual(calls[0][0]["text"]["format"]["name"], "polymarket_exhaustive_group_verification")
 
     def test_missing_api_key_raises_clear_error(self):
         with patch.dict(os.environ, {}, clear=True):
