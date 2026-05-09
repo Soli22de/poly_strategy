@@ -53,8 +53,26 @@ def find_yes_no_bundle_arbs(
             net_edge_per_share=net_edge,
             ts=snapshot.ts,
             legs=[
-                Leg(snapshot.venue, snapshot.market_id, "YES", "buy", yes_fill.average_price, quantity),
-                Leg(snapshot.venue, snapshot.market_id, "NO", "buy", no_fill.average_price, quantity),
+                Leg(
+                    snapshot.venue,
+                    snapshot.market_id,
+                    "YES",
+                    "buy",
+                    yes_fill.average_price,
+                    quantity,
+                    snapshot.yes.token_id,
+                    yes_fill.worst_price,
+                ),
+                Leg(
+                    snapshot.venue,
+                    snapshot.market_id,
+                    "NO",
+                    "buy",
+                    no_fill.average_price,
+                    quantity,
+                    snapshot.no.token_id,
+                    no_fill.worst_price,
+                ),
             ],
         )
     ]
@@ -283,7 +301,16 @@ def _mutual_exclusion_basket_candidate(
         net_edge_per_share=net_edge,
         ts=snapshots[0].ts,
         legs=[
-            Leg(snapshot.venue, snapshot.market_id, "NO", "buy", fill.average_price, quantity)
+            Leg(
+                snapshot.venue,
+                snapshot.market_id,
+                "NO",
+                "buy",
+                fill.average_price,
+                quantity,
+                snapshot.no.token_id,
+                fill.worst_price,
+            )
             for snapshot, fill in zip(snapshots, fills)
         ],
     )
@@ -320,8 +347,26 @@ def _two_leg_candidate(
         net_edge_per_share=net_edge,
         ts=first.ts or second.ts,
         legs=[
-            Leg(first.venue, first.market_id, first_token, "buy", first_fill.average_price, quantity),
-            Leg(second.venue, second.market_id, second_token, "buy", second_fill.average_price, quantity),
+            Leg(
+                first.venue,
+                first.market_id,
+                first_token,
+                "buy",
+                first_fill.average_price,
+                quantity,
+                _token_id_for(first, first_token),
+                first_fill.worst_price,
+            ),
+            Leg(
+                second.venue,
+                second.market_id,
+                second_token,
+                "buy",
+                second_fill.average_price,
+                quantity,
+                _token_id_for(second, second_token),
+                second_fill.worst_price,
+            ),
         ],
     )
 
@@ -381,7 +426,33 @@ def _cross_candidate(
         net_edge_per_share=net_edge,
         ts=first.ts or second.ts,
         legs=[
-            Leg(first.venue, first.market_id, first_token, "buy", first_fill.average_price, quantity),
-            Leg(second.venue, second.market_id, second_token, "buy", second_fill.average_price, quantity),
+            Leg(
+                first.venue,
+                first.market_id,
+                first_token,
+                "buy",
+                first_fill.average_price,
+                quantity,
+                _token_id_for(first, first_token),
+                first_fill.worst_price,
+            ),
+            Leg(
+                second.venue,
+                second.market_id,
+                second_token,
+                "buy",
+                second_fill.average_price,
+                quantity,
+                _token_id_for(second, second_token),
+                second_fill.worst_price,
+            ),
         ],
     )
+
+
+def _token_id_for(snapshot: BinaryMarketSnapshot, token: str):
+    if token == "YES":
+        return snapshot.yes.token_id
+    if token == "NO":
+        return snapshot.no.token_id
+    return None

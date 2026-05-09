@@ -10,6 +10,7 @@ class OrderBookTests(unittest.TestCase):
         self.assertEqual(fill.quantity, 12)
         self.assertAlmostEqual(fill.notional, 0.10 * 5 + 0.12 * 7)
         self.assertAlmostEqual(fill.average_price, fill.notional / 12)
+        self.assertAlmostEqual(fill.worst_price, 0.12)
 
     def test_take_levels_reports_insufficient_liquidity(self):
         with self.assertRaisesRegex(ValueError, "insufficient liquidity"):
@@ -22,4 +23,3 @@ class OrderBookTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -12,6 +12,7 @@ class Level:
 class Fill:
     quantity: float
     notional: float
+    worst_price: float = 0.0
 
     @property
     def average_price(self) -> float:
@@ -32,12 +33,13 @@ def take_levels(levels: List[Level], quantity: float) -> Fill:
 
     remaining = quantity
     notional = 0.0
+    worst_price = 0.0
     for level in levels:
         if remaining <= 0:
             break
         used = min(remaining, level.size)
         notional += used * level.price
+        worst_price = level.price
         remaining -= used
 
-    return Fill(quantity=quantity, notional=notional)
-
+    return Fill(quantity=quantity, notional=notional, worst_price=worst_price)

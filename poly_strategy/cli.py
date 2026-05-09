@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import time
@@ -15,6 +16,14 @@ from poly_strategy.collectors import (
     write_sample_snapshot,
 )
 from poly_strategy.openai_rules import OpenAIConfigError, OpenAIResponseError, OpenAIRuleDiscoveryClient
+from poly_strategy.execution import (
+    ExecutionConfigError,
+    ExecutionError,
+    PolymarketClobExecutor,
+    build_execution_plan,
+    plan_to_row,
+)
+from poly_strategy.paper import select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.rule_discovery import discover_rules
 
 
@@ -32,6 +41,7 @@ def main(argv=None) -> int:
                 Path(args.path),
                 min_net_edge=args.min_net_edge,
                 max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
                 rules_path=Path(args.rules) if args.rules else None,
             )
             print(
@@ -96,6 +106,7 @@ def main(argv=None) -> int:
                     Path(args.out),
                     min_net_edge=args.min_net_edge,
                     max_capital_per_trade=args.max_capital_per_trade,
+                    bankroll=args.bankroll,
                     rules_path=Path(args.rules),
                 )
                 current_opportunities = _current_monitor_opportunities(result)
@@ -109,6 +120,55 @@ def main(argv=None) -> int:
                 if index < args.iterations - 1 and args.interval > 0:
                     time.sleep(args.interval)
             print(f"wrote={total} out={args.out}")
+            return 0
+        if args.command == "paper-report":
+            result = replay_ndjson(
+                Path(args.path),
+                min_net_edge=args.min_net_edge,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+                rules_path=Path(args.rules) if args.rules else None,
+            )
+            row = _paper_report_row(result)
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"wrote=1 out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "execute-latest":
+            result = replay_ndjson(
+                Path(args.path),
+                min_net_edge=args.min_net_edge,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+                rules_path=Path(args.rules) if args.rules else None,
+            )
+            rows = _execution_plan_rows(result, args)
+            _write_jsonl_or_stdout(rows, args.out)
+            if args.out:
+                print(f"wrote={len(rows)} out={args.out}")
+            return 0
+        if args.command == "execute-rules-once":
+            count = collect_polymarket_binary_snapshots_for_rules(
+                Path(args.snapshots_out),
+                Path(args.gamma),
+                Path(args.rules),
+                args.timeout,
+                args.proxy,
+            )
+            result = replay_ndjson(
+                Path(args.snapshots_out),
+                min_net_edge=args.min_net_edge,
+                max_capital_per_trade=args.max_capital_per_trade,
+                bankroll=args.bankroll,
+                rules_path=Path(args.rules),
+            )
+            rows = _execution_plan_rows(result, args)
+            _write_jsonl_or_stdout(rows, args.out)
+            if args.out:
+                print(f"snapshots={count} plans={len(rows)} out={args.out}")
             return 0
         if args.command == "discover-rules":
             model = args.model or os.environ.get("OPENAI_MODEL")
@@ -145,7 +205,17 @@ def main(argv=None) -> int:
                 f"complements={result.complements_written} out={args.out}"
             )
             return 0
-    except (OSError, URLError, TimeoutError, RuntimeError, ValueError, OpenAIConfigError, OpenAIResponseError) as exc:
+    except (
+        OSError,
+        URLError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        OpenAIConfigError,
+        OpenAIResponseError,
+        ExecutionConfigError,
+        ExecutionError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -164,6 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("path", help="input NDJSON path")
     backtest.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     backtest.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
+    backtest.add_argument("--bankroll", type=float, help="cap simulated bankroll per timestamp batch")
     backtest.add_argument("--rules", help="JSON file with implication rules")
 
     collect = subparsers.add_parser("collect-polymarket", help="collect Polymarket public data")
@@ -206,6 +277,53 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--interval", type=float, default=5.0, help="seconds between iterations")
     monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
+    monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
+
+    report = subparsers.add_parser("paper-report", help="write a JSON paper-trading replay report")
+    report.add_argument("path", help="input NDJSON path")
+    report.add_argument("--rules", help="JSON file with discovered rules")
+    report.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
+    report.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
+    report.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
+    report.add_argument("--bankroll", type=float, help="cap simulated bankroll per timestamp batch")
+
+    execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
+    execute.add_argument("path", help="input NDJSON snapshot path")
+    execute.add_argument("--rules", help="JSON file with discovered rules")
+    execute.add_argument("--out", help="output NDJSON execution plan path")
+    execute.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
+    execute.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
+    execute.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    execute.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
+    execute.add_argument("--slippage-bps", type=float, default=50.0, help="buy limit cushion in basis points")
+    execute.add_argument("--tick-size", default="0.01", help="CLOB market tick size")
+    execute.add_argument("--order-type", default="FOK", help="SDK order type, default FOK")
+    execute.add_argument("--neg-risk", action="store_true", help="set neg_risk option for SDK order creation")
+    execute.add_argument("--live", action="store_true", help="submit orders through py-clob-client-v2")
+    execute.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
+    execute.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
+
+    execute_once = subparsers.add_parser(
+        "execute-rules-once",
+        help="refresh rule-market books once, then build or submit latest execution plans",
+    )
+    execute_once.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    execute_once.add_argument("--rules", required=True, help="rule JSON path")
+    execute_once.add_argument("--snapshots-out", required=True, help="append refreshed snapshots here")
+    execute_once.add_argument("--out", help="output NDJSON execution plan path")
+    execute_once.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    execute_once.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+    execute_once.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
+    execute_once.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
+    execute_once.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    execute_once.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
+    execute_once.add_argument("--slippage-bps", type=float, default=50.0, help="buy limit cushion in basis points")
+    execute_once.add_argument("--tick-size", default="0.01", help="CLOB market tick size")
+    execute_once.add_argument("--order-type", default="FOK", help="SDK order type, default FOK")
+    execute_once.add_argument("--neg-risk", action="store_true", help="set neg_risk option for SDK order creation")
+    execute_once.add_argument("--live", action="store_true", help="submit orders through py-clob-client-v2")
+    execute_once.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
+    execute_once.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
 
     discover = subparsers.add_parser("discover-rules", help="discover implication rules with an OpenAI-compatible API")
     discover.add_argument("--raw", required=True, help="input raw Polymarket Gamma NDJSON path")
@@ -254,6 +372,76 @@ def _print_current_monitor_details(opportunities, runs) -> None:
             f"run market={run.market_id} observations={run.observation_count} "
             f"duration_seconds={run.duration_seconds:.3f} max_edge={run.max_edge_per_share:.6f}"
         )
+
+
+def _paper_report_row(result) -> dict:
+    return {
+        "type": "paper_report",
+        "snapshot_count": result.snapshot_count,
+        "opportunity_count": result.opportunity_count,
+        "paper_trade_count": result.paper_trade_count,
+        "paper_rejection_count": len(result.paper_rejections),
+        "paper_capital_used": result.paper_capital_used,
+        "paper_edge": result.paper_edge,
+        "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
+        "last_snapshot_ts": result.last_snapshot_ts,
+        "opportunities": [opportunity_to_row(opportunity) for opportunity in result.opportunities],
+        "paper_trades": [trade_to_row(trade) for trade in result.paper_trades],
+        "paper_rejections": [rejection_to_row(rejection) for rejection in result.paper_rejections],
+        "runs": [
+            {
+                "key": run.key,
+                "market_id": run.market_id,
+                "start_ts": run.start_ts,
+                "end_ts": run.end_ts,
+                "observation_count": run.observation_count,
+                "duration_seconds": run.duration_seconds,
+                "max_edge_per_share": run.max_edge_per_share,
+            }
+            for run in result.runs
+        ],
+    }
+
+
+def _execution_plan_rows(result, args) -> list:
+    selection = select_paper_trades(
+        _current_monitor_opportunities(result),
+        max_capital_per_trade=args.max_capital_per_trade,
+        bankroll=args.bankroll,
+    )
+    plans = [
+        build_execution_plan(
+            trade,
+            slippage_bps=args.slippage_bps,
+            tick_size=args.tick_size,
+            neg_risk=args.neg_risk,
+            order_type=args.order_type,
+            dry_run=not args.live,
+        )
+        for trade in selection.trades[: args.max_trades]
+    ]
+    rows = [plan_to_row(plan) for plan in plans]
+    if args.live and rows:
+        if not args.allow_live:
+            raise ExecutionConfigError("--allow-live is required with --live")
+        executor = PolymarketClobExecutor()
+        for row, plan in zip(rows, plans):
+            row["responses"] = executor.post_plan(
+                plan,
+                allow_live=True,
+                allow_nonatomic=args.allow_nonatomic_live,
+            )
+    return rows
+
+
+def _write_jsonl_or_stdout(rows: list, out: str) -> None:
+    if out:
+        path = Path(out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + ("\n" if rows else ""))
+    else:
+        for row in rows:
+            print(json.dumps(row, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from poly_strategy.orderbook import Level
 class OrderBook:
     asks: List[Level]
     bids: List[Level]
+    token_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,8 @@ class Leg:
     side: str
     average_price: float
     quantity: float
+    token_id: Optional[str] = None
+    worst_price: Optional[float] = None
 
 
 @dataclass(frozen=True)

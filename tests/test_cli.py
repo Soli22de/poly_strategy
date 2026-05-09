@@ -191,6 +191,129 @@ class CliTests(unittest.TestCase):
         self.assertEqual(replay.call_args.kwargs["max_capital_per_trade"], 20.0)
         self.assertIn("opportunities=1", stdout.getvalue())
 
+    def test_paper_report_command_writes_json_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.ndjson"
+            out = Path(tmp) / "report.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"token_id": "yes-token", "asks": [[0.45, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["paper-report", str(path), "--out", str(out), "--max-capital-per-trade", "9.80"])
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["type"], "paper_report")
+        self.assertEqual(row["paper_trade_count"], 1)
+        self.assertAlmostEqual(row["paper_capital_used"], 9.8)
+        self.assertIn("wrote=1", stdout.getvalue())
+
+    def test_execute_latest_command_writes_dry_run_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.ndjson"
+            out = Path(tmp) / "plans.ndjson"
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"token_id": "yes-token", "asks": [[0.45, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "execute-latest",
+                        str(path),
+                        "--out",
+                        str(out),
+                        "--max-capital-per-trade",
+                        "9.80",
+                        "--slippage-bps",
+                        "50",
+                    ]
+                )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["dry_run"])
+        self.assertEqual([order["token_id"] for order in rows[0]["orders"]], ["yes-token", "no-token"])
+        self.assertIn("wrote=1", stdout.getvalue())
+
+    def test_execute_rules_once_refreshes_before_planning(self):
+        def collect_once(path, gamma, rules, timeout, proxy):
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"token_id": "yes-token", "asks": [[0.45, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+            return 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma.ndjson"
+            rules = Path(tmp) / "rules.json"
+            snapshots = Path(tmp) / "fresh.ndjson"
+            out = Path(tmp) / "plans.ndjson"
+            gamma.write_text("")
+            rules.write_text("{}")
+
+            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules", side_effect=collect_once) as collect:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "execute-rules-once",
+                            "--gamma",
+                            str(gamma),
+                            "--rules",
+                            str(rules),
+                            "--snapshots-out",
+                            str(snapshots),
+                            "--out",
+                            str(out),
+                            "--max-capital-per-trade",
+                            "9.80",
+                        ]
+                    )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["orders"][0]["token_id"], "yes-token")
+        self.assertIn("snapshots=1 plans=1", stdout.getvalue())
+
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):
         result = SimpleNamespace(
             markets_read=2,

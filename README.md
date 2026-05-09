@@ -111,6 +111,44 @@ python3 -m poly_strategy.cli monitor-rules \
 
 `monitor-rules` appends each targeted snapshot batch, replays the cumulative file, and prints current-iteration opportunities plus active run duration/edge when any opportunity survives the `--min-net-edge` filter.
 
+Write a conflict-aware paper trading report. This sorts opportunities by edge per capital, reserves overlapping leg liquidity so the same visible ask depth is not counted twice, and applies both per-trade and per-iteration bankroll caps:
+
+```bash
+python3 -m poly_strategy.cli paper-report data/rule-monitor.ndjson \
+  --rules rules/candidate-implications.json \
+  --min-net-edge 0.002 \
+  --max-capital-per-trade 20 \
+  --bankroll 100 \
+  --out data/paper-report.json
+```
+
+Build dry-run execution plans from the latest snapshot batch:
+
+```bash
+python3 -m poly_strategy.cli execute-latest data/rule-monitor.ndjson \
+  --rules rules/candidate-implications.json \
+  --min-net-edge 0.002 \
+  --max-capital-per-trade 20 \
+  --bankroll 100 \
+  --out data/execution-plans.ndjson
+```
+
+For a safer pre-trade path, refresh the targeted rule-market books immediately before planning:
+
+```bash
+python3 -m poly_strategy.cli execute-rules-once \
+  --gamma data/polymarket-gamma.ndjson \
+  --rules rules/candidate-implications.json \
+  --snapshots-out data/execute-refresh.ndjson \
+  --out data/execution-plans.ndjson \
+  --proxy 127.0.0.1:10808 \
+  --min-net-edge 0.002 \
+  --max-capital-per-trade 20 \
+  --bankroll 100
+```
+
+Live submission is intentionally disabled by default. To submit with the official Polymarket CLOB Python SDK v2, install `py_clob_client_v2`, set `POLYMARKET_PRIVATE_KEY` and optional L2 API credential environment variables, then pass both `--live` and `--allow-live`. Multi-leg arbitrage execution is not atomic, so live submission of plans with more than one order also requires `--allow-nonatomic-live`. The generated orders are FOK buy orders with a configurable slippage cushion and tick size.
+
 Collect backtestable binary snapshots by combining Gamma market discovery with YES/NO CLOB books:
 
 ```bash
@@ -188,6 +226,7 @@ Output fields:
 - `opportunities`: raw detected structure opportunities.
 - `total_edge`: theoretical total edge if each full visible opportunity is filled.
 - `paper_trades`: opportunities after paper-trade sizing.
+- `paper_rejections`: paper opportunities skipped because bankroll or overlapping visible liquidity was already reserved.
 - `paper_capital`: simulated capital used after `--max-capital-per-trade`.
 - `paper_edge`: edge after paper-trade sizing.
 - `runs`: consecutive snapshot runs where the same opportunity persisted.

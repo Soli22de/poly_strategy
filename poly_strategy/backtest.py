@@ -15,6 +15,7 @@ from poly_strategy.models import (
     Opportunity,
 )
 from poly_strategy.orderbook import Level
+from poly_strategy.paper import PaperRejection, PaperSelection, PaperTrade, select_paper_trades
 from poly_strategy.scanner import (
     find_collectively_exhaustive_arbs,
     find_complement_arbs,
@@ -24,14 +25,6 @@ from poly_strategy.scanner import (
     find_mutually_exclusive_arbs,
     find_yes_no_bundle_arbs,
 )
-
-
-@dataclass(frozen=True)
-class PaperTrade:
-    opportunity: Opportunity
-    quantity: float
-    capital_used: float
-    edge: float
 
 
 @dataclass(frozen=True)
@@ -55,6 +48,7 @@ class ReplayResult:
     snapshot_count: int
     opportunities: List[Opportunity]
     paper_trades: List[PaperTrade]
+    paper_rejections: List[PaperRejection]
     runs: List[OpportunityRun]
     last_snapshot_ts: Optional[str] = None
 
@@ -83,6 +77,7 @@ def replay_ndjson(
     path: Path,
     min_net_edge: float = 0.0,
     max_capital_per_trade: Optional[float] = None,
+    bankroll: Optional[float] = None,
     rules_path: Optional[Path] = None,
 ) -> ReplayResult:
     snapshots = list(_read_binary_snapshots(path))
@@ -111,10 +106,12 @@ def replay_ndjson(
         batch_opportunities.extend(find_complement_arbs(batch, complement_rules, min_net_edge=min_net_edge))
         opportunities_by_snapshot.append(batch_opportunities)
         opportunities.extend(batch_opportunities)
+    paper_selection = _paper_selection_by_batch(opportunities_by_snapshot, max_capital_per_trade, bankroll)
     return ReplayResult(
         snapshot_count=len(snapshots),
         opportunities=opportunities,
-        paper_trades=_paper_trades(opportunities, max_capital_per_trade),
+        paper_trades=paper_selection.trades,
+        paper_rejections=paper_selection.rejections,
         runs=_opportunity_runs(opportunities_by_snapshot),
         last_snapshot_ts=snapshots[-1].ts if snapshots else None,
     )
@@ -223,6 +220,7 @@ def _book_from_row(row: dict) -> OrderBook:
     return OrderBook(
         asks=[Level(float(price), float(size)) for price, size in row.get("asks", [])],
         bids=[Level(float(price), float(size)) for price, size in row.get("bids", [])],
+        token_id=str(row.get("token_id")) if row.get("token_id") else None,
     )
 
 
@@ -239,23 +237,18 @@ def _batches_by_ts(snapshots: Iterable[BinaryMarketSnapshot]) -> Iterable[List[B
         yield batch
 
 
-def _paper_trades(opportunities: Iterable[Opportunity], max_capital_per_trade: Optional[float]) -> List[PaperTrade]:
+def _paper_selection_by_batch(
+    opportunities_by_snapshot: Iterable[List[Opportunity]],
+    max_capital_per_trade: Optional[float],
+    bankroll: Optional[float],
+) -> PaperSelection:
     trades = []
-    for opportunity in opportunities:
-        if max_capital_per_trade is None:
-            quantity = opportunity.quantity
-        else:
-            quantity = min(opportunity.quantity, max_capital_per_trade / opportunity.cost_per_share)
-        capital_used = quantity * opportunity.cost_per_share
-        trades.append(
-            PaperTrade(
-                opportunity=opportunity,
-                quantity=quantity,
-                capital_used=capital_used,
-                edge=quantity * opportunity.net_edge_per_share,
-            )
-        )
-    return trades
+    rejections = []
+    for opportunities in opportunities_by_snapshot:
+        selection = select_paper_trades(opportunities, max_capital_per_trade=max_capital_per_trade, bankroll=bankroll)
+        trades.extend(selection.trades)
+        rejections.extend(selection.rejections)
+    return PaperSelection(trades=trades, rejections=rejections)
 
 
 def _opportunity_runs(opportunities_by_snapshot: Iterable[List[Opportunity]]) -> List[OpportunityRun]:
