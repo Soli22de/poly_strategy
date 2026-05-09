@@ -982,6 +982,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "dry_run")
         self.assertIn("wrote=1", stdout.getvalue())
 
+    def test_risk_check_plans_command_filters_failed_plans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plans = Path(tmp) / "plans.ndjson"
+            out = Path(tmp) / "checked.ndjson"
+            plans.write_text(
+                json.dumps(
+                    {
+                        "type": "execution_plan",
+                        "dry_run": True,
+                        "orders": [{"price": 0.9, "size": 10}],
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "risk-check-plans",
+                        str(plans),
+                        "--out",
+                        str(out),
+                        "--max-trade-notional",
+                        "5",
+                        "--require-risk-pass",
+                    ]
+                )
+            out_text = out.read_text()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out_text, "")
+        self.assertIn("wrote=0", stdout.getvalue())
+
     def test_match_cross_platform_command_writes_report_and_signals(self):
         with tempfile.TemporaryDirectory() as tmp:
             poly = Path(tmp) / "poly.ndjson"

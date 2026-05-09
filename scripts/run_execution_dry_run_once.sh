@@ -23,6 +23,11 @@ MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-0}"
 MAX_TRADES="${MAX_TRADES:-3}"
 SLIPPAGE_BPS="${SLIPPAGE_BPS:-50}"
 TICK_SIZE="${TICK_SIZE:-0.01}"
+RISK_STATE="${RISK_STATE:-data/risk-state.json}"
+KILL_SWITCH="${KILL_SWITCH:-data/KILL_SWITCH}"
+MAX_TRADE_NOTIONAL="${MAX_TRADE_NOTIONAL:-10}"
+MAX_DAILY_LOSS="${MAX_DAILY_LOSS:-25}"
+MAX_DAILY_ORDERS="${MAX_DAILY_ORDERS:-20}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -55,4 +60,10 @@ exec "$PYTHON_BIN" -m poly_strategy.cli execute-alerts "$ALERTS_PATH" \
   --slippage-bps "$SLIPPAGE_BPS" \
   --tick-size "$TICK_SIZE" \
   --require-single-level \
-  --require-pretrade-pass
+  --require-pretrade-pass \
+  --risk-state "$RISK_STATE" \
+  --kill-switch "$KILL_SWITCH" \
+  --max-trade-notional "$MAX_TRADE_NOTIONAL" \
+  --max-daily-loss "$MAX_DAILY_LOSS" \
+  --max-daily-orders "$MAX_DAILY_ORDERS" \
+  --require-risk-pass

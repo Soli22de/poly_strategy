@@ -48,6 +48,7 @@ from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.realtime import POLYMARKET_MARKET_WS_URL, monitor_polymarket_watchlist, stream_polymarket_watchlist
+from poly_strategy.risk import risk_check_execution_plan
 from poly_strategy.rule_discovery import discover_rules
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
@@ -327,6 +328,28 @@ def main(argv=None) -> int:
             _write_jsonl_or_stdout(rows, args.out)
             if args.out:
                 print(f"alerts={len(market_ids)} snapshots={count} plans={len(rows)} out={args.out}")
+            return 0
+        if args.command == "risk-check-plans":
+            rows = []
+            for row in _read_jsonl_rows(Path(args.path)):
+                if row.get("type") != "execution_plan":
+                    continue
+                row["risk_check"] = risk_check_execution_plan(
+                    row,
+                    state_path=Path(args.risk_state) if args.risk_state else None,
+                    kill_switch_path=Path(args.kill_switch) if args.kill_switch else None,
+                    max_trade_notional=args.max_trade_notional,
+                    max_daily_loss=args.max_daily_loss,
+                    max_daily_orders=args.max_daily_orders,
+                    max_order_count=args.max_order_count,
+                    live=not row.get("dry_run", True),
+                )
+                if args.require_risk_pass and not row["risk_check"]["passed"]:
+                    continue
+                rows.append(row)
+            _write_jsonl_or_stdout(rows, args.out)
+            if args.out:
+                print(f"wrote={len(rows)} out={args.out}")
             return 0
         if args.command == "discover-rules":
             model = args.model or os.environ.get("OPENAI_MODEL")
@@ -749,6 +772,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
     execute.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
     _add_pretrade_check_args(execute)
+    _add_risk_args(execute)
 
     execute_once = subparsers.add_parser(
         "execute-rules-once",
@@ -781,6 +805,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
     execute_once.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
     _add_pretrade_check_args(execute_once)
+    _add_risk_args(execute_once)
 
     execute_alerts = subparsers.add_parser(
         "execute-alerts",
@@ -821,6 +846,12 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_alerts.add_argument("--allow-live", action="store_true", help="second live-trading confirmation flag")
     execute_alerts.add_argument("--allow-nonatomic-live", action="store_true", help="acknowledge multi-leg live order risk")
     _add_pretrade_check_args(execute_alerts)
+    _add_risk_args(execute_alerts)
+
+    risk_check = subparsers.add_parser("risk-check-plans", help="apply risk controls to existing execution_plan NDJSON")
+    risk_check.add_argument("path", help="execution_plan NDJSON path")
+    risk_check.add_argument("--out", help="output checked execution_plan NDJSON path; prints JSONL when omitted")
+    _add_risk_args(risk_check)
 
     discover = subparsers.add_parser("discover-rules", help="discover implication rules with an OpenAI-compatible API")
     discover.add_argument("--raw", required=True, help="input raw Polymarket Gamma NDJSON path")
@@ -995,6 +1026,16 @@ def _add_pretrade_check_args(parser) -> None:
     parser.add_argument("--max-worst-price", type=float, help="fail pretrade check if any buy reference price exceeds this value")
     parser.add_argument("--require-single-level", action="store_true", help="fail pretrade check if a leg crosses multiple price levels")
     parser.add_argument("--require-pretrade-pass", action="store_true", help="skip execution plans that fail pretrade checks")
+
+
+def _add_risk_args(parser) -> None:
+    parser.add_argument("--risk-state", help="optional JSON risk state with daily orders/loss/pause_until")
+    parser.add_argument("--kill-switch", help="file path that blocks plans while present")
+    parser.add_argument("--max-trade-notional", type=float, help="maximum plan notional")
+    parser.add_argument("--max-daily-loss", type=float, help="maximum daily worst-case notional/loss budget")
+    parser.add_argument("--max-daily-orders", type=int, help="maximum daily order count including this plan")
+    parser.add_argument("--max-order-count", type=int, help="maximum order count in a single plan")
+    parser.add_argument("--require-risk-pass", action="store_true", help="skip execution plans that fail risk checks")
 
 
 def _run_paper_monitor(args) -> int:
@@ -1399,6 +1440,10 @@ def _execution_plan_rows(result, args) -> list:
             continue
         row = plan_to_row(plan)
         row["pretrade_check"] = check
+        risk_check = _risk_check_row(row, args)
+        row["risk_check"] = risk_check
+        if getattr(args, "require_risk_pass", False) and not risk_check["passed"]:
+            continue
         rows.append(row)
         plans.append(plan)
     if args.live and rows:
@@ -1412,6 +1457,19 @@ def _execution_plan_rows(result, args) -> list:
                 allow_nonatomic=args.allow_nonatomic_live,
             )
     return rows
+
+
+def _risk_check_row(plan_row: dict, args) -> dict:
+    return risk_check_execution_plan(
+        plan_row,
+        state_path=Path(args.risk_state) if getattr(args, "risk_state", None) else None,
+        kill_switch_path=Path(args.kill_switch) if getattr(args, "kill_switch", None) else None,
+        max_trade_notional=getattr(args, "max_trade_notional", None),
+        max_daily_loss=getattr(args, "max_daily_loss", None),
+        max_daily_orders=getattr(args, "max_daily_orders", None),
+        max_order_count=getattr(args, "max_order_count", None),
+        live=getattr(args, "live", False),
+    )
 
 
 def _write_jsonl_or_stdout(rows: list, out: str) -> None:
@@ -1439,6 +1497,16 @@ def _headers_from_args(values: list) -> dict:
 
 def _read_lines(path: Path) -> list:
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+
+def _read_jsonl_rows(path: Path) -> list:
+    rows = []
+    with path.open() as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
 
 
 def _append_jsonl_row(path: Path, row: dict) -> None:
