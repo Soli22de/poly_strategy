@@ -21,8 +21,8 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Oddpool must be plan-aware: Free plan uses Search endpoints, Premium arbitrage endpoints are disabled unless explicitly requested.
   - [x] Oddpool Free payloads must normalize recent/search market and event rows, not only arbitrage rows.
   - [x] Oddpool Free must keep a local quota ledger for 1 req/sec and 1000 requests/month.
-  - [ ] Cross-platform matches must be semantic-verified before they can become actionable dry-run signals.
-  - [ ] Kalshi/Polymarket cross-platform output must stop hardcoding executable YES/NO legs for unverified matches.
+  - [x] Cross-platform matches must be semantic-verified before they can become actionable dry-run signals.
+  - [x] Kalshi/Polymarket cross-platform output must stop hardcoding executable YES/NO legs for unverified matches.
   - [ ] Execution must write live-attempt/reconciliation state into the risk ledger after real submissions.
   - [ ] Data rotation must run as a persistent LaunchAgent, not only as a manual script.
   - [ ] Rule discovery must broaden beyond deterministic neg-risk pairs with topic clustering and safer non-neg-risk candidates.
@@ -76,10 +76,10 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - [x] Polymarket/Kalshi matching candidates.
   - [x] Cross-platform fee/funding/risk model.
   - [x] Dry-run-only cross-platform execution risk report.
-- [ ] Upgrade cross-platform/Kalshi from candidate framework to verified dry-run signals.
-  - [ ] Add deterministic semantic verification fields to match reports.
-  - [ ] Emit only watch/verified binary legs, not hardcoded Polymarket YES / Kalshi NO execution legs.
-  - [ ] Keep unverified matches as priority/research signals only.
+- [x] Upgrade cross-platform/Kalshi from candidate framework to verified dry-run signals.
+  - [x] Add deterministic semantic verification fields to match reports.
+  - [x] Emit only watch/verified binary legs, not hardcoded Polymarket YES / Kalshi NO execution legs.
+  - [x] Keep unverified matches as priority/research signals only.
 - [x] Integrate external tool signals into the realtime loop.
   - [x] Poll generic external signal URLs/files.
   - [x] Normalize Oddpool/PillarLabAI/Polyprophet-style payloads through the existing signal schema.

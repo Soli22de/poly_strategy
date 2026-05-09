@@ -44,9 +44,38 @@ class CrossPlatformTests(unittest.TestCase):
 
         self.assertEqual(report["match_count"], 1)
         self.assertEqual(report["top"][0]["kalshi_ticker"], "KXBTC100K")
+        self.assertEqual(report["top"][0]["status"], "verified_same_binary_event")
+        self.assertTrue(report["top"][0]["trade_allowed"])
         self.assertEqual(count, 1)
         self.assertEqual(written[0]["type"], "external_signal")
+        self.assertEqual(written[0]["kind"], "cross_platform_same_binary_verified")
         self.assertEqual(written[0]["legs"][0]["venue"], "polymarket")
+        self.assertEqual(written[0]["legs"][0]["token"], "BINARY")
+        self.assertEqual(written[0]["legs"][0]["side"], "watch")
+
+    def test_cross_platform_unverified_matches_are_not_executable_legs(self):
+        report = {
+            "top": [
+                {
+                    "polymarket_market_id": "pm1",
+                    "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                    "kalshi_ticker": "KXELECTION",
+                    "kalshi_title": "Will a candidate win the election?",
+                    "score": 0.40,
+                    "status": "candidate_needs_llm_or_manual_verification",
+                    "trade_allowed": False,
+                }
+            ]
+        }
+
+        rows = cross_platform_signal_rows(report)
+        verified_rows = cross_platform_signal_rows(report, verified_only=True)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "cross_platform_candidate_unverified")
+        self.assertEqual(rows[0]["legs"][0]["token"], None)
+        self.assertEqual(rows[0]["legs"][0]["side"], "watch")
+        self.assertEqual(verified_rows, [])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ def match_polymarket_kalshi_markets(
             score = _jaccard(poly_tokens, _tokens(kalshi["title"]))
             if score < min_score:
                 continue
+            verification = _semantic_verification(poly["title"], kalshi["title"], score)
             matches.append(
                 {
                     "polymarket_market_id": poly["market_id"],
@@ -33,7 +34,9 @@ def match_polymarket_kalshi_markets(
                     "kalshi_ticker": kalshi["ticker"],
                     "kalshi_title": kalshi["title"],
                     "score": score,
-                    "status": "candidate_needs_manual_or_llm_verification",
+                    "status": verification["status"],
+                    "trade_allowed": verification["trade_allowed"],
+                    "semantic_verification": verification,
                 }
             )
     matches.sort(key=lambda row: (-row["score"], row["polymarket_market_id"], row["kalshi_ticker"]))
@@ -47,20 +50,25 @@ def match_polymarket_kalshi_markets(
     }
 
 
-def cross_platform_signal_rows(match_report: dict, source: str = "kalshi_matcher") -> list:
+def cross_platform_signal_rows(match_report: dict, source: str = "kalshi_matcher", verified_only: bool = False) -> list:
     rows = []
     for match in match_report.get("top", []):
+        trade_allowed = bool(match.get("trade_allowed"))
+        if verified_only and not trade_allowed:
+            continue
+        kind = "cross_platform_same_binary_verified" if trade_allowed else "cross_platform_candidate_unverified"
+        token = "BINARY" if trade_allowed else None
         rows.append(
             {
                 "source": source,
                 "source_id": f"{match.get('polymarket_market_id')}:{match.get('kalshi_ticker')}",
-                "kind": "cross_platform_candidate",
+                "kind": kind,
                 "event_title": match.get("polymarket_title") or match.get("kalshi_title") or "",
                 "quoted_edge": None,
                 "quoted_roi": None,
                 "legs": [
-                    {"venue": "polymarket", "market_id": match.get("polymarket_market_id"), "token": "YES", "side": "buy"},
-                    {"venue": "kalshi", "market_id": match.get("kalshi_ticker"), "token": "NO", "side": "buy"},
+                    {"venue": "polymarket", "market_id": match.get("polymarket_market_id"), "token": token, "side": "watch"},
+                    {"venue": "kalshi", "market_id": match.get("kalshi_ticker"), "token": token, "side": "watch"},
                 ],
                 "raw": match,
             }
@@ -110,6 +118,63 @@ def _jaccard(first: set, second: set) -> float:
     if not first or not second:
         return 0.0
     return len(first & second) / len(first | second)
+
+
+def _semantic_verification(poly_title: str, kalshi_title: str, score: float) -> dict:
+    poly_normalized = _normalize_semantic_title(poly_title)
+    kalshi_normalized = _normalize_semantic_title(kalshi_title)
+    risk_flags = []
+    if not _numeric_tokens_match(poly_title, kalshi_title):
+        risk_flags.append("numeric_mismatch")
+    if _has_conditional_terms(poly_title) or _has_conditional_terms(kalshi_title):
+        risk_flags.append("conditional_resolution_wording")
+
+    exact_match = bool(poly_normalized and poly_normalized == kalshi_normalized)
+    high_overlap = score >= 0.75 and _required_tokens_match(poly_title, kalshi_title)
+    trade_allowed = (exact_match or high_overlap) and not risk_flags
+    status = "verified_same_binary_event" if trade_allowed else "candidate_needs_llm_or_manual_verification"
+    return {
+        "status": status,
+        "trade_allowed": trade_allowed,
+        "score": score,
+        "exact_normalized_title_match": exact_match,
+        "numeric_tokens_match": "numeric_mismatch" not in risk_flags,
+        "risk_flags": risk_flags,
+    }
+
+
+def _normalize_semantic_title(text: str) -> str:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    stop = {"will", "the", "a", "an", "of", "to", "in", "on", "by", "before", "after", "or", "and", "be"}
+    return " ".join(word for word in words if word not in stop)
+
+
+def _numeric_tokens_match(first: str, second: str) -> bool:
+    return _numeric_tokens(first) == _numeric_tokens(second)
+
+
+def _numeric_tokens(text: str) -> set:
+    return {token.replace(",", "") for token in re.findall(r"\d[\d,]*(?:\.\d+)?%?", text.lower())}
+
+
+def _required_tokens_match(first: str, second: str) -> bool:
+    first_tokens = _tokens(first)
+    second_tokens = _tokens(second)
+    important = {
+        token
+        for token in first_tokens | second_tokens
+        if len(token) >= 4 and token not in {"market", "event", "above", "below", "before", "after"}
+    }
+    if not important:
+        return False
+    overlap = first_tokens & second_tokens
+    return len(overlap & important) / len(important) >= 0.75
+
+
+def _has_conditional_terms(text: str) -> bool:
+    lowered = text.lower()
+    phrases = ["if neither", "fallback", "50-50", "50/50", "conditional on", "void if", "cancelled if"]
+    return any(phrase in lowered for phrase in phrases)
 
 
 def _external_signal_row(row: dict) -> dict:

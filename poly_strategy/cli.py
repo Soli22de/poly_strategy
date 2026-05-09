@@ -477,7 +477,10 @@ def main(argv=None) -> int:
                 top_n=args.top,
             )
             if args.signals_out:
-                count = write_cross_platform_signal_rows(cross_platform_signal_rows(row), Path(args.signals_out))
+                count = write_cross_platform_signal_rows(
+                    cross_platform_signal_rows(row, verified_only=args.verified_only),
+                    Path(args.signals_out),
+                )
                 row["signals_written"] = count
                 row["signals_out"] = args.signals_out
             if args.out:
@@ -986,6 +989,7 @@ def _build_parser() -> argparse.ArgumentParser:
     match_cross.add_argument("--signals-out", help="append candidate matches as external_signal rows")
     match_cross.add_argument("--min-score", type=float, default=0.35, help="minimum title-token Jaccard score")
     match_cross.add_argument("--top", type=int, default=100, help="maximum matches to include")
+    match_cross.add_argument("--verified-only", action="store_true", help="write only semantically verified same-binary signals")
 
     watchlist = subparsers.add_parser("build-watchlist", help="write a standardized Polymarket token watchlist")
     watchlist.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
