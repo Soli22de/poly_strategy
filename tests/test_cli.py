@@ -73,6 +73,41 @@ class CliTests(unittest.TestCase):
         self.assertIn("paper_capital=9.800000", stdout.getvalue())
         self.assertIn("paper_edge=0.200000", stdout.getvalue())
 
+    def test_backtest_command_applies_min_paper_roi_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.ndjson"
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-08T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"asks": [[0.45, 100]], "bids": []},
+                        "no": {"asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "backtest",
+                        str(path),
+                        "--max-capital-per-trade",
+                        "9.80",
+                        "--min-paper-roi",
+                        "0.03",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        self.assertIn("opportunities=1", stdout.getvalue())
+        self.assertIn("paper_trades=0", stdout.getvalue())
+
     def test_backtest_command_accepts_rules_path(self):
         with patch("poly_strategy.cli.replay_ndjson") as replay:
             replay.return_value.snapshot_count = 0

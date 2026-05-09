@@ -47,6 +47,8 @@ def select_paper_trades(
     max_capital_per_trade: Optional[float] = None,
     bankroll: Optional[float] = None,
     min_quantity: float = 1e-9,
+    min_roi: Optional[float] = None,
+    min_edge: Optional[float] = None,
 ) -> PaperSelection:
     if max_capital_per_trade is not None and max_capital_per_trade < 0:
         raise ValueError("max_capital_per_trade must be non-negative")
@@ -54,6 +56,10 @@ def select_paper_trades(
         raise ValueError("bankroll must be non-negative")
     if min_quantity < 0:
         raise ValueError("min_quantity must be non-negative")
+    if min_roi is not None and min_roi < 0:
+        raise ValueError("min_roi must be non-negative")
+    if min_edge is not None and min_edge < 0:
+        raise ValueError("min_edge must be non-negative")
 
     ordered = sorted(list(opportunities), key=_selection_sort_key)
     remaining_bankroll = bankroll
@@ -79,6 +85,12 @@ def select_paper_trades(
             continue
 
         selected_opportunity = _opportunity_at_quantity(opportunity, quantity)
+        if min_roi is not None and _opportunity_roi(selected_opportunity) < min_roi:
+            rejections.append(PaperRejection(selected_opportunity, "below_min_roi", quantity))
+            continue
+        if min_edge is not None and selected_opportunity.total_edge < min_edge:
+            rejections.append(PaperRejection(selected_opportunity, "below_min_edge", quantity))
+            continue
         trade = PaperTrade(
             opportunity=selected_opportunity,
             quantity=quantity,
@@ -107,6 +119,7 @@ def opportunity_to_row(opportunity: Opportunity) -> dict:
         "cost_per_share": opportunity.cost_per_share,
         "net_edge_per_share": opportunity.net_edge_per_share,
         "total_edge": opportunity.total_edge,
+        "quality": opportunity_quality(opportunity),
         "key": opportunity_key(opportunity),
         "legs": [_leg_to_row(leg) for leg in opportunity.legs],
     }
@@ -132,8 +145,29 @@ def rejection_to_row(rejection: PaperRejection) -> dict:
 
 
 def _selection_sort_key(opportunity: Opportunity) -> tuple:
-    roi = opportunity.net_edge_per_share / opportunity.cost_per_share if opportunity.cost_per_share > 0 else 0.0
+    roi = _opportunity_roi(opportunity)
     return (-roi, -opportunity.net_edge_per_share, -opportunity.total_edge, opportunity_key(opportunity))
+
+
+def opportunity_quality(opportunity: Opportunity) -> dict:
+    return {
+        "roi": _opportunity_roi(opportunity),
+        "leg_count": len(opportunity.legs),
+        "market_count": len({leg.market_id for leg in opportunity.legs}),
+        "min_leg_quantity": min((leg.quantity for leg in opportunity.legs), default=0.0),
+        "min_top_level_size": min((leg.levels[0].size for leg in opportunity.legs if leg.levels), default=0.0),
+        "uses_multiple_price_levels": any(
+            leg.worst_price is not None and abs(leg.worst_price - leg.average_price) > 1e-12
+            for leg in opportunity.legs
+        ),
+        "max_worst_price": max((leg.worst_price for leg in opportunity.legs if leg.worst_price is not None), default=0.0),
+    }
+
+
+def _opportunity_roi(opportunity: Opportunity) -> float:
+    if opportunity.cost_per_share <= 0:
+        return 0.0
+    return opportunity.net_edge_per_share / opportunity.cost_per_share
 
 
 def _quantity_for_cap(opportunity: Opportunity, max_quantity: float, capital_cap: float) -> float:

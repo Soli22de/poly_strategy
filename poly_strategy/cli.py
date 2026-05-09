@@ -54,6 +54,9 @@ def main(argv=None) -> int:
                 bankroll=args.bankroll,
                 rules_path=Path(args.rules) if args.rules else None,
                 gamma_path=Path(args.gamma) if args.gamma else None,
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
             )
             print(
                 f"snapshots={result.snapshot_count} opportunities={result.opportunity_count} "
@@ -141,6 +144,9 @@ def main(argv=None) -> int:
                     bankroll=args.bankroll,
                     rules_path=Path(args.rules),
                     gamma_path=Path(args.gamma),
+                    min_paper_roi=args.min_paper_roi,
+                    min_paper_edge=args.min_paper_edge,
+                    min_paper_quantity=args.min_paper_quantity,
                 )
                 current_opportunities = _current_monitor_opportunities(result)
                 stable_opportunities = _stable_current_opportunities(
@@ -170,6 +176,9 @@ def main(argv=None) -> int:
                 bankroll=args.bankroll,
                 rules_path=Path(args.rules) if args.rules else None,
                 gamma_path=Path(args.gamma) if args.gamma else None,
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
             )
             row = _paper_report_row(result)
             if args.out:
@@ -330,6 +339,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     backtest.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     backtest.add_argument("--bankroll", type=float, help="cap simulated bankroll per timestamp batch")
+    _add_paper_filter_args(backtest)
     backtest.add_argument("--rules", help="JSON file with implication rules")
     backtest.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk group paper scans")
 
@@ -385,6 +395,7 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
+    _add_paper_filter_args(monitor)
     monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
     monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
     monitor.add_argument(
@@ -409,6 +420,7 @@ def _build_parser() -> argparse.ArgumentParser:
     paper_monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     paper_monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     paper_monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
+    _add_paper_filter_args(paper_monitor)
     paper_monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
     paper_monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
     paper_monitor.add_argument("--skip-book-errors", action="store_true", help="skip markets whose CLOB books fail")
@@ -439,6 +451,7 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     report.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     report.add_argument("--bankroll", type=float, help="cap simulated bankroll per timestamp batch")
+    _add_paper_filter_args(report)
 
     analyze = subparsers.add_parser("paper-analyze", help="summarize a paper-monitor JSONL report")
     analyze.add_argument("path", help="paper-monitor JSONL report path")
@@ -462,6 +475,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     execute.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
     execute.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    _add_paper_filter_args(execute)
     execute.add_argument("--min-run-observations", type=int, default=1, help="minimum latest-run observations before planning")
     execute.add_argument("--min-run-seconds", type=float, default=0.0, help="minimum latest-run duration before planning")
     execute.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
@@ -492,6 +506,7 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     execute_once.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
     execute_once.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    _add_paper_filter_args(execute_once)
     execute_once.add_argument("--min-run-observations", type=int, default=1, help="minimum latest-run observations before planning")
     execute_once.add_argument("--min-run-seconds", type=float, default=0.0, help="minimum latest-run duration before planning")
     execute_once.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
@@ -540,6 +555,17 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_groups.add_argument("--verbosity", help="optional Responses API text verbosity")
 
     return parser
+
+
+def _add_paper_filter_args(parser) -> None:
+    parser.add_argument("--min-paper-roi", type=float, help="minimum ROI for selected paper trades")
+    parser.add_argument("--min-paper-edge", type=float, help="minimum total edge for selected paper trades")
+    parser.add_argument(
+        "--min-paper-quantity",
+        type=float,
+        default=1e-9,
+        help="minimum selected paper trade quantity",
+    )
 
 
 def _run_paper_monitor(args) -> int:
@@ -601,6 +627,9 @@ def _run_paper_monitor(args) -> int:
                 min_net_edge=args.min_net_edge,
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
+                min_paper_roi=args.min_paper_roi,
+                min_paper_edge=args.min_paper_edge,
+                min_paper_quantity=args.min_paper_quantity,
             )
             current_opportunities = batch_result.current_opportunities
             stable_opportunities = stable_current_opportunities(
@@ -613,6 +642,9 @@ def _run_paper_monitor(args) -> int:
                 stable_opportunities,
                 max_capital_per_trade=args.max_capital_per_trade,
                 bankroll=args.bankroll,
+                min_quantity=args.min_paper_quantity,
+                min_roi=args.min_paper_roi,
+                min_edge=args.min_paper_edge,
             )
             row = _paper_monitor_iteration_row(
                 iteration,
@@ -901,6 +933,9 @@ def _execution_plan_rows(result, args) -> list:
         ),
         max_capital_per_trade=args.max_capital_per_trade,
         bankroll=args.bankroll,
+        min_quantity=args.min_paper_quantity,
+        min_roi=args.min_paper_roi,
+        min_edge=args.min_paper_edge,
     )
     plans = [
         build_execution_plan(

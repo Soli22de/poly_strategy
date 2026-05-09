@@ -73,6 +73,24 @@ class PaperTests(unittest.TestCase):
         self.assertAlmostEqual(trade.opportunity.net_edge_per_share, 0.20)
         self.assertEqual([leg.worst_price for leg in trade.opportunity.legs], [0.40, 0.40])
 
+    def test_select_paper_trades_rejects_below_min_roi_after_repricing(self):
+        opportunity = Opportunity(
+            kind="yes_no_bundle",
+            quantity=100,
+            cost_per_share=0.98,
+            net_edge_per_share=0.02,
+            legs=[
+                Leg("polymarket", "a", "YES", "buy", 0.45, 100, "a-yes"),
+                Leg("polymarket", "a", "NO", "buy", 0.53, 100, "a-no"),
+            ],
+        )
+
+        selection = select_paper_trades([opportunity], min_roi=0.05)
+
+        self.assertEqual(selection.trades, [])
+        self.assertEqual(len(selection.rejections), 1)
+        self.assertEqual(selection.rejections[0].reason, "below_min_roi")
+
 
 if __name__ == "__main__":
     unittest.main()

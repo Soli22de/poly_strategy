@@ -97,6 +97,9 @@ def replay_ndjson(
     bankroll: Optional[float] = None,
     rules_path: Optional[Path] = None,
     gamma_path: Optional[Path] = None,
+    min_paper_roi: Optional[float] = None,
+    min_paper_edge: Optional[float] = None,
+    min_paper_quantity: float = 1e-9,
 ) -> ReplayResult:
     snapshots = list(_read_binary_snapshots(path))
     rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
@@ -106,7 +109,14 @@ def replay_ndjson(
         batch_opportunities = scan_snapshot_batch(batch, rule_set, min_net_edge=min_net_edge)
         opportunities_by_snapshot.append(batch_opportunities)
         opportunities.extend(batch_opportunities)
-    paper_selection = _paper_selection_by_batch(opportunities_by_snapshot, max_capital_per_trade, bankroll)
+    paper_selection = _paper_selection_by_batch(
+        opportunities_by_snapshot,
+        max_capital_per_trade,
+        bankroll,
+        min_paper_roi=min_paper_roi,
+        min_paper_edge=min_paper_edge,
+        min_paper_quantity=min_paper_quantity,
+    )
     return ReplayResult(
         snapshot_count=len(snapshots),
         opportunities=opportunities,
@@ -392,11 +402,21 @@ def _paper_selection_by_batch(
     opportunities_by_snapshot: Iterable[List[Opportunity]],
     max_capital_per_trade: Optional[float],
     bankroll: Optional[float],
+    min_paper_roi: Optional[float] = None,
+    min_paper_edge: Optional[float] = None,
+    min_paper_quantity: float = 1e-9,
 ) -> PaperSelection:
     trades = []
     rejections = []
     for opportunities in opportunities_by_snapshot:
-        selection = select_paper_trades(opportunities, max_capital_per_trade=max_capital_per_trade, bankroll=bankroll)
+        selection = select_paper_trades(
+            opportunities,
+            max_capital_per_trade=max_capital_per_trade,
+            bankroll=bankroll,
+            min_quantity=min_paper_quantity,
+            min_roi=min_paper_roi,
+            min_edge=min_paper_edge,
+        )
         trades.extend(selection.trades)
         rejections.extend(selection.rejections)
     return PaperSelection(trades=trades, rejections=rejections)

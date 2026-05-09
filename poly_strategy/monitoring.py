@@ -58,6 +58,9 @@ class IncrementalReplayState:
         min_net_edge: float = 0.0,
         max_capital_per_trade: Optional[float] = None,
         bankroll: Optional[float] = None,
+        min_paper_roi: Optional[float] = None,
+        min_paper_edge: Optional[float] = None,
+        min_paper_quantity: float = 1e-9,
     ) -> IncrementalBatchResult:
         new_snapshots = list(snapshots)
         self.snapshot_count += len(new_snapshots)
@@ -74,6 +77,9 @@ class IncrementalReplayState:
                 current_opportunities,
                 max_capital_per_trade=max_capital_per_trade,
                 bankroll=bankroll,
+                min_quantity=min_paper_quantity,
+                min_roi=min_paper_roi,
+                min_edge=min_paper_edge,
             )
             current_runs = self._update_runs(current_opportunities)
             self.last_snapshot_ts = batch[-1].ts if batch else self.last_snapshot_ts
