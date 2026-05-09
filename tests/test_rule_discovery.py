@@ -496,6 +496,54 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(written["discovery_errors"][0]["market_ids"], ["a"])
         self.assertEqual(written["discovery_errors"][0]["error"], "retry failed")
 
+    def test_discover_rules_uses_fallback_client_for_remaining_failures(self):
+        class PrimaryClient:
+            def discover_relations(self, markets):
+                raise RuntimeError("primary failed")
+
+        class FallbackClient:
+            def discover_relations(self, markets):
+                ids = [market.market_id for market in markets]
+                return [RelationCandidate("implies", ids[0], "c", "a_implies_b", 0.99, True, [], "fallback")]
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            result = discover_rules(
+                raw,
+                out,
+                PrimaryClient(),
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                continue_on_client_error=True,
+                retry_failed_batches=0,
+                fallback_client=FallbackClient(),
+                fallback_retry_failed_batches=1,
+                fallback_retry_failed_batch_size=1,
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.failed_batches, 0)
+        self.assertEqual(written["processed_market_ids"], ["a", "b", "c"])
+        self.assertEqual(written["discovery_errors"], [])
+        self.assertEqual(
+            {(row["antecedent"], row["consequent"]) for row in written["implications"]},
+            {("a", "c"), ("b", "c")},
+        )
+
     def test_discover_rules_cache_tracks_markets_with_no_relations(self):
         rows = [
             {

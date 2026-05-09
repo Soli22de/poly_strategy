@@ -1104,6 +1104,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(discover.call_args.kwargs["client_workers"], 1)
         self.assertEqual(discover.call_args.kwargs["retry_failed_batches"], 0)
         self.assertEqual(discover.call_args.kwargs["retry_failed_batch_size"], 1)
+        self.assertIsNone(discover.call_args.kwargs["fallback_client"])
+        self.assertEqual(discover.call_args.kwargs["fallback_retry_failed_batches"], 0)
+        self.assertEqual(discover.call_args.kwargs["fallback_retry_failed_batch_size"], 1)
         self.assertEqual(str(discover.call_args.args[0]), "data/gamma.ndjson")
         self.assertEqual(str(discover.call_args.args[1]), "rules/candidate-implications.json")
         self.assertIn("markets=2", stdout.getvalue())
@@ -1112,6 +1115,43 @@ class CliTests(unittest.TestCase):
         self.assertIn("equivalents=3", stdout.getvalue())
         self.assertIn("collectively_exhaustive=4", stdout.getvalue())
         self.assertIn("complements=5", stdout.getvalue())
+
+    def test_discover_rules_command_can_configure_fallback_model(self):
+        result = SimpleNamespace(
+            markets_read=2,
+            candidates_found=0,
+            implications_written=0,
+            mutual_exclusions_written=0,
+            equivalents_written=0,
+            collectively_exhaustive_written=0,
+            complements_written=0,
+            failed_batches=0,
+        )
+        primary_client = object()
+        fallback_client = object()
+        with patch("poly_strategy.cli.OpenAIRuleDiscoveryClient", side_effect=[primary_client, fallback_client]) as client_cls:
+            with patch("poly_strategy.cli.discover_rules", return_value=result) as discover:
+                with patch.dict("os.environ", {"OPENAI_MODEL": "GLM-5.1", "OPENAI_API_KEY": "test-key"}, clear=True):
+                    code = main(
+                        [
+                            "discover-rules",
+                            "--raw",
+                            "data/gamma.ndjson",
+                            "--out",
+                            "rules/candidate-implications.json",
+                            "--fallback-model",
+                            "gpt-5.5",
+                            "--fallback-retry-failed-batches",
+                            "2",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(client_cls.call_count, 2)
+        self.assertEqual(client_cls.call_args_list[0].kwargs["model"], "GLM-5.1")
+        self.assertEqual(client_cls.call_args_list[1].kwargs["model"], "gpt-5.5")
+        self.assertIs(discover.call_args.kwargs["fallback_client"], fallback_client)
+        self.assertEqual(discover.call_args.kwargs["fallback_retry_failed_batches"], 2)
 
     def test_external_signal_commands_ingest_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -30,6 +30,9 @@ CONTEXT_MARKET_LIMIT="${CONTEXT_MARKET_LIMIT:-10}"
 LLM_WORKERS="${LLM_WORKERS:-4}"
 LLM_ERROR_RETRIES="${LLM_ERROR_RETRIES:-2}"
 LLM_ERROR_RETRY_BATCH_SIZE="${LLM_ERROR_RETRY_BATCH_SIZE:-1}"
+LLM_FALLBACK_MODEL="${LLM_FALLBACK_MODEL:-}"
+LLM_FALLBACK_ERROR_RETRIES="${LLM_FALLBACK_ERROR_RETRIES:-1}"
+LLM_FALLBACK_ERROR_RETRY_BATCH_SIZE="${LLM_FALLBACK_ERROR_RETRY_BATCH_SIZE:-1}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
 LLM_RETRIES="${LLM_RETRIES:-2}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
@@ -85,6 +88,13 @@ if [[ "$SKIP_LLM" != "1" && -n "${OPENAI_MODEL:-}" ]]; then
   )
   if [[ -n "$LLM_VERBOSITY" ]]; then
     discover_args+=(--verbosity "$LLM_VERBOSITY")
+  fi
+  if [[ -n "$LLM_FALLBACK_MODEL" ]]; then
+    discover_args+=(
+      --fallback-model "$LLM_FALLBACK_MODEL"
+      --fallback-retry-failed-batches "$LLM_FALLBACK_ERROR_RETRIES"
+      --fallback-retry-failed-batch-size "$LLM_FALLBACK_ERROR_RETRY_BATCH_SIZE"
+    )
   fi
   set +e
   "$PYTHON_BIN" -m poly_strategy.cli "${discover_args[@]}"

@@ -194,6 +194,9 @@ def discover_rules(
     client_workers: int = 1,
     retry_failed_batches: int = 0,
     retry_failed_batch_size: int = 1,
+    fallback_client=None,
+    fallback_retry_failed_batches: int = 0,
+    fallback_retry_failed_batch_size: int = 1,
 ) -> DiscoveryResult:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -207,6 +210,10 @@ def discover_rules(
         raise ValueError("retry_failed_batches must be non-negative")
     if retry_failed_batch_size < 1:
         raise ValueError("retry_failed_batch_size must be at least 1")
+    if fallback_retry_failed_batches < 0:
+        raise ValueError("fallback_retry_failed_batches must be non-negative")
+    if fallback_retry_failed_batch_size < 1:
+        raise ValueError("fallback_retry_failed_batch_size must be at least 1")
 
     markets = read_market_texts(raw_path)
     if max_markets is not None:
@@ -225,9 +232,9 @@ def discover_rules(
     batch_results: dict[tuple[int, int], List[RelationCandidate]] = {}
     generated = generated_at or _utc_now()
 
-    def discover_batch(batch_index: int, batch_markets: Sequence[MarketText]) -> List[RelationCandidate]:
+    def discover_batch(batch_index: int, batch_markets: Sequence[MarketText], batch_client) -> List[RelationCandidate]:
         discovery_batch = _batch_with_context(batch_markets, markets, context_market_limit)
-        return secondary_verify_candidates(client.discover_relations(discovery_batch), market_map)
+        return secondary_verify_candidates(batch_client.discover_relations(discovery_batch), market_map)
 
     def checkpoint() -> None:
         _write_rules_checkpoint(
@@ -247,26 +254,27 @@ def discover_rules(
         completed_market_ids.update(market.market_id for market in batch)
         checkpoint()
 
-    def record_failure(attempt: int, batch_index: int, batch: Sequence[MarketText], exc: Exception) -> None:
+    def record_failure(attempt: int, batch_index: int, batch: Sequence[MarketText], exc: Exception, client_label: str) -> None:
         discovery_errors.append(
             {
                 "attempt": attempt,
                 "batch_index": batch_index,
+                "client": client_label,
                 "market_ids": [market.market_id for market in batch],
                 "error": str(exc),
             }
         )
         checkpoint()
 
-    def run_batches(batches_to_run: List[List[MarketText]], attempt: int) -> None:
+    def run_batches(batches_to_run: List[List[MarketText]], attempt: int, batch_client, client_label: str) -> None:
         if not batches_to_run:
             return
         if client_workers == 1:
             for batch_index, batch in enumerate(batches_to_run):
                 try:
-                    candidates = discover_batch(batch_index, batch)
+                    candidates = discover_batch(batch_index, batch, batch_client)
                 except Exception as exc:
-                    record_failure(attempt, batch_index, batch, exc)
+                    record_failure(attempt, batch_index, batch, exc, client_label)
                     if continue_on_client_error:
                         continue
                     raise
@@ -275,7 +283,7 @@ def discover_rules(
 
         with ThreadPoolExecutor(max_workers=min(client_workers, len(batches_to_run))) as executor:
             future_map = {
-                executor.submit(discover_batch, index, batch): (index, batch)
+                executor.submit(discover_batch, index, batch, batch_client): (index, batch)
                 for index, batch in enumerate(batches_to_run)
             }
             for future in as_completed(future_map):
@@ -283,7 +291,7 @@ def discover_rules(
                 try:
                     candidates = future.result()
                 except Exception as exc:
-                    record_failure(attempt, batch_index, batch, exc)
+                    record_failure(attempt, batch_index, batch, exc, client_label)
                     if continue_on_client_error:
                         continue
                     for pending in future_map:
@@ -292,13 +300,29 @@ def discover_rules(
                     raise
                 record_success(attempt, batch_index, batch, candidates)
 
-    run_batches(list(_batches(new_markets, batch_size)), attempt=0)
+    run_batches(list(_batches(new_markets, batch_size)), attempt=0, batch_client=client, client_label="primary")
     if continue_on_client_error:
         for retry_attempt in range(1, retry_failed_batches + 1):
             pending_markets = [market for market in new_markets if market.market_id not in completed_market_ids]
             if not pending_markets:
                 break
-            run_batches(list(_batches(pending_markets, retry_failed_batch_size)), attempt=retry_attempt)
+            run_batches(
+                list(_batches(pending_markets, retry_failed_batch_size)),
+                attempt=retry_attempt,
+                batch_client=client,
+                client_label="primary",
+            )
+        if fallback_client is not None:
+            for fallback_attempt in range(1, fallback_retry_failed_batches + 1):
+                pending_markets = [market for market in new_markets if market.market_id not in completed_market_ids]
+                if not pending_markets:
+                    break
+                run_batches(
+                    list(_batches(pending_markets, fallback_retry_failed_batch_size)),
+                    attempt=retry_failed_batches + fallback_attempt,
+                    batch_client=fallback_client,
+                    client_label="fallback",
+                )
 
     known_market_ids = {market.market_id for market in markets}
     llm_candidates = _ordered_batch_candidates(batch_results)

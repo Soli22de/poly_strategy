@@ -372,6 +372,17 @@ def main(argv=None) -> int:
                     reasoning_effort=args.reasoning_effort,
                     verbosity=args.verbosity,
                 )
+            fallback_client = None
+            if args.fallback_model:
+                fallback_client = OpenAIRuleDiscoveryClient(
+                    model=args.fallback_model,
+                    timeout=args.timeout,
+                    base_url=args.base_url,
+                    retries=args.retries,
+                    max_output_tokens=args.max_output_tokens,
+                    reasoning_effort=args.reasoning_effort,
+                    verbosity=args.verbosity,
+                )
             result = discover_rules(
                 Path(args.raw),
                 Path(args.out),
@@ -385,6 +396,9 @@ def main(argv=None) -> int:
                 client_workers=args.client_workers,
                 retry_failed_batches=args.retry_failed_batches,
                 retry_failed_batch_size=args.retry_failed_batch_size,
+                fallback_client=fallback_client,
+                fallback_retry_failed_batches=args.fallback_retry_failed_batches,
+                fallback_retry_failed_batch_size=args.fallback_retry_failed_batch_size,
             )
             print(
                 f"markets={result.markets_read} candidates={result.candidates_found} "
@@ -869,6 +883,7 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--raw", required=True, help="input raw Polymarket Gamma NDJSON path")
     discover.add_argument("--out", required=True, help="output JSON rule path")
     discover.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
+    discover.add_argument("--fallback-model", help="OpenAI model name for retrying remaining failed batches")
     discover.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
     discover.add_argument("--batch-size", type=int, default=10, help="markets per LLM discovery batch")
     discover.add_argument("--min-confidence", type=float, default=0.95, help="minimum candidate confidence")
@@ -892,6 +907,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="batch size for in-run failed-batch retries",
+    )
+    discover.add_argument(
+        "--fallback-retry-failed-batches",
+        type=int,
+        default=0,
+        help="extra retry passes using --fallback-model for remaining failed batches",
+    )
+    discover.add_argument(
+        "--fallback-retry-failed-batch-size",
+        type=int,
+        default=1,
+        help="batch size for fallback model failed-batch retries",
     )
     discover.add_argument(
         "--continue-on-client-error",
