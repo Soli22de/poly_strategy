@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
@@ -78,6 +79,7 @@ def collect_polymarket_binary_snapshots(
     limit: int,
     timeout: float,
     proxy: Optional[str] = None,
+    max_workers: int = 1,
 ) -> int:
     params = urlencode({"active": "true", "closed": "false", "limit": str(limit)})
     markets = _fetch_json(f"{GAMMA_MARKETS_URL}?{params}", timeout, proxy=proxy)
@@ -88,7 +90,7 @@ def collect_polymarket_binary_snapshots(
         book_params = urlencode({"token_id": token_id})
         return _fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{book_params}", timeout, proxy=proxy)
 
-    rows = binary_snapshot_rows_from_gamma_markets(markets, fetch_book, ts=_utc_now())
+    rows = binary_snapshot_rows_from_gamma_markets(markets, fetch_book, ts=_utc_now(), max_workers=max_workers)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         for row in rows:
@@ -102,6 +104,7 @@ def collect_polymarket_binary_snapshots_for_rules(
     rules_path: Path,
     timeout: float,
     proxy: Optional[str] = None,
+    max_workers: int = 1,
 ) -> int:
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     market_ids = market_ids_from_rule_file(rules_path)
@@ -110,7 +113,14 @@ def collect_polymarket_binary_snapshots_for_rules(
         book_params = urlencode({"token_id": token_id})
         return _fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{book_params}", timeout, proxy=proxy)
 
-    return collect_polymarket_binary_snapshots_for_markets(path, markets, market_ids, fetch_book, ts=_utc_now())
+    return collect_polymarket_binary_snapshots_for_markets(
+        path,
+        markets,
+        market_ids,
+        fetch_book,
+        ts=_utc_now(),
+        max_workers=max_workers,
+    )
 
 
 def collect_polymarket_binary_snapshots_for_rules_loop(
@@ -121,8 +131,9 @@ def collect_polymarket_binary_snapshots_for_rules_loop(
     proxy: Optional[str],
     interval_seconds: float,
     iterations: int,
-    collect_once: Callable[[Path, Path, Path, float, Optional[str]], int] = collect_polymarket_binary_snapshots_for_rules,
+    collect_once: Callable[[Path, Path, Path, float, Optional[str], int], int] = collect_polymarket_binary_snapshots_for_rules,
     sleep: Callable[[float], None] = time.sleep,
+    max_workers: int = 1,
 ) -> int:
     if iterations < 1:
         raise ValueError("iterations must be at least 1")
@@ -131,7 +142,7 @@ def collect_polymarket_binary_snapshots_for_rules_loop(
 
     total = 0
     for index in range(iterations):
-        total += collect_once(path, gamma_path, rules_path, timeout, proxy)
+        total += collect_once(path, gamma_path, rules_path, timeout, proxy, max_workers)
         if index < iterations - 1 and interval_seconds > 0:
             sleep(interval_seconds)
     return total
@@ -143,12 +154,14 @@ def collect_polymarket_binary_snapshots_for_markets(
     market_ids: Iterable[str],
     book_fetcher: Callable[[str], dict],
     ts: Optional[str] = None,
+    max_workers: int = 1,
 ) -> int:
     wanted = {str(market_id) for market_id in market_ids}
     rows = binary_snapshot_rows_from_gamma_markets(
         (market for market in markets if str(market.get("id") or market.get("conditionId")) in wanted),
         book_fetcher,
         ts=ts or _utc_now(),
+        max_workers=max_workers,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
@@ -164,8 +177,9 @@ def collect_polymarket_binary_snapshots_loop(
     proxy: Optional[str],
     interval_seconds: float,
     iterations: int,
-    collect_once: Callable[[Path, int, float, Optional[str]], int] = collect_polymarket_binary_snapshots,
+    collect_once: Callable[[Path, int, float, Optional[str], int], int] = collect_polymarket_binary_snapshots,
     sleep: Callable[[float], None] = time.sleep,
+    max_workers: int = 1,
 ) -> int:
     if iterations < 1:
         raise ValueError("iterations must be at least 1")
@@ -174,7 +188,7 @@ def collect_polymarket_binary_snapshots_loop(
 
     total = 0
     for index in range(iterations):
-        total += collect_once(path, limit, timeout, proxy)
+        total += collect_once(path, limit, timeout, proxy, max_workers)
         if index < iterations - 1 and interval_seconds > 0:
             sleep(interval_seconds)
     return total
@@ -184,20 +198,32 @@ def binary_snapshot_rows_from_gamma_markets(
     markets: Iterable[dict],
     book_fetcher: Callable[[str], dict],
     ts: Optional[str] = None,
+    max_workers: int = 1,
 ) -> List[dict]:
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+
     rows = []
     snapshot_ts = ts or _utc_now()
+    selected_markets = []
     for market in markets:
         if not _is_binary_market(market):
             continue
         token_ids = _loads_json_list(market.get("clobTokenIds"))
         if len(token_ids) != 2:
             continue
+        selected_markets.append((market, str(token_ids[0]), str(token_ids[1])))
 
-        yes_book = _normalized_book(book_fetcher(str(token_ids[0])))
-        no_book = _normalized_book(book_fetcher(str(token_ids[1])))
-        yes_book["token_id"] = str(token_ids[0])
-        no_book["token_id"] = str(token_ids[1])
+    books_by_token_id = _fetch_books_by_token_id(
+        [token_id for _, yes_token_id, no_token_id in selected_markets for token_id in [yes_token_id, no_token_id]],
+        book_fetcher,
+        max_workers,
+    )
+    for market, yes_token_id, no_token_id in selected_markets:
+        yes_book = _normalized_book(books_by_token_id[yes_token_id])
+        no_book = _normalized_book(books_by_token_id[no_token_id])
+        yes_book["token_id"] = yes_token_id
+        no_book["token_id"] = no_token_id
         rows.append(
             {
                 "ts": snapshot_ts,
@@ -211,6 +237,17 @@ def binary_snapshot_rows_from_gamma_markets(
             }
         )
     return rows
+
+
+def _fetch_books_by_token_id(token_ids: Iterable[str], book_fetcher: Callable[[str], dict], max_workers: int) -> dict:
+    ordered_token_ids = list(dict.fromkeys(str(token_id) for token_id in token_ids))
+    if max_workers == 1 or len(ordered_token_ids) <= 1:
+        return {token_id: book_fetcher(token_id) for token_id in ordered_token_ids}
+
+    worker_count = min(max_workers, len(ordered_token_ids))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        fetched = executor.map(book_fetcher, ordered_token_ids)
+        return dict(zip(ordered_token_ids, fetched))
 
 
 def raw_gamma_markets_from_ndjson(path: Path) -> List[dict]:

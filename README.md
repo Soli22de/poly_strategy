@@ -93,7 +93,8 @@ python3 -m poly_strategy.cli collect-rule-markets \
   --gamma data/polymarket-gamma.ndjson \
   --rules rules/candidate-implications.json \
   --out data/rule-markets.ndjson \
-  --proxy 127.0.0.1:10808
+  --proxy 127.0.0.1:10808 \
+  --book-workers 8
 ```
 
 Watch those markets repeatedly and replay opportunities:
@@ -106,7 +107,8 @@ python3 -m poly_strategy.cli monitor-rules \
   --interval 5 \
   --iterations 12 \
   --min-net-edge 0.002 \
-  --max-capital-per-trade 20
+  --max-capital-per-trade 20 \
+  --book-workers 8
 ```
 
 `monitor-rules` appends each targeted snapshot batch, replays the cumulative file, and prints current-iteration opportunities plus active run duration/edge when any opportunity survives the `--min-net-edge` filter.
@@ -128,6 +130,8 @@ Build dry-run execution plans from the latest snapshot batch:
 python3 -m poly_strategy.cli execute-latest data/rule-monitor.ndjson \
   --rules rules/candidate-implications.json \
   --min-net-edge 0.002 \
+  --min-run-observations 2 \
+  --min-run-seconds 3 \
   --max-capital-per-trade 20 \
   --bankroll 100 \
   --out data/execution-plans.ndjson
@@ -142,7 +146,9 @@ python3 -m poly_strategy.cli execute-rules-once \
   --snapshots-out data/execute-refresh.ndjson \
   --out data/execution-plans.ndjson \
   --proxy 127.0.0.1:10808 \
+  --book-workers 8 \
   --min-net-edge 0.002 \
+  --min-run-observations 1 \
   --max-capital-per-trade 20 \
   --bankroll 100
 ```
@@ -227,6 +233,7 @@ Output fields:
 - `total_edge`: theoretical total edge if each full visible opportunity is filled.
 - `paper_trades`: opportunities after paper-trade sizing.
 - `paper_rejections`: paper opportunities skipped because bankroll or overlapping visible liquidity was already reserved.
+- `by_kind`: aggregate opportunity and paper-trading totals by opportunity type.
 - `paper_capital`: simulated capital used after `--max-capital-per-trade`.
 - `paper_edge`: edge after paper-trade sizing.
 - `runs`: consecutive snapshot runs where the same opportunity persisted.

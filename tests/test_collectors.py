@@ -52,8 +52,8 @@ class CollectorTests(unittest.TestCase):
     def test_collect_polymarket_binary_snapshots_loop_runs_requested_iterations(self):
         calls = []
 
-        def collect_once(path, limit, timeout, proxy):
-            calls.append((path, limit, timeout, proxy))
+        def collect_once(path, limit, timeout, proxy, max_workers):
+            calls.append((path, limit, timeout, proxy, max_workers))
             with path.open("a") as handle:
                 handle.write(json.dumps({"type": "binary_snapshot", "market_id": f"m{len(calls)}"}) + "\n")
             return 1
@@ -76,7 +76,46 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(count, 3)
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(lines), 3)
-        self.assertEqual(calls[0][1:], (2, 3.0, "http://127.0.0.1:10808"))
+        self.assertEqual(calls[0][1:], (2, 3.0, "http://127.0.0.1:10808", 1))
+
+    def test_binary_snapshot_rows_from_gamma_markets_fetches_books_concurrently(self):
+        markets = [
+            {
+                "id": "a",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["a-yes", "a-no"]),
+            },
+            {
+                "id": "b",
+                "closed": False,
+                "enableOrderBook": True,
+                "acceptingOrders": True,
+                "outcomes": json.dumps(["Yes", "No"]),
+                "clobTokenIds": json.dumps(["b-yes", "b-no"]),
+            },
+        ]
+        books = {
+            token_id: {"asks": [{"price": "0.50", "size": "10"}], "bids": []}
+            for token_id in ["a-yes", "a-no", "b-yes", "b-no"]
+        }
+        fetched = []
+
+        def book_fetcher(token_id):
+            fetched.append(token_id)
+            return books[token_id]
+
+        rows = binary_snapshot_rows_from_gamma_markets(
+            markets,
+            book_fetcher,
+            ts="2026-05-09T00:00:00Z",
+            max_workers=4,
+        )
+
+        self.assertEqual([row["market_id"] for row in rows], ["a", "b"])
+        self.assertEqual(set(fetched), {"a-yes", "a-no", "b-yes", "b-no"})
 
     def test_market_ids_from_rule_file_reads_all_rule_sections(self):
         with tempfile.TemporaryDirectory() as tmp:

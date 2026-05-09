@@ -108,6 +108,8 @@ class CliTests(unittest.TestCase):
                         "2",
                         "--interval",
                         "0.5",
+                        "--book-workers",
+                        "4",
                     ]
                 )
 
@@ -120,6 +122,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[3], "http://127.0.0.1:10808")
         self.assertEqual(args[4], 0.5)
         self.assertEqual(args[5], 2)
+        self.assertEqual(collect.call_args.kwargs["max_workers"], 4)
         self.assertIn("wrote=3", stdout.getvalue())
 
     def test_collect_rule_markets_passes_gamma_and_rules_to_targeted_collector(self):
@@ -143,6 +146,8 @@ class CliTests(unittest.TestCase):
                         "2",
                         "--interval",
                         "3",
+                        "--book-workers",
+                        "5",
                     ]
                 )
 
@@ -155,6 +160,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[4], "127.0.0.1:10808")
         self.assertEqual(args[5], 3.0)
         self.assertEqual(args[6], 2)
+        self.assertEqual(collect.call_args.kwargs["max_workers"], 5)
         self.assertIn("wrote=4", stdout.getvalue())
 
     def test_monitor_rules_collects_targeted_snapshots_and_replays(self):
@@ -181,11 +187,14 @@ class CliTests(unittest.TestCase):
                             "0.002",
                             "--max-capital-per-trade",
                             "20",
+                            "--book-workers",
+                            "3",
                         ]
                     )
 
         self.assertEqual(code, 0)
         collect.assert_called_once()
+        self.assertEqual(collect.call_args.args[5], 3)
         replay.assert_called_once()
         self.assertEqual(replay.call_args.kwargs["min_net_edge"], 0.002)
         self.assertEqual(replay.call_args.kwargs["max_capital_per_trade"], 20.0)
@@ -218,6 +227,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(row["type"], "paper_report")
         self.assertEqual(row["paper_trade_count"], 1)
+        self.assertEqual(row["by_kind"][0]["kind"], "yes_no_bundle")
         self.assertAlmostEqual(row["paper_capital_used"], 9.8)
         self.assertIn("wrote=1", stdout.getvalue())
 
@@ -262,8 +272,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual([order["token_id"] for order in rows[0]["orders"]], ["yes-token", "no-token"])
         self.assertIn("wrote=1", stdout.getvalue())
 
+    def test_execute_latest_can_require_stable_run_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.ndjson"
+            out = Path(tmp) / "plans.ndjson"
+            path.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-09T00:00:00Z",
+                        "type": "binary_snapshot",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.0,
+                        "yes": {"token_id": "yes-token", "asks": [[0.45, 100]], "bids": []},
+                        "no": {"token_id": "no-token", "asks": [[0.53, 100]], "bids": []},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "execute-latest",
+                        str(path),
+                        "--out",
+                        str(out),
+                        "--max-capital-per-trade",
+                        "9.80",
+                        "--min-run-observations",
+                        "2",
+                    ]
+                )
+            plan_text = out.read_text()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(plan_text, "")
+        self.assertIn("wrote=0", stdout.getvalue())
+
     def test_execute_rules_once_refreshes_before_planning(self):
-        def collect_once(path, gamma, rules, timeout, proxy):
+        def collect_once(path, gamma, rules, timeout, proxy, max_workers):
             path.write_text(
                 json.dumps(
                     {
@@ -304,12 +353,15 @@ class CliTests(unittest.TestCase):
                             str(out),
                             "--max-capital-per-trade",
                             "9.80",
+                            "--book-workers",
+                            "4",
                         ]
                     )
             rows = [json.loads(line) for line in out.read_text().splitlines()]
 
         self.assertEqual(code, 0)
         collect.assert_called_once()
+        self.assertEqual(collect.call_args.args[5], 4)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["orders"][0]["token_id"], "yes-token")
         self.assertIn("snapshots=1 plans=1", stdout.getvalue())

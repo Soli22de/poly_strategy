@@ -23,7 +23,7 @@ from poly_strategy.execution import (
     build_execution_plan,
     plan_to_row,
 )
-from poly_strategy.paper import select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
+from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.rule_discovery import discover_rules
 
 
@@ -77,6 +77,7 @@ def main(argv=None) -> int:
                 args.proxy,
                 args.interval,
                 args.iterations,
+                max_workers=args.book_workers,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -89,6 +90,7 @@ def main(argv=None) -> int:
                 args.proxy,
                 args.interval,
                 args.iterations,
+                max_workers=args.book_workers,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -101,6 +103,7 @@ def main(argv=None) -> int:
                     Path(args.rules),
                     args.timeout,
                     args.proxy,
+                    args.book_workers,
                 )
                 result = replay_ndjson(
                     Path(args.out),
@@ -110,10 +113,16 @@ def main(argv=None) -> int:
                     rules_path=Path(args.rules),
                 )
                 current_opportunities = _current_monitor_opportunities(result)
+                stable_opportunities = _stable_current_opportunities(
+                    result,
+                    args.min_run_observations,
+                    args.min_run_seconds,
+                )
                 current_runs = _current_monitor_runs(result)
                 print(
                     f"iteration={index + 1} snapshots={result.snapshot_count} "
                     f"current_opportunities={len(current_opportunities)} "
+                    f"stable_opportunities={len(stable_opportunities)} "
                     f"opportunities={result.opportunity_count} paper_edge={result.paper_edge:.6f}"
                 )
                 _print_current_monitor_details(current_opportunities, current_runs)
@@ -157,6 +166,7 @@ def main(argv=None) -> int:
                 Path(args.rules),
                 args.timeout,
                 args.proxy,
+                args.book_workers,
             )
             result = replay_ndjson(
                 Path(args.snapshots_out),
@@ -254,6 +264,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_binaries.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     collect_binaries.add_argument("--iterations", type=int, default=1, help="number of collection iterations")
     collect_binaries.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
+    collect_binaries.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
 
     collect_rule_markets = subparsers.add_parser(
         "collect-rule-markets",
@@ -266,6 +277,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_rule_markets.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     collect_rule_markets.add_argument("--iterations", type=int, default=1, help="number of collection iterations")
     collect_rule_markets.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
+    collect_rule_markets.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
 
     monitor = subparsers.add_parser("monitor-rules", help="collect rule markets repeatedly and replay opportunities")
     monitor.add_argument("--out", required=True, help="output NDJSON path")
@@ -275,9 +287,12 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     monitor.add_argument("--iterations", type=int, default=1, help="number of monitor iterations")
     monitor.add_argument("--interval", type=float, default=5.0, help="seconds between iterations")
+    monitor.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
     monitor.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     monitor.add_argument("--max-capital-per-trade", type=float, help="cap simulated capital per opportunity")
     monitor.add_argument("--bankroll", type=float, help="cap simulated bankroll per monitor iteration")
+    monitor.add_argument("--min-run-observations", type=int, default=1, help="stable opportunity observations to report")
+    monitor.add_argument("--min-run-seconds", type=float, default=0.0, help="stable opportunity duration to report")
 
     report = subparsers.add_parser("paper-report", help="write a JSON paper-trading replay report")
     report.add_argument("path", help="input NDJSON path")
@@ -294,6 +309,8 @@ def _build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     execute.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
     execute.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    execute.add_argument("--min-run-observations", type=int, default=1, help="minimum latest-run observations before planning")
+    execute.add_argument("--min-run-seconds", type=float, default=0.0, help="minimum latest-run duration before planning")
     execute.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
     execute.add_argument("--slippage-bps", type=float, default=50.0, help="buy limit cushion in basis points")
     execute.add_argument("--tick-size", default="0.01", help="CLOB market tick size")
@@ -313,9 +330,12 @@ def _build_parser() -> argparse.ArgumentParser:
     execute_once.add_argument("--out", help="output NDJSON execution plan path")
     execute_once.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     execute_once.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+    execute_once.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
     execute_once.add_argument("--min-net-edge", type=float, default=0.0, help="minimum edge per share")
     execute_once.add_argument("--max-capital-per-trade", type=float, help="cap capital per opportunity")
     execute_once.add_argument("--bankroll", type=float, help="cap simulated bankroll for latest timestamp")
+    execute_once.add_argument("--min-run-observations", type=int, default=1, help="minimum latest-run observations before planning")
+    execute_once.add_argument("--min-run-seconds", type=float, default=0.0, help="minimum latest-run duration before planning")
     execute_once.add_argument("--max-trades", type=int, default=1, help="maximum plans to build or submit")
     execute_once.add_argument("--slippage-bps", type=float, default=50.0, help="buy limit cushion in basis points")
     execute_once.add_argument("--tick-size", default="0.01", help="CLOB market tick size")
@@ -358,6 +378,19 @@ def _current_monitor_runs(result) -> list:
     return [run for run in getattr(result, "runs", []) if run.end_ts == current_ts]
 
 
+def _stable_current_opportunities(result, min_run_observations: int = 1, min_run_seconds: float = 0.0) -> list:
+    current = _current_monitor_opportunities(result)
+    if min_run_observations <= 1 and min_run_seconds <= 0:
+        return current
+
+    stable_keys = {
+        run.key
+        for run in _current_monitor_runs(result)
+        if run.observation_count >= min_run_observations and run.duration_seconds >= min_run_seconds
+    }
+    return [opportunity for opportunity in current if opportunity_key(opportunity) in stable_keys]
+
+
 def _print_current_monitor_details(opportunities, runs) -> None:
     for opportunity in opportunities:
         legs = ",".join(f"{leg.market_id}:{leg.token}:{leg.quantity:g}@{leg.average_price:g}" for leg in opportunity.legs)
@@ -385,6 +418,7 @@ def _paper_report_row(result) -> dict:
         "paper_edge": result.paper_edge,
         "paper_roi": result.paper_edge / result.paper_capital_used if result.paper_capital_used > 0 else 0.0,
         "last_snapshot_ts": result.last_snapshot_ts,
+        "by_kind": _paper_summary_by_kind(result),
         "opportunities": [opportunity_to_row(opportunity) for opportunity in result.opportunities],
         "paper_trades": [trade_to_row(trade) for trade in result.paper_trades],
         "paper_rejections": [rejection_to_row(rejection) for rejection in result.paper_rejections],
@@ -403,9 +437,62 @@ def _paper_report_row(result) -> dict:
     }
 
 
+def _paper_summary_by_kind(result) -> list:
+    summary = {}
+    for opportunity in result.opportunities:
+        row = summary.setdefault(
+            opportunity.kind,
+            {
+                "kind": opportunity.kind,
+                "opportunity_count": 0,
+                "paper_trade_count": 0,
+                "paper_rejection_count": 0,
+                "total_edge": 0.0,
+                "paper_capital_used": 0.0,
+                "paper_edge": 0.0,
+                "max_edge_per_share": 0.0,
+                "max_run_duration_seconds": 0.0,
+            },
+        )
+        row["opportunity_count"] += 1
+        row["total_edge"] += opportunity.total_edge
+        row["max_edge_per_share"] = max(row["max_edge_per_share"], opportunity.net_edge_per_share)
+
+    for trade in result.paper_trades:
+        row = summary.setdefault(trade.opportunity.kind, {"kind": trade.opportunity.kind})
+        row.setdefault("opportunity_count", 0)
+        row.setdefault("paper_rejection_count", 0)
+        row.setdefault("total_edge", 0.0)
+        row.setdefault("max_edge_per_share", 0.0)
+        row.setdefault("max_run_duration_seconds", 0.0)
+        row["paper_trade_count"] = row.get("paper_trade_count", 0) + 1
+        row["paper_capital_used"] = row.get("paper_capital_used", 0.0) + trade.capital_used
+        row["paper_edge"] = row.get("paper_edge", 0.0) + trade.edge
+
+    for rejection in result.paper_rejections:
+        row = summary.setdefault(rejection.opportunity.kind, {"kind": rejection.opportunity.kind})
+        row["paper_rejection_count"] = row.get("paper_rejection_count", 0) + 1
+
+    max_run_duration_by_key = {}
+    for run in result.runs:
+        max_run_duration_by_key[run.key] = max(max_run_duration_by_key.get(run.key, 0.0), run.duration_seconds)
+    for opportunity in result.opportunities:
+        duration = max_run_duration_by_key.get(opportunity_key(opportunity))
+        if duration is None:
+            continue
+        row = summary[opportunity.kind]
+        row["max_run_duration_seconds"] = max(row["max_run_duration_seconds"], duration)
+
+    return sorted(summary.values(), key=lambda row: (row["kind"]))
+
+
 def _execution_plan_rows(result, args) -> list:
     selection = select_paper_trades(
-        _current_monitor_opportunities(result),
+        _stable_current_opportunities(
+            result,
+            args.min_run_observations,
+            args.min_run_seconds,
+        ),
         max_capital_per_trade=args.max_capital_per_trade,
         bankroll=args.bankroll,
     )
