@@ -6,11 +6,13 @@ from poly_strategy.backtest import RuleSet, load_rule_set, snapshots_from_ndjson
 from poly_strategy.fees import polymarket_taker_fee_per_share
 from poly_strategy.models import BinaryMarketSnapshot
 from poly_strategy.orderbook import Level
+from poly_strategy.rule_discovery import MarketText, read_market_texts
 
 
 def near_miss_report(
     snapshots_path: Path,
     rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
     top_n: int = 10,
     min_net_edge: float = 0.0,
 ) -> dict:
@@ -20,6 +22,13 @@ def near_miss_report(
     snapshots = _latest_snapshot_batch(snapshots_path)
     rule_set = load_rule_set(rules_path) if rules_path else RuleSet()
     candidates = near_miss_candidates(snapshots, rule_set, min_net_edge=min_net_edge)
+    market_texts = _market_texts_by_id(gamma_path)
+    neg_risk_expanded_groups = _annotate_neg_risk_diagnostics(
+        candidates,
+        snapshots,
+        market_texts,
+        min_net_edge,
+    )
     candidates.sort(key=lambda row: (row["net_edge_per_share"], row["gross_edge_per_share"]), reverse=True)
     by_kind = _summary_by_kind(candidates, min_net_edge)
     fee_blocked = [
@@ -31,6 +40,7 @@ def near_miss_report(
         "type": "near_miss_report",
         "snapshots_path": str(snapshots_path),
         "rules_path": str(rules_path) if rules_path else None,
+        "gamma_path": str(gamma_path) if gamma_path else None,
         "latest_snapshot_ts": snapshots[-1].ts if snapshots else None,
         "latest_snapshot_count": len(snapshots),
         "candidate_count": len(candidates),
@@ -38,6 +48,7 @@ def near_miss_report(
         "top": candidates[:top_n],
         "fee_blocked_top": fee_blocked[:top_n],
         "by_kind": by_kind,
+        "neg_risk_expanded_groups": neg_risk_expanded_groups[:top_n],
     }
 
 
@@ -191,6 +202,194 @@ def _latest_snapshot_batch(path: Path) -> List[BinaryMarketSnapshot]:
         return []
     latest_ts = snapshots[-1].ts
     return [snapshot for snapshot in snapshots if snapshot.ts == latest_ts]
+
+
+def _market_texts_by_id(path: Optional[Path]) -> dict:
+    if not path:
+        return {}
+    return {market.market_id: market for market in read_market_texts(path)}
+
+
+def _annotate_neg_risk_diagnostics(
+    candidates: List[dict],
+    snapshots: List[BinaryMarketSnapshot],
+    market_texts: dict,
+    min_net_edge: float,
+) -> List[dict]:
+    if not market_texts:
+        return []
+
+    by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
+    rows = []
+    for candidate in candidates:
+        if candidate.get("kind") != "potential_exhaustive_yes_basket":
+            continue
+        row = _neg_risk_group_diagnostic(candidate, by_market_id, market_texts, min_net_edge)
+        _apply_neg_risk_diagnostic(candidate, row)
+        rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("source_net_edge_per_share") or 0.0),
+            row.get("status") or "",
+            ",".join(row.get("source_market_ids") or []),
+        )
+    )
+    return rows
+
+
+def _neg_risk_group_diagnostic(
+    candidate: dict,
+    by_market_id: dict,
+    market_texts: dict,
+    min_net_edge: float,
+) -> dict:
+    market_ids = [str(leg["market_id"]) for leg in candidate.get("legs", []) if leg.get("market_id")]
+    row = {
+        "source_market_ids": market_ids,
+        "source_net_edge_per_share": candidate.get("net_edge_per_share"),
+        "source_gross_edge_per_share": candidate.get("gross_edge_per_share"),
+        "status": "unverified",
+        "trade_status": "needs_verification",
+    }
+
+    missing_metadata = [market_id for market_id in market_ids if market_id not in market_texts]
+    if missing_metadata:
+        row.update(
+            {
+                "status": "missing_metadata",
+                "trade_status": "blocked",
+                "rejection_reason": "missing_gamma_metadata_for_candidate_markets",
+                "missing_metadata_market_ids": missing_metadata,
+            }
+        )
+        return row
+
+    source_markets = [market_texts[market_id] for market_id in market_ids]
+    group_ids = [market.neg_risk_market_id for market in source_markets]
+    if not group_ids or any(not group_id for group_id in group_ids) or len(set(group_ids)) != 1:
+        row.update(
+            {
+                "status": "not_single_neg_risk_group",
+                "rejection_reason": "candidate_markets_do_not_share_one_known_neg_risk_group",
+            }
+        )
+        return row
+
+    group_id = group_ids[0]
+    known_group_markets = _known_group_markets(market_texts, group_id)
+    known_market_ids = [market.market_id for market in known_group_markets]
+    source_market_id_set = set(market_ids)
+    extra_known_market_ids = [market_id for market_id in known_market_ids if market_id not in source_market_id_set]
+    missing_snapshot_market_ids = [market_id for market_id in known_market_ids if market_id not in by_market_id]
+    row.update(
+        {
+            "neg_risk_market_id": group_id,
+            "known_market_ids": known_market_ids,
+            "known_markets": [_market_row(market) for market in known_group_markets],
+            "extra_known_market_ids": extra_known_market_ids,
+            "extra_known_markets": [
+                _market_row(market)
+                for market in known_group_markets
+                if market.market_id in set(extra_known_market_ids)
+            ],
+            "missing_snapshot_market_ids": missing_snapshot_market_ids,
+        }
+    )
+
+    expanded_candidate = _expanded_neg_risk_candidate(
+        known_market_ids,
+        by_market_id,
+        min_net_edge,
+        source_market_ids=market_ids,
+        neg_risk_market_id=group_id,
+    )
+    if expanded_candidate is not None:
+        row["expanded_candidate"] = expanded_candidate
+
+    if extra_known_market_ids:
+        row.update(
+            {
+                "status": "incomplete_known_neg_risk_group",
+                "trade_status": "rejected",
+                "rejection_reason": "candidate_omits_known_markets_from_the_same_neg_risk_group",
+            }
+        )
+    else:
+        row.update(
+            {
+                "status": "complete_known_neg_risk_group",
+                "trade_status": "needs_verification",
+                "rejection_reason": "known_neg_risk_group_still_requires_verifier_or_manual_promotion",
+            }
+        )
+    return row
+
+
+def _apply_neg_risk_diagnostic(candidate: dict, diagnostic: dict) -> None:
+    candidate["trade_status"] = diagnostic["trade_status"]
+    candidate["neg_risk_status"] = diagnostic["status"]
+    if diagnostic.get("rejection_reason"):
+        candidate["rejection_reason"] = diagnostic["rejection_reason"]
+    for key in [
+        "neg_risk_market_id",
+        "known_market_ids",
+        "extra_known_market_ids",
+        "extra_known_markets",
+        "missing_metadata_market_ids",
+        "missing_snapshot_market_ids",
+    ]:
+        if key in diagnostic:
+            candidate[key] = diagnostic[key]
+
+
+def _known_group_markets(market_texts: dict, group_id: str) -> List[MarketText]:
+    return sorted(
+        [market for market in market_texts.values() if market.neg_risk_market_id == group_id],
+        key=_market_sort_key,
+    )
+
+
+def _market_sort_key(market: MarketText):
+    threshold = market.group_item_threshold
+    try:
+        threshold_key = (0, float(threshold))
+    except (TypeError, ValueError):
+        threshold_key = (1, str(threshold))
+    return (threshold_key, market.group_item_title, market.market_id)
+
+
+def _market_row(market: MarketText) -> dict:
+    return {
+        "market_id": market.market_id,
+        "question": market.question,
+        "group_item_title": market.group_item_title,
+        "group_item_threshold": market.group_item_threshold,
+        "end_date": market.end_date,
+    }
+
+
+def _expanded_neg_risk_candidate(
+    known_market_ids: List[str],
+    by_market_id: dict,
+    min_net_edge: float,
+    source_market_ids: List[str],
+    neg_risk_market_id: str,
+) -> Optional[dict]:
+    if any(market_id not in by_market_id for market_id in known_market_ids):
+        return None
+    row = _candidate_row(
+        "known_neg_risk_full_yes_basket",
+        [(by_market_id[market_id], "YES", by_market_id[market_id].yes.asks) for market_id in known_market_ids],
+        payout_per_share=1.0,
+        min_net_edge=min_net_edge,
+    )
+    if row is None:
+        return None
+    row["diagnostic_only"] = True
+    row["source_potential_market_ids"] = source_market_ids
+    row["neg_risk_market_id"] = neg_risk_market_id
+    row["risk_note"] = "known neg-risk full group still requires verifier or manual promotion before trading"
+    return row
 
 
 def _candidate_row(

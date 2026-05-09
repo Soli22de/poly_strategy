@@ -185,6 +185,7 @@ Add `--snapshots` and `--rules` to include near-miss diagnostics for the latest 
 python3 -m poly_strategy.cli paper-analyze data/paper-monitor-report.jsonl \
   --snapshots data/paper-monitor-snapshots.ndjson \
   --rules rules/candidate-implications.json \
+  --gamma data/polymarket-gamma.ndjson \
   --near-miss-min-net-edge 0.002 \
   --out data/paper-monitor-analysis.json \
   --top 20 \
@@ -192,6 +193,8 @@ python3 -m poly_strategy.cli paper-analyze data/paper-monitor-report.jsonl \
 ```
 
 The analysis report includes error rate, runtime, opportunity observations, stable opportunity observations, stable paper ROI, edge distributions, top recurring opportunities, and top stable markets. With near-miss diagnostics, it also reports the closest fee-adjusted candidates, the raw gross edge before fees, fee drag, top-of-book size, and candidates where a raw price edge disappears after Polymarket taker fees.
+
+When `--gamma` is provided, near-miss diagnostics also explain why a `potential_exhaustive_yes_basket` is not tradeable. For known neg-risk groups, the report lists omitted markets, missing snapshots for the full group, and a diagnostic `known_neg_risk_full_yes_basket` calculation when every known group member has a current orderbook snapshot.
 
 Write a conflict-aware paper trading report. This sorts opportunities by edge per capital, reserves overlapping leg liquidity so the same visible ask depth is not counted twice, and applies both per-trade and per-iteration bankroll caps:
 

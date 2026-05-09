@@ -12,6 +12,7 @@ def analyze_paper_monitor_report(
     top_n: int = 10,
     snapshots_path: Optional[Path] = None,
     rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
     near_miss_top_n: int = 10,
     near_miss_min_net_edge: float = 0.0,
 ) -> dict:
@@ -70,6 +71,7 @@ def analyze_paper_monitor_report(
         report["near_miss"] = near_miss_report(
             snapshots_path,
             rules_path=rules_path,
+            gamma_path=gamma_path,
             top_n=near_miss_top_n,
             min_net_edge=near_miss_min_net_edge,
         )

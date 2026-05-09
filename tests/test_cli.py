@@ -337,6 +337,7 @@ class CliTests(unittest.TestCase):
             out = Path(tmp) / "analysis.json"
             snapshots = Path(tmp) / "snapshots.ndjson"
             rules = Path(tmp) / "rules.json"
+            gamma = Path(tmp) / "gamma.ndjson"
             report.write_text(
                 "\n".join(
                     json.dumps(row)
@@ -410,6 +411,7 @@ class CliTests(unittest.TestCase):
                 + "\n"
             )
             rules.write_text("{}")
+            gamma.write_text("")
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
@@ -425,6 +427,8 @@ class CliTests(unittest.TestCase):
                         str(snapshots),
                         "--rules",
                         str(rules),
+                        "--gamma",
+                        str(gamma),
                         "--near-miss-top",
                         "1",
                         "--near-miss-min-net-edge",
@@ -442,6 +446,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["top_stable_markets"][0]["market_id"], "m1")
         self.assertEqual(row["error_summary"]["by_phase"][0]["phase"], "collect")
         self.assertEqual(row["near_miss"]["top"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(row["near_miss"]["gamma_path"], str(gamma))
         self.assertGreater(row["near_miss"]["top"][0]["distance_to_min_net_edge"], 0)
         self.assertIn("wrote=1", stdout.getvalue())
 

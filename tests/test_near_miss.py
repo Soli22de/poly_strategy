@@ -84,6 +84,108 @@ class NearMissTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["net_edge_per_share"], 0.10)
         self.assertNotIn("diagnostic_only", rows[0])
 
+    def test_near_miss_report_rejects_incomplete_known_neg_risk_groups(self):
+        snapshots = [
+            _row("a", 0.20, 0.82),
+            _row("b", 0.30, 0.72),
+            _row("c", 0.40, 0.62),
+        ]
+        rules_row = {
+            "mutually_exclusive": [
+                {"first": "a", "second": "b", "confidence": 0.99},
+                {"first": "a", "second": "c", "confidence": 0.99},
+                {"first": "b", "second": "c", "confidence": 0.99},
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            rule_path = Path(tmp) / "rules.json"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            rule_path.write_text(json.dumps(rules_row))
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c", "d"]))
+                + "\n"
+            )
+
+            report = near_miss_report(snapshot_path, rule_path, gamma_path=gamma_path, top_n=10)
+
+        candidate = [row for row in report["top"] if row["kind"] == "potential_exhaustive_yes_basket"][0]
+        self.assertEqual(candidate["trade_status"], "rejected")
+        self.assertEqual(candidate["neg_risk_status"], "incomplete_known_neg_risk_group")
+        self.assertEqual(candidate["extra_known_market_ids"], ["d"])
+        diagnostic = report["neg_risk_expanded_groups"][0]
+        self.assertEqual(diagnostic["status"], "incomplete_known_neg_risk_group")
+        self.assertEqual(diagnostic["missing_snapshot_market_ids"], ["d"])
+
+    def test_near_miss_report_computes_full_known_neg_risk_group_when_snapshots_exist(self):
+        snapshots = [
+            _row("a", 0.20, 0.82),
+            _row("b", 0.30, 0.72),
+            _row("c", 0.40, 0.62),
+            _row("d", 0.30, 0.72),
+        ]
+        rules_row = {
+            "mutually_exclusive": [
+                {"first": "a", "second": "b", "confidence": 0.99},
+                {"first": "a", "second": "c", "confidence": 0.99},
+                {"first": "b", "second": "c", "confidence": 0.99},
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            rule_path = Path(tmp) / "rules.json"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            rule_path.write_text(json.dumps(rules_row))
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c", "d"]))
+                + "\n"
+            )
+
+            report = near_miss_report(snapshot_path, rule_path, gamma_path=gamma_path, top_n=10)
+
+        expanded = report["neg_risk_expanded_groups"][0]["expanded_candidate"]
+        self.assertEqual(expanded["kind"], "known_neg_risk_full_yes_basket")
+        self.assertTrue(expanded["diagnostic_only"])
+        self.assertAlmostEqual(expanded["net_edge_per_share"], -0.20)
+        self.assertEqual([leg["market_id"] for leg in expanded["legs"]], ["a", "b", "c", "d"])
+
+    def test_near_miss_report_requires_all_markets_to_share_neg_risk_group(self):
+        snapshots = [_row("a", 0.20, 0.82), _row("b", 0.30, 0.72), _row("c", 0.40, 0.62)]
+        rules_row = {
+            "mutually_exclusive": [
+                {"first": "a", "second": "b", "confidence": 0.99},
+                {"first": "a", "second": "c", "confidence": 0.99},
+                {"first": "b", "second": "c", "confidence": 0.99},
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            rule_path = Path(tmp) / "rules.json"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            rule_path.write_text(json.dumps(rules_row))
+            gamma_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(_gamma_row("a", 0)),
+                        json.dumps(_gamma_row("b", 1)),
+                        json.dumps(_gamma_row("c", 2, group_id="")),
+                    ]
+                )
+                + "\n"
+            )
+
+            report = near_miss_report(snapshot_path, rule_path, gamma_path=gamma_path, top_n=10)
+
+        diagnostic = report["neg_risk_expanded_groups"][0]
+        self.assertEqual(diagnostic["status"], "not_single_neg_risk_group")
+        self.assertEqual(diagnostic["trade_status"], "needs_verification")
+
 
 def _row(market_id: str, yes_price: float, no_price: float):
     return {
@@ -94,6 +196,26 @@ def _row(market_id: str, yes_price: float, no_price: float):
         "fee_rate": 0.0,
         "yes": {"token_id": f"{market_id}-yes", "asks": [[yes_price, 100]], "bids": []},
         "no": {"token_id": f"{market_id}-no", "asks": [[no_price, 100]], "bids": []},
+    }
+
+
+def _gamma_row(market_id: str, threshold: int, group_id: str = "group-1"):
+    return {
+        "ts": "2026-05-09T00:00:00Z",
+        "type": "raw_polymarket_gamma_market",
+        "market_id": market_id,
+        "raw": {
+            "id": market_id,
+            "question": f"Will {market_id.upper()} win?",
+            "description": "Same event.",
+            "outcomes": json.dumps(["Yes", "No"]),
+            "endDate": "2026-06-01T00:00:00Z",
+            "slug": f"{market_id}-wins",
+            "negRisk": True,
+            "negRiskMarketID": group_id,
+            "groupItemTitle": market_id.upper(),
+            "groupItemThreshold": str(threshold),
+        },
     }
 
 

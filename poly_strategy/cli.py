@@ -173,6 +173,7 @@ def main(argv=None) -> int:
                 top_n=args.top,
                 snapshots_path=Path(args.snapshots) if args.snapshots else None,
                 rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
                 near_miss_top_n=args.near_miss_top,
                 near_miss_min_net_edge=args.near_miss_min_net_edge,
             )
@@ -413,6 +414,7 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--top", type=int, default=10, help="top opportunities and markets to include")
     analyze.add_argument("--snapshots", help="optional snapshot NDJSON path for near-miss diagnostics")
     analyze.add_argument("--rules", help="optional rule JSON path for relation near-miss diagnostics")
+    analyze.add_argument("--gamma", help="optional raw Gamma NDJSON path for near-miss neg-risk diagnostics")
     analyze.add_argument("--near-miss-top", type=int, default=10, help="near-miss rows to include")
     analyze.add_argument(
         "--near-miss-min-net-edge",
