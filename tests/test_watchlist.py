@@ -29,6 +29,7 @@ class WatchlistTests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual([row["market_id"] for row in rows], ["a", "b"])
         self.assertEqual(rows[0]["yes_token_id"], "a-yes")
+        self.assertEqual(rows[0]["fee_rate"], 0.03)
         self.assertEqual(written["type"], "polymarket_watchlist")
         self.assertEqual(len(written["markets"]), 2)
 
@@ -45,6 +46,8 @@ def _gamma_row(market_id: str, group_id: str, token_ids: list, threshold: str):
             "groupItemTitle": market_id.upper(),
             "groupItemThreshold": threshold,
             "clobTokenIds": json.dumps(token_ids),
+            "feesEnabled": True,
+            "feeSchedule": {"rate": 0.03},
         },
     }
 

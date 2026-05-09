@@ -354,7 +354,7 @@ def binary_snapshot_rows_from_gamma_markets(
                 "venue": "polymarket",
                 "market_id": market_id,
                 "question": market.get("question"),
-                "fee_rate": _market_fee_rate(market),
+                "fee_rate": market_fee_rate(market),
                 "yes": yes_book,
                 "no": no_book,
             }
@@ -580,11 +580,15 @@ def _loads_json_list(value) -> List[str]:
     return loaded
 
 
-def _market_fee_rate(market: dict) -> float:
+def market_fee_rate(market: dict) -> float:
     if not market.get("feesEnabled"):
         return 0.0
     fee_schedule = market.get("feeSchedule") or {}
     return float(fee_schedule.get("rate") or 0.0)
+
+
+def _market_fee_rate(market: dict) -> float:
+    return market_fee_rate(market)
 
 
 def _normalized_book(book: dict) -> dict:

@@ -153,6 +153,24 @@ python3 -m poly_strategy.cli build-watchlist \
   --out data/watchlist.json
 ```
 
+Stream the watchlist through Polymarket's market WebSocket and append normalized orderbook updates plus backtestable binary snapshots:
+
+```bash
+python3 -m poly_strategy.cli stream-polymarket-watchlist \
+  --watchlist data/watchlist.json \
+  --out data/realtime-orderbooks.ndjson \
+  --snapshots-out data/realtime-snapshots.ndjson \
+  --snapshot-interval 2
+```
+
+This command requires the optional live dependency:
+
+```bash
+python3 -m pip install -r requirements-live.txt
+```
+
+The snapshot rows keep the watchlist `fee_rate`, so they can be replayed by the same `backtest`, `paper-report`, and `execute-latest` commands used for HTTP-collected snapshots.
+
 Watch those markets repeatedly and replay opportunities:
 
 ```bash

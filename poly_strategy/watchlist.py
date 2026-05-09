@@ -4,6 +4,7 @@ from typing import Iterable
 
 from poly_strategy.collectors import (
     expand_market_ids_with_neg_risk_groups,
+    market_fee_rate,
     market_ids_from_rule_file,
     raw_gamma_markets_from_ndjson,
 )
@@ -39,6 +40,7 @@ def _watchlist_rows(markets: Iterable[dict], market_ids: Iterable[str]) -> list:
                 "venue": "polymarket",
                 "market_id": market_id,
                 "question": market.get("question"),
+                "fee_rate": market_fee_rate(market),
                 "neg_risk": bool(market.get("negRisk")),
                 "neg_risk_market_id": str(market.get("negRiskMarketID") or "").strip() or None,
                 "group_item_title": str(market.get("groupItemTitle") or "").strip() or None,

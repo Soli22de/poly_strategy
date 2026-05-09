@@ -36,6 +36,7 @@ from poly_strategy.exhaustive_groups import promote_exhaustive_groups, result_to
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
+from poly_strategy.realtime import POLYMARKET_MARKET_WS_URL, stream_polymarket_watchlist
 from poly_strategy.rule_discovery import discover_rules
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
@@ -351,6 +352,17 @@ def main(argv=None) -> int:
             count = write_watchlist(rows, Path(args.out))
             print(f"wrote={count} out={args.out}")
             return 0
+        if args.command == "stream-polymarket-watchlist":
+            count = stream_polymarket_watchlist(
+                Path(args.watchlist),
+                Path(args.out),
+                snapshot_out_path=Path(args.snapshots_out) if args.snapshots_out else None,
+                max_messages=args.max_messages,
+                snapshot_interval_seconds=args.snapshot_interval,
+                url=args.url,
+            )
+            print(f"messages={count} out={args.out}")
+            return 0
     except (
         OSError,
         URLError,
@@ -630,6 +642,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not include known markets sharing a referenced negRiskMarketID",
     )
+
+    stream_watchlist = subparsers.add_parser(
+        "stream-polymarket-watchlist",
+        help="stream Polymarket WebSocket orderbook updates for a standardized watchlist",
+    )
+    stream_watchlist.add_argument("--watchlist", required=True, help="watchlist JSON from build-watchlist")
+    stream_watchlist.add_argument("--out", required=True, help="append realtime orderbook updates here")
+    stream_watchlist.add_argument("--snapshots-out", help="append backtestable binary snapshots here")
+    stream_watchlist.add_argument("--snapshot-interval", type=float, default=2.0, help="seconds between snapshot writes")
+    stream_watchlist.add_argument("--max-messages", type=int, help="stop after this many raw WebSocket messages")
+    stream_watchlist.add_argument("--url", default=POLYMARKET_MARKET_WS_URL, help="Polymarket market WebSocket URL")
 
     return parser
 

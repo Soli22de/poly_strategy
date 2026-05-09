@@ -911,6 +911,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["markets"][0]["yes_token_id"], "a-yes")
         self.assertIn("wrote=1", stdout.getvalue())
 
+    def test_stream_polymarket_watchlist_command_invokes_streamer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            watchlist = Path(tmp) / "watchlist.json"
+            updates = Path(tmp) / "updates.ndjson"
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            watchlist.write_text(json.dumps({"type": "polymarket_watchlist", "markets": []}))
+
+            stdout = io.StringIO()
+            with patch("poly_strategy.cli.stream_polymarket_watchlist", return_value=2) as stream:
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "stream-polymarket-watchlist",
+                            "--watchlist",
+                            str(watchlist),
+                            "--out",
+                            str(updates),
+                            "--snapshots-out",
+                            str(snapshots),
+                            "--snapshot-interval",
+                            "3",
+                            "--max-messages",
+                            "2",
+                            "--url",
+                            "wss://example.test/ws",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        stream.assert_called_once_with(
+            watchlist,
+            updates,
+            snapshot_out_path=snapshots,
+            max_messages=2,
+            snapshot_interval_seconds=3.0,
+            url="wss://example.test/ws",
+        )
+        self.assertIn("messages=2", stdout.getvalue())
+
     def test_discover_rules_command_requires_model(self):
         stderr = io.StringIO()
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
