@@ -28,5 +28,5 @@ for source in "$PLIST_DIR"/*.plist; do
 done
 
 if [[ "$DRY_RUN" != "1" && "$BOOTSTRAP" == "1" ]]; then
-  launchctl list | grep -E 'poly_strategy_(realtime|alert|discovery)' || true
+  launchctl list | grep -E 'poly_strategy_(realtime|alert|discovery|external)' || true
 fi

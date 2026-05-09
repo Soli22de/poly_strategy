@@ -221,6 +221,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[5], 50)
         self.assertIn("wrote=200", stdout.getvalue())
 
+    def test_collect_kalshi_command_invokes_collector(self):
+        with patch("poly_strategy.cli.collect_kalshi_markets", return_value=3) as collect:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "collect-kalshi",
+                        "--out",
+                        "data/kalshi.ndjson",
+                        "--limit",
+                        "3",
+                        "--status",
+                        "open",
+                        "--ticker",
+                        "KXTEST",
+                        "--timeout",
+                        "7",
+                        "--proxy",
+                        "127.0.0.1:10808",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(str(collect.call_args.args[0]), "data/kalshi.ndjson")
+        self.assertEqual(collect.call_args.args[1], 3)
+        self.assertEqual(collect.call_args.kwargs["tickers"], ["KXTEST"])
+        self.assertIn("wrote=3", stdout.getvalue())
+
     def test_collect_rule_markets_passes_gamma_and_rules_to_targeted_collector(self):
         with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules_loop", return_value=4) as collect:
             stdout = io.StringIO()
@@ -952,6 +980,59 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["channel"], "webhook")
         self.assertEqual(rows[0]["status"], "dry_run")
+        self.assertIn("wrote=1", stdout.getvalue())
+
+    def test_match_cross_platform_command_writes_report_and_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            poly = Path(tmp) / "poly.ndjson"
+            kalshi = Path(tmp) / "kalshi.ndjson"
+            out = Path(tmp) / "matches.json"
+            signals = Path(tmp) / "signals.ndjson"
+            poly.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_polymarket_gamma_market",
+                        "market_id": "pm1",
+                        "raw": {"id": "pm1", "question": "Will Bitcoin hit 100k in 2026?"},
+                    }
+                )
+                + "\n"
+            )
+            kalshi.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_kalshi_market",
+                        "market_id": "KXBTC100K",
+                        "raw": {"ticker": "KXBTC100K", "title": "Will Bitcoin hit 100k in 2026?"},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "match-cross-platform",
+                        "--polymarket-gamma",
+                        str(poly),
+                        "--kalshi-markets",
+                        str(kalshi),
+                        "--out",
+                        str(out),
+                        "--signals-out",
+                        str(signals),
+                        "--min-score",
+                        "0.5",
+                    ]
+                )
+            row = json.loads(out.read_text())
+            signal_rows = [json.loads(line) for line in signals.read_text().splitlines()]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["match_count"], 1)
+        self.assertEqual(row["signals_written"], 1)
+        self.assertEqual(signal_rows[0]["type"], "external_signal")
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):

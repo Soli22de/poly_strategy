@@ -10,6 +10,7 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 POLYMARKET_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
+KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
 
 
 def write_sample_snapshot(path: Path) -> int:
@@ -136,6 +137,124 @@ def collect_polymarket_books(path: Path, token_ids: Iterable[str], timeout: floa
             )
             count += 1
     return count
+
+
+def collect_kalshi_markets(
+    path: Path,
+    limit: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    cursor: Optional[str] = None,
+    status: Optional[str] = "open",
+    tickers: Optional[Iterable[str]] = None,
+) -> int:
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    params = {"limit": str(limit)}
+    if cursor:
+        params["cursor"] = cursor
+    if status:
+        params["status"] = status
+    ticker_list = [str(ticker) for ticker in tickers or [] if ticker]
+    if ticker_list:
+        params["tickers"] = ",".join(ticker_list)
+    row = _fetch_json(f"{KALSHI_API_URL}/markets?{urlencode(params)}", timeout, proxy=proxy)
+    markets = row.get("markets") if isinstance(row, dict) else None
+    if not isinstance(markets, list):
+        raise RuntimeError("unexpected Kalshi markets response")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        for market in markets:
+            handle.write(
+                json.dumps(
+                    {
+                        "ts": _utc_now(),
+                        "type": "raw_kalshi_market",
+                        "market_id": market.get("ticker"),
+                        "raw": market,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    return len(markets)
+
+
+def collect_kalshi_orderbooks(
+    path: Path,
+    tickers: Iterable[str],
+    timeout: float,
+    proxy: Optional[str] = None,
+) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    seen = set()
+    with path.open("a") as handle:
+        for ticker in tickers:
+            normalized_ticker = str(ticker).strip()
+            if not normalized_ticker or normalized_ticker in seen:
+                continue
+            seen.add(normalized_ticker)
+            row = _fetch_json(f"{KALSHI_API_URL}/markets/{quote(normalized_ticker)}/orderbook", timeout, proxy=proxy)
+            handle.write(
+                json.dumps(
+                    {
+                        "ts": _utc_now(),
+                        "type": "raw_kalshi_orderbook",
+                        "market_id": normalized_ticker,
+                        "raw": row,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            count += 1
+    return count
+
+
+def write_kalshi_binary_snapshots(orderbooks_path: Path, out_path: Path) -> int:
+    rows = list(kalshi_binary_snapshot_rows_from_orderbooks(orderbooks_path))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("a") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    return len(rows)
+
+
+def kalshi_binary_snapshot_rows_from_orderbooks(path: Path) -> Iterable[dict]:
+    with path.open() as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("type") != "raw_kalshi_orderbook":
+                continue
+            market_id = str(row.get("market_id") or "").strip()
+            if not market_id:
+                continue
+            orderbook = _kalshi_orderbook_payload(row.get("raw") or {})
+            yes_bids = _kalshi_levels(orderbook, "yes")
+            no_bids = _kalshi_levels(orderbook, "no")
+            # Kalshi exposes bids. In a binary market, a NO bid at p is a YES ask at 1-p, and vice versa.
+            yield {
+                "ts": row.get("ts") or _utc_now(),
+                "type": "binary_snapshot",
+                "venue": "kalshi",
+                "market_id": market_id,
+                "fee_rate": 0.0,
+                "yes": {
+                    "token_id": f"{market_id}:YES",
+                    "asks": _complement_asks(no_bids),
+                    "bids": yes_bids,
+                },
+                "no": {
+                    "token_id": f"{market_id}:NO",
+                    "asks": _complement_asks(yes_bids),
+                    "bids": no_bids,
+                },
+            }
 
 
 def collect_polymarket_binary_snapshots(
@@ -641,3 +760,39 @@ def _levels(levels: Iterable[dict], reverse: bool) -> List[List[float]]:
     parsed = [[float(level["price"]), float(level["size"])] for level in levels]
     parsed.sort(key=lambda level: level[0], reverse=reverse)
     return parsed
+
+
+def _kalshi_orderbook_payload(row: dict) -> dict:
+    if "orderbook" in row and isinstance(row["orderbook"], dict):
+        return row["orderbook"]
+    return row if isinstance(row, dict) else {}
+
+
+def _kalshi_levels(orderbook: dict, side: str) -> List[List[float]]:
+    value = orderbook.get(side) or orderbook.get(f"{side}_dollars") or []
+    parsed = []
+    for level in value:
+        price = size = None
+        if isinstance(level, dict):
+            price = level.get("price") or level.get("dollars") or level.get("yes_price") or level.get("no_price")
+            size = level.get("size") or level.get("quantity") or level.get("contracts")
+        elif isinstance(level, list) and len(level) >= 2:
+            price, size = level[0], level[1]
+        if price is None or size is None:
+            continue
+        parsed.append([_kalshi_price_to_probability(price), float(size)])
+    parsed.sort(key=lambda row: row[0], reverse=True)
+    return parsed
+
+
+def _kalshi_price_to_probability(value) -> float:
+    price = float(value)
+    if price > 1.0:
+        price = price / 100.0
+    return round(price, 6)
+
+
+def _complement_asks(bids: Iterable[List[float]]) -> List[List[float]]:
+    asks = [[round(1.0 - price, 6), size] for price, size in bids]
+    asks.sort(key=lambda row: row[0])
+    return asks

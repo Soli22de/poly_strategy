@@ -11,9 +11,11 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_loop,
     collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
+    kalshi_binary_snapshot_rows_from_orderbooks,
     expand_market_ids_with_neg_risk_groups,
     market_ids_from_rule_file,
     raw_gamma_markets_from_ndjson,
+    write_kalshi_binary_snapshots,
 )
 
 
@@ -373,6 +375,38 @@ class CollectorTests(unittest.TestCase):
 
         self.assertEqual(count, 2)
         self.assertEqual({row["market_id"] for row in rows}, {"a", "b"})
+
+    def test_kalshi_orderbooks_convert_bid_books_to_binary_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orderbooks = Path(tmp) / "kalshi-books.ndjson"
+            out = Path(tmp) / "kalshi-snapshots.ndjson"
+            orderbooks.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_kalshi_orderbook",
+                        "ts": "2026-05-09T00:00:00Z",
+                        "market_id": "KXTEST",
+                        "raw": {
+                            "orderbook": {
+                                "yes": [[45, 10], [40, 5]],
+                                "no": [[55, 8]],
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+            rows = list(kalshi_binary_snapshot_rows_from_orderbooks(orderbooks))
+            count = write_kalshi_binary_snapshots(orderbooks, out)
+            written = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(rows[0]["venue"], "kalshi")
+        self.assertEqual(rows[0]["yes"]["bids"], [[0.45, 10.0], [0.4, 5.0]])
+        self.assertEqual(rows[0]["yes"]["asks"], [[0.45, 8.0]])
+        self.assertEqual(rows[0]["no"]["asks"], [[0.55, 10.0], [0.6, 5.0]])
+        self.assertEqual(written[0]["market_id"], "KXTEST")
 
     def test_raw_gamma_markets_from_ndjson_dedupes_repeated_collections(self):
         rows = [

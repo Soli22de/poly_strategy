@@ -15,9 +15,17 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_rules,
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
+    collect_kalshi_markets,
+    collect_kalshi_orderbooks,
     collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
+    write_kalshi_binary_snapshots,
     write_sample_snapshot,
+)
+from poly_strategy.cross_platform import (
+    cross_platform_signal_rows,
+    match_polymarket_kalshi_markets,
+    write_cross_platform_signal_rows,
 )
 from poly_strategy.openai_rules import (
     OpenAIConfigError,
@@ -116,6 +124,29 @@ def main(argv=None) -> int:
                 args.iterations,
                 max_workers=args.book_workers,
             )
+            print(f"wrote={count} out={args.out}")
+            return 0
+        if args.command == "collect-kalshi":
+            count = collect_kalshi_markets(
+                Path(args.out),
+                args.limit,
+                args.timeout,
+                args.proxy,
+                cursor=args.cursor,
+                status=args.status,
+                tickers=args.ticker,
+            )
+            print(f"wrote={count} out={args.out}")
+            return 0
+        if args.command == "collect-kalshi-orderbooks":
+            tickers = list(args.ticker or [])
+            if args.tickers_file:
+                tickers.extend(_read_lines(Path(args.tickers_file)))
+            count = collect_kalshi_orderbooks(Path(args.out), tickers, args.timeout, args.proxy)
+            print(f"wrote={count} out={args.out}")
+            return 0
+        if args.command == "kalshi-snapshots":
+            count = write_kalshi_binary_snapshots(Path(args.orderbooks), Path(args.out))
             print(f"wrote={count} out={args.out}")
             return 0
         if args.command == "collect-rule-markets":
@@ -388,6 +419,24 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
+        if args.command == "match-cross-platform":
+            row = match_polymarket_kalshi_markets(
+                Path(args.polymarket_gamma),
+                Path(args.kalshi_markets),
+                min_score=args.min_score,
+                top_n=args.top,
+            )
+            if args.signals_out:
+                count = write_cross_platform_signal_rows(cross_platform_signal_rows(row), Path(args.signals_out))
+                row["signals_written"] = count
+                row["signals_out"] = args.signals_out
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"wrote=1 out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
         if args.command == "build-watchlist":
             rows = build_polymarket_watchlist(
                 Path(args.gamma),
@@ -538,6 +587,26 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_binaries.add_argument("--iterations", type=int, default=1, help="number of collection iterations")
     collect_binaries.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
     collect_binaries.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+
+    collect_kalshi = subparsers.add_parser("collect-kalshi", help="collect Kalshi market metadata")
+    collect_kalshi.add_argument("--out", required=True, help="output raw Kalshi market NDJSON path")
+    collect_kalshi.add_argument("--limit", type=int, default=100, help="markets per request")
+    collect_kalshi.add_argument("--cursor", help="optional pagination cursor")
+    collect_kalshi.add_argument("--status", default="open", help="market status filter; empty string disables")
+    collect_kalshi.add_argument("--ticker", action="append", help="optional Kalshi ticker filter")
+    collect_kalshi.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    collect_kalshi.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+
+    collect_kalshi_books = subparsers.add_parser("collect-kalshi-orderbooks", help="collect Kalshi orderbooks by ticker")
+    collect_kalshi_books.add_argument("--out", required=True, help="output raw Kalshi orderbook NDJSON path")
+    collect_kalshi_books.add_argument("--ticker", action="append", help="Kalshi ticker; can be repeated")
+    collect_kalshi_books.add_argument("--tickers-file", help="newline-delimited Kalshi tickers")
+    collect_kalshi_books.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    collect_kalshi_books.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+
+    kalshi_snapshots = subparsers.add_parser("kalshi-snapshots", help="convert raw Kalshi orderbooks to binary snapshots")
+    kalshi_snapshots.add_argument("--orderbooks", required=True, help="raw Kalshi orderbook NDJSON path")
+    kalshi_snapshots.add_argument("--out", required=True, help="append Kalshi binary snapshots here")
 
     collect_rule_markets = subparsers.add_parser(
         "collect-rule-markets",
@@ -810,6 +879,14 @@ def _build_parser() -> argparse.ArgumentParser:
     signal_report = subparsers.add_parser("external-signal-report", help="summarize normalized external signals")
     signal_report.add_argument("path", help="external signal NDJSON path")
     signal_report.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
+
+    match_cross = subparsers.add_parser("match-cross-platform", help="match Polymarket Gamma markets to Kalshi markets")
+    match_cross.add_argument("--polymarket-gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    match_cross.add_argument("--kalshi-markets", required=True, help="raw Kalshi market NDJSON path")
+    match_cross.add_argument("--out", help="output JSON match report path")
+    match_cross.add_argument("--signals-out", help="append candidate matches as external_signal rows")
+    match_cross.add_argument("--min-score", type=float, default=0.35, help="minimum title-token Jaccard score")
+    match_cross.add_argument("--top", type=int, default=100, help="maximum matches to include")
 
     watchlist = subparsers.add_parser("build-watchlist", help="write a standardized Polymarket token watchlist")
     watchlist.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
@@ -1358,6 +1435,10 @@ def _headers_from_args(values: list) -> dict:
             raise ValueError("--header name cannot be empty")
         headers[name] = header_value
     return headers
+
+
+def _read_lines(path: Path) -> list:
+    return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
 
 def _append_jsonl_row(path: Path, row: dict) -> None:
