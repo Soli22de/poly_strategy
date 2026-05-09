@@ -388,6 +388,9 @@ def market_ids_from_rule_file(path: Path) -> set:
         for rule in row.get(section, []):
             _add_if_present(market_ids, rule, "first")
             _add_if_present(market_ids, rule, "second")
+    for rule in row.get("exhaustive_groups", []):
+        for market_id in _market_ids_from_group_rule(rule):
+            market_ids.add(market_id)
     if market_ids:
         return market_ids
 
@@ -404,6 +407,15 @@ def _add_if_present(target: set, row: dict, key: str) -> None:
     value = row.get(key)
     if value:
         target.add(str(value))
+
+
+def _market_ids_from_group_rule(rule: dict) -> List[str]:
+    raw_market_ids = rule.get("market_ids")
+    if raw_market_ids is None:
+        raw_market_ids = rule.get("markets")
+    if not isinstance(raw_market_ids, list):
+        return []
+    return [str(market_id) for market_id in raw_market_ids if market_id]
 
 
 def _candidate_is_tradeable_pair(candidate: dict) -> bool:

@@ -9,6 +9,7 @@ from poly_strategy.models import (
     CollectivelyExhaustiveRule,
     ComplementRule,
     EquivalenceRule,
+    ExhaustiveGroupRule,
     ImplicationRule,
     MutualExclusionRule,
     OrderBook,
@@ -20,6 +21,7 @@ from poly_strategy.scanner import (
     find_collectively_exhaustive_arbs,
     find_complement_arbs,
     find_equivalent_arbs,
+    find_exhaustive_group_arbs,
     find_implication_arbs,
     find_mutual_exclusion_basket_arbs,
     find_mutually_exclusive_arbs,
@@ -79,6 +81,7 @@ class RuleSet:
     mutual_exclusions: List[MutualExclusionRule] = field(default_factory=list)
     equivalences: List[EquivalenceRule] = field(default_factory=list)
     collectively_exhaustive: List[CollectivelyExhaustiveRule] = field(default_factory=list)
+    exhaustive_groups: List[ExhaustiveGroupRule] = field(default_factory=list)
     complements: List[ComplementRule] = field(default_factory=list)
 
 
@@ -114,6 +117,7 @@ def load_rule_set(path: Path, min_confidence: float = 0.95) -> RuleSet:
         mutual_exclusions=load_mutually_exclusive_rules(path, min_confidence=min_confidence),
         equivalences=load_equivalence_rules(path, min_confidence=min_confidence),
         collectively_exhaustive=load_collectively_exhaustive_rules(path, min_confidence=min_confidence),
+        exhaustive_groups=load_exhaustive_group_rules(path, min_confidence=min_confidence),
         complements=load_complement_rules(path, min_confidence=min_confidence),
     )
 
@@ -136,6 +140,7 @@ def scan_snapshot_batch(
     opportunities.extend(
         find_collectively_exhaustive_arbs(snapshots, rules.collectively_exhaustive, min_net_edge=min_net_edge)
     )
+    opportunities.extend(find_exhaustive_group_arbs(snapshots, rules.exhaustive_groups, min_net_edge=min_net_edge))
     opportunities.extend(find_complement_arbs(snapshots, rules.complements, min_net_edge=min_net_edge))
     return opportunities
 
@@ -165,6 +170,16 @@ def load_equivalence_rules(path: Path, min_confidence: float = 0.95) -> List[Equ
 
 def load_collectively_exhaustive_rules(path: Path, min_confidence: float = 0.95) -> List[CollectivelyExhaustiveRule]:
     return _load_pair_rules(path, "collectively_exhaustive", CollectivelyExhaustiveRule, min_confidence)
+
+
+def load_exhaustive_group_rules(path: Path, min_confidence: float = 0.95) -> List[ExhaustiveGroupRule]:
+    row = json.loads(path.read_text())
+    rules = []
+    for rule in row.get("exhaustive_groups", []):
+        if not _group_rule_is_tradeable(rule, min_confidence):
+            continue
+        rules.append(ExhaustiveGroupRule(market_ids=_market_ids_from_group_rule(rule)))
+    return rules
 
 
 def load_complement_rules(path: Path, min_confidence: float = 0.95) -> List[ComplementRule]:
@@ -214,6 +229,38 @@ def _rule_is_tradeable(rule: dict, first_key: str, second_key: str, min_confiden
     if "confidence" in rule and float(rule["confidence"]) < min_confidence:
         return False
     return True
+
+
+def _group_rule_is_tradeable(rule: dict, min_confidence: float) -> bool:
+    if len(_market_ids_from_group_rule(rule)) < 2:
+        return False
+    if rule.get("trade_allowed") is False:
+        return False
+    if rule.get("risk_flags"):
+        return False
+    if "confidence" in rule and float(rule["confidence"]) < min_confidence:
+        return False
+    return True
+
+
+def _market_ids_from_group_rule(rule: dict) -> List[str]:
+    raw_market_ids = rule.get("market_ids")
+    if raw_market_ids is None:
+        raw_market_ids = rule.get("markets")
+    if not isinstance(raw_market_ids, list):
+        return []
+
+    market_ids = []
+    seen = set()
+    for value in raw_market_ids:
+        if not value:
+            continue
+        market_id = str(value)
+        if market_id in seen:
+            continue
+        seen.add(market_id)
+        market_ids.append(market_id)
+    return market_ids
 
 
 def _read_binary_snapshots(path: Path) -> Iterable[BinaryMarketSnapshot]:

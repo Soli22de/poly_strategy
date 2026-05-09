@@ -63,6 +63,27 @@ class NearMissTests(unittest.TestCase):
         self.assertTrue(diagnostic["diagnostic_only"])
         self.assertIn("complete collectively exhaustive", diagnostic["risk_note"])
 
+    def test_near_miss_report_includes_verified_exhaustive_groups(self):
+        snapshots = [
+            _row("a", 0.20, 0.82),
+            _row("b", 0.30, 0.72),
+            _row("c", 0.40, 0.62),
+        ]
+        rules_row = {"exhaustive_groups": [{"market_ids": ["a", "b", "c"], "confidence": 0.99}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            rule_path = Path(tmp) / "rules.json"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            rule_path.write_text(json.dumps(rules_row))
+
+            report = near_miss_report(snapshot_path, rule_path, top_n=10)
+
+        rows = [row for row in report["top"] if row["kind"] == "exhaustive_group_yes_basket"]
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["net_edge_per_share"], 0.10)
+        self.assertNotIn("diagnostic_only", rows[0])
+
 
 def _row(market_id: str, yes_price: float, no_price: float):
     return {

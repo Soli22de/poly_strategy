@@ -7,6 +7,7 @@ from poly_strategy.backtest import (
     load_collectively_exhaustive_rules,
     load_complement_rules,
     load_equivalence_rules,
+    load_exhaustive_group_rules,
     load_mutually_exclusive_rules,
     load_rules,
     replay_ndjson,
@@ -270,6 +271,7 @@ class BacktestTests(unittest.TestCase):
                     {
                         "equivalent": [{"first": "a", "second": "b", "confidence": 0.99}],
                         "collectively_exhaustive": [{"first": "c", "second": "d", "confidence": 0.99}],
+                        "exhaustive_groups": [{"market_ids": ["g", "h", "i"], "confidence": 0.99}],
                         "complement": [{"first": "e", "second": "f", "confidence": 0.99}],
                     }
                 )
@@ -277,11 +279,34 @@ class BacktestTests(unittest.TestCase):
 
             equivalents = load_equivalence_rules(path)
             exhaustive = load_collectively_exhaustive_rules(path)
+            exhaustive_groups = load_exhaustive_group_rules(path)
             complements = load_complement_rules(path)
 
         self.assertEqual((equivalents[0].first_market_id, equivalents[0].second_market_id), ("a", "b"))
         self.assertEqual((exhaustive[0].first_market_id, exhaustive[0].second_market_id), ("c", "d"))
+        self.assertEqual(exhaustive_groups[0].market_ids, ["g", "h", "i"])
         self.assertEqual((complements[0].first_market_id, complements[0].second_market_id), ("e", "f"))
+
+    def test_load_exhaustive_group_rules_filters_untradeable_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rules.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "exhaustive_groups": [
+                            {"market_ids": ["a", "b", "a"], "confidence": 0.99},
+                            {"market_ids": ["low", "b"], "confidence": 0.70},
+                            {"market_ids": ["risky", "b"], "confidence": 0.99, "risk_flags": ["ambiguous_wording"]},
+                            {"market_ids": ["single"], "confidence": 0.99},
+                        ]
+                    }
+                )
+            )
+
+            rules = load_exhaustive_group_rules(path, min_confidence=0.95)
+
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0].market_ids, ["a", "b"])
 
     def test_replay_ndjson_scans_implication_rules_per_timestamp_batch(self):
         rows = [
@@ -427,6 +452,51 @@ class BacktestTests(unittest.TestCase):
         basket_opportunities = [opportunity for opportunity in result.opportunities if opportunity.kind == "mutual_exclusion_basket"]
         self.assertEqual(len(basket_opportunities), 1)
         self.assertAlmostEqual(basket_opportunities[0].net_edge_per_share, 1.07)
+
+    def test_replay_ndjson_scans_exhaustive_group_rules_per_timestamp_batch(self):
+        rows = [
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "a",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.20, 100]], "bids": []},
+                "no": {"asks": [[0.80, 100]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "b",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.30, 70]], "bids": []},
+                "no": {"asks": [[0.70, 100]], "bids": []},
+            },
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "c",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.40, 80]], "bids": []},
+                "no": {"asks": [[0.60, 100]], "bids": []},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path = Path(tmp) / "snapshots.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            snapshots_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            rules_path.write_text(json.dumps({"exhaustive_groups": [{"market_ids": ["a", "b", "c"]}]}))
+
+            result = replay_ndjson(snapshots_path, rules_path=rules_path)
+
+        basket_opportunities = [
+            opportunity for opportunity in result.opportunities if opportunity.kind == "exhaustive_group_yes_basket"
+        ]
+        self.assertEqual(len(basket_opportunities), 1)
+        self.assertAlmostEqual(basket_opportunities[0].net_edge_per_share, 0.10)
 
     def test_replay_ndjson_scans_all_pair_relation_rules_per_timestamp_batch(self):
         rows = [

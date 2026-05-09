@@ -71,7 +71,25 @@ Supported deterministic relation formats:
 - `equivalent`: if `A YES iff B YES`, scan both `buy A YES + buy B NO` and `buy B YES + buy A NO`.
 - `mutually_exclusive`: if `A YES` and `B YES` cannot both happen, scan `buy A NO + buy B NO`.
 - `collectively_exhaustive`: if at least one of `A YES` or `B YES` must happen, scan `buy A YES + buy B YES`.
+- `exhaustive_groups`: if a reviewed set is complete and exactly one member must resolve YES, scan `buy all YES` when `sum(YES) < 1 - costs`.
 - `complement`: if exactly one of `A YES` or `B YES` must happen, scan both `YES + YES` and `NO + NO` bundles.
+
+Example exhaustive group rule:
+
+```json
+{
+  "exhaustive_groups": [
+    {
+      "market_ids": ["team-a-wins", "team-b-wins", "team-c-wins"],
+      "confidence": 0.99,
+      "trade_allowed": true,
+      "risk_flags": []
+    }
+  ]
+}
+```
+
+Only add an `exhaustive_groups` entry after verifying the markets are the full outcome set for the same resolution event. Near-miss rows named `potential_exhaustive_yes_basket` are diagnostic only until promoted to this reviewed format.
 
 For incremental discovery, reuse a previous rule file as cache:
 

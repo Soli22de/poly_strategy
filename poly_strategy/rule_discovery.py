@@ -369,6 +369,9 @@ def market_ids_from_rule_row(row: Optional[dict]) -> Set[str]:
         for rule in row.get(section, []):
             _add_market_id(market_ids, rule, "first")
             _add_market_id(market_ids, rule, "second")
+    for rule in row.get("exhaustive_groups", []):
+        for market_id in _market_ids_from_group_rule(rule):
+            market_ids.add(market_id)
     for candidate in row.get("candidates", []):
         _add_market_id(market_ids, candidate, "market_a_id")
         _add_market_id(market_ids, candidate, "market_b_id")
@@ -561,6 +564,15 @@ def _add_market_id(target: Set[str], row: dict, key: str) -> None:
     value = row.get(key)
     if value:
         target.add(str(value))
+
+
+def _market_ids_from_group_rule(rule: dict) -> List[str]:
+    raw_market_ids = rule.get("market_ids")
+    if raw_market_ids is None:
+        raw_market_ids = rule.get("markets")
+    if not isinstance(raw_market_ids, list):
+        return []
+    return [str(market_id) for market_id in raw_market_ids if market_id]
 
 
 def _load_json(path: Optional[Path]) -> Optional[dict]:

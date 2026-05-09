@@ -146,6 +146,21 @@ def near_miss_candidates(
                 )
             )
 
+    for rule in rule_set.exhaustive_groups:
+        if len(rule.market_ids) < 2 or len(set(rule.market_ids)) != len(rule.market_ids):
+            continue
+        group_snapshots = [by_market_id[market_id] for market_id in rule.market_ids if market_id in by_market_id]
+        if len(group_snapshots) != len(rule.market_ids):
+            continue
+        candidates.append(
+            _candidate_row(
+                "exhaustive_group_yes_basket",
+                [(snapshot, "YES", snapshot.yes.asks) for snapshot in group_snapshots],
+                payout_per_share=1.0,
+                min_net_edge=min_net_edge,
+            )
+        )
+
     for rule in rule_set.complements:
         first = by_market_id.get(rule.first_market_id)
         second = by_market_id.get(rule.second_market_id)

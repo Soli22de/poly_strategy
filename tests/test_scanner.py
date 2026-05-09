@@ -5,6 +5,7 @@ from poly_strategy.models import (
     CollectivelyExhaustiveRule,
     ComplementRule,
     EquivalenceRule,
+    ExhaustiveGroupRule,
     ImplicationRule,
     MutualExclusionRule,
     OrderBook,
@@ -16,6 +17,7 @@ from poly_strategy.scanner import (
     find_complement_arbs,
     find_cross_venue_same_binary,
     find_equivalent_arbs,
+    find_exhaustive_group_arbs,
     find_implication_arbs,
     find_mutually_exclusive_arbs,
     find_yes_no_bundle_arbs,
@@ -286,6 +288,52 @@ class ScannerTests(unittest.TestCase):
         self.assertAlmostEqual(opportunities[0].net_edge_per_share, 0.05)
         self.assertEqual(opportunities[0].legs[0].token, "YES")
         self.assertEqual(opportunities[0].legs[1].token, "YES")
+
+    def test_exhaustive_group_arb_buys_all_yes_tokens(self):
+        first = BinaryMarketSnapshot(
+            market_id="a",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.20, 100)], bids=[]),
+            no=OrderBook(asks=[], bids=[]),
+            fee_rate=0.0,
+        )
+        second = BinaryMarketSnapshot(
+            market_id="b",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.30, 70)], bids=[]),
+            no=OrderBook(asks=[], bids=[]),
+            fee_rate=0.0,
+        )
+        third = BinaryMarketSnapshot(
+            market_id="c",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.40, 80)], bids=[]),
+            no=OrderBook(asks=[], bids=[]),
+            fee_rate=0.0,
+        )
+        rule = ExhaustiveGroupRule(["a", "b", "c"])
+
+        opportunities = find_exhaustive_group_arbs([first, second, third], [rule], min_net_edge=0.0)
+
+        self.assertEqual(len(opportunities), 1)
+        opportunity = opportunities[0]
+        self.assertEqual(opportunity.kind, "exhaustive_group_yes_basket")
+        self.assertEqual(opportunity.quantity, 70)
+        self.assertAlmostEqual(opportunity.cost_per_share, 0.90)
+        self.assertAlmostEqual(opportunity.net_edge_per_share, 0.10)
+        self.assertEqual([leg.token for leg in opportunity.legs], ["YES", "YES", "YES"])
+
+    def test_exhaustive_group_arb_rejects_invalid_groups(self):
+        snapshot = BinaryMarketSnapshot(
+            market_id="a",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.20, 100)], bids=[]),
+            no=OrderBook(asks=[], bids=[]),
+            fee_rate=0.0,
+        )
+
+        self.assertEqual(find_exhaustive_group_arbs([snapshot], [ExhaustiveGroupRule([])]), [])
+        self.assertEqual(find_exhaustive_group_arbs([snapshot], [ExhaustiveGroupRule(["a", "a"])]), [])
 
     def test_complement_arb_checks_yes_bundle_and_no_bundle(self):
         first = BinaryMarketSnapshot(

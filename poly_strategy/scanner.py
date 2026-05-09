@@ -7,6 +7,7 @@ from poly_strategy.models import (
     CollectivelyExhaustiveRule,
     ComplementRule,
     EquivalenceRule,
+    ExhaustiveGroupRule,
     ImplicationRule,
     Leg,
     MutualExclusionRule,
@@ -159,6 +160,20 @@ def find_collectively_exhaustive_arbs(
     return opportunities
 
 
+def find_exhaustive_group_arbs(
+    snapshots: List[BinaryMarketSnapshot],
+    rules: List[ExhaustiveGroupRule],
+    min_net_edge: float = 0.0,
+) -> List[Opportunity]:
+    by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
+    opportunities = []
+    for rule in rules:
+        opportunity = _exhaustive_group_candidate(rule.market_ids, by_market_id, min_net_edge)
+        if opportunity is not None:
+            opportunities.append(opportunity)
+    return opportunities
+
+
 def find_complement_arbs(
     snapshots: List[BinaryMarketSnapshot],
     rules: List[ComplementRule],
@@ -247,6 +262,27 @@ def _mutual_exclusion_basket_candidate(
         kind="mutual_exclusion_basket",
         leg_specs=[(snapshot, "NO", snapshot.no.asks) for snapshot in snapshots],
         payout_per_share=len(snapshots) - 1,
+        min_net_edge=min_net_edge,
+        ts=snapshots[0].ts,
+    )
+
+
+def _exhaustive_group_candidate(
+    market_ids: List[str],
+    by_market_id: dict,
+    min_net_edge: float,
+) -> Optional[Opportunity]:
+    if len(market_ids) < 2 or len(set(market_ids)) != len(market_ids):
+        return None
+
+    snapshots = [by_market_id[market_id] for market_id in market_ids if market_id in by_market_id]
+    if len(snapshots) != len(market_ids):
+        return None
+
+    return _bundle_candidate(
+        kind="exhaustive_group_yes_basket",
+        leg_specs=[(snapshot, "YES", snapshot.yes.asks) for snapshot in snapshots],
+        payout_per_share=1.0,
         min_net_edge=min_net_edge,
         ts=snapshots[0].ts,
     )

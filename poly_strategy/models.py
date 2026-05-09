@@ -49,6 +49,11 @@ class CollectivelyExhaustiveRule:
 
 
 @dataclass(frozen=True)
+class ExhaustiveGroupRule:
+    market_ids: List[str]
+
+
+@dataclass(frozen=True)
 class ComplementRule:
     first_market_id: str
     second_market_id: str

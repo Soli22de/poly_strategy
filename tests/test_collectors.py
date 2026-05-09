@@ -171,6 +171,7 @@ class CollectorTests(unittest.TestCase):
                         "mutually_exclusive": [{"first": "c", "second": "d"}],
                         "equivalent": [{"first": "e", "second": "f"}],
                         "collectively_exhaustive": [{"first": "g", "second": "h"}],
+                        "exhaustive_groups": [{"market_ids": ["m", "n", "o"]}],
                         "complement": [{"first": "i", "second": "j"}],
                         "candidates": [{"market_a_id": "k", "market_b_id": "l"}],
                     }
@@ -179,7 +180,7 @@ class CollectorTests(unittest.TestCase):
 
             market_ids = market_ids_from_rule_file(path)
 
-        self.assertEqual(market_ids, {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"})
+        self.assertEqual(market_ids, {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "m", "n", "o"})
 
     def test_market_ids_from_rule_file_falls_back_to_clean_pair_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
