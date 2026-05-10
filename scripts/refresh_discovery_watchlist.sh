@@ -102,6 +102,11 @@ else:
 PY
 }
 
+safe_discovery_error_count() {
+  local path="$1"
+  discovery_error_count "$path" 2>/dev/null || echo 999999
+}
+
 run_with_timeout() {
   local limit_seconds="$1"
   shift
@@ -327,23 +332,28 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
     stage_out="$(mktemp "${RULES}.tmp.XXXXXX")"
     tmp_paths+=("$stage_out")
     command_timeout="$(provider_command_timeout "$api_mode")"
+    previous_errors="$(safe_discovery_error_count "$current_cache")"
     set +e
     run_with_timeout "$command_timeout" run_discovery_provider "$label" "$model" "$base_url" "$api_mode" "$api_key" "$current_cache" "$stage_out"
     status=$?
     set -e
     stage_used=0
-    if [[ "$status" == "0" || -s "$stage_out" ]]; then
+    stage_errors="unknown"
+    if [[ -s "$stage_out" ]]; then
+      stage_errors="$(safe_discovery_error_count "$stage_out")"
+    fi
+    if [[ -s "$stage_out" && "$stage_errors" != "999999" && ( "$status" == "0" || "$stage_errors" -le "$previous_errors" ) ]]; then
       current_cache="$stage_out"
       current_rules="$stage_out"
       stage_used=1
     fi
     final_status="$status"
     if [[ "$stage_used" == "0" ]]; then
-      echo "discover_provider_done label=$label status=$status unresolved_errors=unknown output_written=0"
+      echo "discover_provider_done label=$label status=$status unresolved_errors=$stage_errors previous_errors=$previous_errors output_written=0"
       continue
     fi
-    errors="$(discovery_error_count "$current_cache")"
-    echo "discover_provider_done label=$label status=$status unresolved_errors=$errors output_written=1"
+    errors="$stage_errors"
+    echo "discover_provider_done label=$label status=$status unresolved_errors=$errors previous_errors=$previous_errors output_written=1"
     if [[ "$errors" == "0" ]]; then
       final_status=0
       break
