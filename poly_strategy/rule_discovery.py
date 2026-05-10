@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Set
+from typing import Iterable, List, Mapping, Optional, Sequence, Set
 
 
 @dataclass(frozen=True)
@@ -103,10 +103,11 @@ def filter_implications(
     candidates: Iterable[RelationCandidate],
     known_market_ids: Set[str],
     min_confidence: float,
+    markets_by_id: Optional[Mapping[str, MarketText]] = None,
 ) -> List[DiscoveredImplication]:
     implications = []
     for candidate in candidates:
-        implication = _implication_from_candidate(candidate, known_market_ids, min_confidence)
+        implication = _implication_from_candidate(candidate, known_market_ids, min_confidence, markets_by_id)
         if implication is not None:
             implications.append(implication)
     return sorted(implications, key=lambda rule: (rule.antecedent, rule.consequent))
@@ -336,7 +337,8 @@ def discover_rules(
     llm_candidates = _ordered_batch_candidates(batch_results)
     unresolved_errors = _unresolved_discovery_errors(discovery_errors, completed_market_ids)
     candidates = _merge_candidates(deterministic_candidates + llm_candidates, cache_row.get("candidates", []) if cache_row else [])
-    implications = filter_implications(candidates, known_market_ids, min_confidence)
+    markets_by_id = {market.market_id: market for market in markets}
+    implications = filter_implications(candidates, known_market_ids, min_confidence, markets_by_id)
     mutual_exclusions = filter_mutual_exclusions(candidates, known_market_ids, min_confidence)
     equivalents = filter_equivalents(candidates, known_market_ids, min_confidence)
     collectively_exhaustive = filter_collectively_exhaustive(candidates, known_market_ids, min_confidence)
@@ -383,7 +385,12 @@ def _write_rules_checkpoint(
         generated_at=generated_at,
         min_confidence=min_confidence,
         candidates=candidates,
-        implications=filter_implications(candidates, known_market_ids, min_confidence),
+        implications=filter_implications(
+            candidates,
+            known_market_ids,
+            min_confidence,
+            {market.market_id: market for market in markets},
+        ),
         processed_market_ids=sorted(processed_market_ids),
         mutual_exclusions=filter_mutual_exclusions(candidates, known_market_ids, min_confidence),
         equivalents=filter_equivalents(candidates, known_market_ids, min_confidence),
@@ -616,6 +623,7 @@ def _implication_from_candidate(
     candidate: RelationCandidate,
     known_market_ids: Set[str],
     min_confidence: float,
+    markets_by_id: Optional[Mapping[str, MarketText]] = None,
 ) -> Optional[DiscoveredImplication]:
     if candidate.relation_type != "implies":
         return None
@@ -628,6 +636,8 @@ def _implication_from_candidate(
     if candidate.market_a_id not in known_market_ids or candidate.market_b_id not in known_market_ids:
         return None
     if candidate.market_a_id == candidate.market_b_id:
+        return None
+    if _same_neg_risk_distinct_group_items(candidate.market_a_id, candidate.market_b_id, markets_by_id):
         return None
 
     if candidate.direction == "a_implies_b":
@@ -646,6 +656,24 @@ def _implication_from_candidate(
         source_relation=candidate.relation_type,
         reason=candidate.reason,
     )
+
+
+def _same_neg_risk_distinct_group_items(
+    market_a_id: str,
+    market_b_id: str,
+    markets_by_id: Optional[Mapping[str, MarketText]],
+) -> bool:
+    if not markets_by_id:
+        return False
+    first = markets_by_id.get(market_a_id)
+    second = markets_by_id.get(market_b_id)
+    if first is None or second is None:
+        return False
+    if not first.neg_risk_market_id or first.neg_risk_market_id != second.neg_risk_market_id:
+        return False
+    if not first.group_item_title or not second.group_item_title:
+        return False
+    return first.group_item_title != second.group_item_title
 
 
 def _mutual_exclusion_from_candidate(

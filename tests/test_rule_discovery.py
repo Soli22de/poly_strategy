@@ -181,6 +181,50 @@ class RuleDiscoveryTests(unittest.TestCase):
 
         self.assertEqual([(rule.antecedent, rule.consequent) for rule in implications], [("a", "b"), ("d", "c")])
 
+    def test_filter_implications_rejects_distinct_neg_risk_group_items(self):
+        candidates = [
+            RelationCandidate(
+                "implies",
+                "a",
+                "b",
+                "a_implies_b",
+                0.99,
+                True,
+                [],
+                "A winning implies B does not win",
+            )
+        ]
+        markets = {
+            "a": MarketText(
+                "a",
+                "Will A win?",
+                "",
+                ["Yes", "No"],
+                "",
+                "",
+                "",
+                neg_risk=True,
+                neg_risk_market_id="group",
+                group_item_title="A",
+            ),
+            "b": MarketText(
+                "b",
+                "Will B win?",
+                "",
+                ["Yes", "No"],
+                "",
+                "",
+                "",
+                neg_risk=True,
+                neg_risk_market_id="group",
+                group_item_title="B",
+            ),
+        }
+
+        implications = filter_implications(candidates, {"a", "b"}, min_confidence=0.95, markets_by_id=markets)
+
+        self.assertEqual(implications, [])
+
     def test_filter_mutual_exclusions_accepts_only_clean_candidates(self):
         candidates = [
             RelationCandidate("mutually_exclusive", "a", "b", "none", 0.99, True, [], "a and b cannot both win"),
