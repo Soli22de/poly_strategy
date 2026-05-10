@@ -206,7 +206,7 @@ case "$COMMAND" in
 
     ALERT_INTERVAL="${ALERT_INTERVAL:-60}"
     ANALYSIS_INTERVAL="${ANALYSIS_INTERVAL:-900}"
-    ROTATION_INTERVAL="${ROTATION_INTERVAL:-1800}"
+    ROTATION_INTERVAL="${ROTATION_INTERVAL:-300}"
     EXTERNAL_SIGNALS_INTERVAL="${EXTERNAL_SIGNALS_INTERVAL:-3600}"
     DISCOVERY_INTERVAL="${DISCOVERY_INTERVAL:-3600}"
     RULE_PROMOTION_INTERVAL="${RULE_PROMOTION_INTERVAL:-1800}"
@@ -223,6 +223,7 @@ case "$COMMAND" in
 
     WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
     RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
+    DATA_MAX_BYTES="${DATA_MAX_BYTES:-52428800}"
 
     next_alert=0
     next_analysis=0
@@ -252,13 +253,6 @@ case "$COMMAND" in
         next_analysis=$((now + ANALYSIS_INTERVAL))
       fi
 
-      if [[ "$ENABLE_DATA_ROTATION" == "1" && "$now" -ge "$next_rotation" ]]; then
-        run_logged data-rotation env DATA_DIR=data MAX_BYTES=104857600 RETENTION_DAYS=7 INCLUDE_REPORTS=1 scripts/rotate_data.sh
-        run_logged data-prune env DATA_DIR=data DATED_CACHE_RETENTION_DAYS=7 GZIP_RETENTION_DAYS=7 scripts/prune_data_artifacts.sh
-        run_logged data-compact env GAMMA=data/polymarket-gamma.ndjson EXTERNAL_SIGNALS=data/external-signals.ndjson MAX_EXTERNAL_SIGNAL_LINES=2000 scripts/compact_data_caches.sh
-        next_rotation=$((now + ROTATION_INTERVAL))
-      fi
-
       if [[ "$ENABLE_EXTERNAL_SIGNALS" == "1" && "$now" -ge "$next_external" ]]; then
         run_logged external-signals scripts/refresh_external_signals.sh
         next_external=$((now + EXTERNAL_SIGNALS_INTERVAL))
@@ -266,7 +260,7 @@ case "$COMMAND" in
 
       if [[ "$ENABLE_DISCOVERY_REFRESH" == "1" && "$now" -ge "$next_discovery" ]]; then
         before_sig="$(file_sig "$WATCHLIST")"
-        run_logged discovery-refresh env RESTART_ON_CHANGE=0 LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-300}" scripts/refresh_discovery_watchlist.sh
+        run_logged discovery-refresh env RESTART_ON_CHANGE=0 LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-60}" scripts/refresh_discovery_watchlist.sh
         after_sig="$(file_sig "$WATCHLIST")"
         if [[ "$before_sig" != "$after_sig" ]]; then
           restart_monitor
@@ -276,13 +270,20 @@ case "$COMMAND" in
 
       if [[ "$ENABLE_RULE_PROMOTION" == "1" && "$now" -ge "$next_promotion" ]]; then
         before_rules="$(file_sig "$RULES")"
-        run_logged rule-promotion env REBUILD_WATCHLIST_ON_ADD=0 COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-180}" scripts/run_rule_promotion_once.sh
+        run_logged rule-promotion env REBUILD_WATCHLIST_ON_ADD=0 COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-60}" scripts/run_rule_promotion_once.sh
         after_rules="$(file_sig "$RULES")"
         if [[ "$before_rules" != "$after_rules" ]]; then
           run_logged watchlist-after-promotion env SKIP_GAMMA=1 SKIP_LLM=1 RESTART_ON_CHANGE=0 scripts/refresh_discovery_watchlist.sh
           restart_monitor
         fi
         next_promotion=$((now + RULE_PROMOTION_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_DATA_ROTATION" == "1" && "$now" -ge "$next_rotation" ]]; then
+        run_logged data-rotation env DATA_DIR=data MAX_BYTES="$DATA_MAX_BYTES" RETENTION_DAYS=7 INCLUDE_REPORTS=1 scripts/rotate_data.sh
+        run_logged data-prune env DATA_DIR=data DATED_CACHE_RETENTION_DAYS=7 GZIP_RETENTION_DAYS=7 scripts/prune_data_artifacts.sh
+        run_logged data-compact env GAMMA=data/polymarket-gamma.ndjson EXTERNAL_SIGNALS=data/external-signals.ndjson MAX_EXTERNAL_SIGNAL_LINES=2000 scripts/compact_data_caches.sh
+        next_rotation=$((now + ROTATION_INTERVAL))
       fi
 
       sleep "$LOOP_SLEEP"
