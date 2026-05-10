@@ -142,6 +142,10 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - A maker buy leg counts as possibly filled only if a later snapshot shows `best_ask <= our_limit`.
   - Current short-window result: no completed fills observed yet.
   - This means the maker candidates are currently theoretical only; they need longer paper observation or different quote logic before live use.
+- [x] Added adaptive maker quote simulation.
+  - Compares near-ask offsets of 1/2/3/5/10 ticks plus bid-improvement quotes.
+  - Ranks each quote config by conservative risk-adjusted EV: completed edge minus a configurable haircut for partial-fill capital.
+  - Current short-window result with a $100 cap: no positive-EV quote config; near-ask offsets showed partial fills without complete basket fills, which is a strong live-trading rejection signal.
 
 ## Current Profitability Status
 
@@ -154,7 +158,7 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
 - [ ] Keep the realtime monitor running in paper mode and collect at least 24 hours of stable-paper-trade evidence before enabling any live order path.
 - [x] Add a maker-order research module that computes passive bid limits for complete/neg-risk baskets; this is not pure arbitrage and stays dry-run until fill/reconciliation risk is modeled.
 - [x] Add maker fill simulation from WebSocket/snapshot deltas so candidates are ranked by realized fill probability, not only theoretical edge.
-- [ ] Add adaptive quote placement that compares near-ask edge against observed fill probability and rejects expected-value-negative quotes.
+- [x] Add adaptive quote placement that compares near-ask edge against observed fill probability and rejects expected-value-negative quotes.
 - [ ] Improve cross-platform matching beyond token Jaccard by adding event/category filters and rejecting Kalshi multi-leg combo markets before LLM verification.
 - [ ] Add ROI-first opportunity ranking so small-bankroll alerts prioritize executable dollars and not only edge per share.
 - [x] Add a compact latest-snapshot store so wide probes can be run without writing tens of MB per minute.

@@ -54,7 +54,7 @@ from poly_strategy.external_signals import (
     polymarket_market_ids_from_external_signals,
 )
 from poly_strategy.exhaustive_groups import promotion_candidate_count, promote_exhaustive_groups, result_to_row
-from poly_strategy.maker import maker_fill_sim_report, maker_scan_report
+from poly_strategy.maker import maker_adaptive_quote_report, maker_fill_sim_report, maker_scan_report
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
@@ -300,6 +300,7 @@ def main(argv=None) -> int:
                 top_n=args.top,
                 include_yes_no_pairs=args.include_yes_no_pairs,
                 quote_mode=args.quote_mode,
+                quote_offset_ticks=args.quote_offset_ticks,
             )
             if args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -319,6 +320,7 @@ def main(argv=None) -> int:
                 max_capital=args.max_capital,
                 max_leg_count=args.max_leg_count,
                 quote_mode=args.quote_mode,
+                quote_offset_ticks=args.quote_offset_ticks,
                 horizon_seconds=args.horizon_seconds,
                 max_candidates_per_batch=args.max_candidates_per_batch,
                 top_n=args.top,
@@ -330,6 +332,37 @@ def main(argv=None) -> int:
                 print(
                     f"observations={row['candidate_observation_count']} completed={row['completed_count']} "
                     f"partial={row['partial_count']} out={args.out}"
+                )
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "maker-adaptive-sim":
+            row = maker_adaptive_quote_report(
+                Path(args.snapshots),
+                rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
+                tick_size=args.tick_size,
+                min_edge=args.min_edge,
+                min_roi=args.min_roi,
+                max_capital=args.max_capital,
+                max_leg_count=args.max_leg_count,
+                quote_offset_ticks_options=_parse_int_csv(args.quote_offset_ticks),
+                include_improve_bid=not args.no_improve_bid,
+                horizon_seconds=args.horizon_seconds,
+                max_candidates_per_batch=args.max_candidates_per_batch,
+                top_n=args.top,
+                include_yes_no_pairs=args.include_yes_no_pairs,
+                partial_loss_rate=args.partial_loss_rate,
+                min_observations=args.min_observations,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                recommendation = row.get("recommended_config") or {}
+                print(
+                    f"status={row['status']} configs={len(row['ranked_configs'])} "
+                    f"recommended={recommendation.get('quote_mode')}:{recommendation.get('quote_offset_ticks')} "
+                    f"out={args.out}"
                 )
             else:
                 print(json.dumps(row, sort_keys=True))
@@ -1021,6 +1054,12 @@ def _build_parser() -> argparse.ArgumentParser:
     maker_scan.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk groups")
     maker_scan.add_argument("--out", help="output maker scan JSON path; prints JSON when omitted")
     maker_scan.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
+    maker_scan.add_argument(
+        "--quote-offset-ticks",
+        type=int,
+        default=1,
+        help="for near_ask, quote this many ticks below best ask",
+    )
     maker_scan.add_argument("--min-edge", type=float, default=0.0, help="minimum maker edge per completed bundle")
     maker_scan.add_argument("--min-roi", type=float, help="minimum maker ROI per completed bundle")
     maker_scan.add_argument("--max-capital", type=float, help="capital cap used for suggested quantity and expected edge")
@@ -1048,6 +1087,12 @@ def _build_parser() -> argparse.ArgumentParser:
     maker_fill.add_argument("--out", help="output maker fill simulation JSON path; prints JSON when omitted")
     maker_fill.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
     maker_fill.add_argument("--quote-mode", choices=["near_ask", "improve_bid"], default="near_ask")
+    maker_fill.add_argument(
+        "--quote-offset-ticks",
+        type=int,
+        default=1,
+        help="for near_ask, quote this many ticks below best ask",
+    )
     maker_fill.add_argument("--min-edge", type=float, default=0.0, help="minimum maker edge per completed bundle")
     maker_fill.add_argument("--min-roi", type=float, help="minimum maker ROI per completed bundle")
     maker_fill.add_argument("--max-capital", type=float, help="capital cap used for suggested quantity and expected edge")
@@ -1056,6 +1101,41 @@ def _build_parser() -> argparse.ArgumentParser:
     maker_fill.add_argument("--max-candidates-per-batch", type=int, default=25, help="top maker candidates to simulate per timestamp")
     maker_fill.add_argument("--top", type=int, default=25, help="top fill results to include")
     maker_fill.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired maker quotes")
+
+    maker_adaptive = subparsers.add_parser(
+        "maker-adaptive-sim",
+        help="compare passive maker quote offsets by historical fill and conservative EV",
+    )
+    maker_adaptive.add_argument("--snapshots", required=True, help="historical binary snapshot NDJSON path")
+    maker_adaptive.add_argument("--rules", help="JSON file with discovered rules")
+    maker_adaptive.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk groups")
+    maker_adaptive.add_argument("--out", help="output adaptive maker simulation JSON path; prints JSON when omitted")
+    maker_adaptive.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
+    maker_adaptive.add_argument(
+        "--quote-offset-ticks",
+        default="1,2,3,5,10",
+        help="comma-separated near_ask quote offsets to compare",
+    )
+    maker_adaptive.add_argument("--no-improve-bid", action="store_true", help="do not include bid-plus-one-tick quotes")
+    maker_adaptive.add_argument("--min-edge", type=float, default=0.0, help="minimum maker edge per completed bundle")
+    maker_adaptive.add_argument("--min-roi", type=float, help="minimum maker ROI per completed bundle")
+    maker_adaptive.add_argument(
+        "--max-capital",
+        type=float,
+        help="capital cap used for suggested quantity, edge, and partial-fill risk",
+    )
+    maker_adaptive.add_argument("--max-leg-count", type=int, default=30, help="maximum basket leg count")
+    maker_adaptive.add_argument("--horizon-seconds", type=float, default=300.0, help="seconds after quote time to look for fills")
+    maker_adaptive.add_argument(
+        "--max-candidates-per-batch",
+        type=int,
+        default=25,
+        help="top maker candidates to simulate per timestamp and quote config",
+    )
+    maker_adaptive.add_argument("--partial-loss-rate", type=float, default=1.0, help="capital haircut for partial maker fills")
+    maker_adaptive.add_argument("--min-observations", type=int, default=5, help="minimum observations required to recommend a config")
+    maker_adaptive.add_argument("--top", type=int, default=25, help="top quote configs to include")
+    maker_adaptive.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired maker quotes")
 
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")
@@ -1970,6 +2050,21 @@ def _write_jsonl_or_stdout(rows: list, out: str) -> None:
     else:
         for row in rows:
             print(json.dumps(row, sort_keys=True))
+
+
+def _parse_int_csv(value: str) -> list:
+    rows = []
+    for raw_item in str(value or "").split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            rows.append(int(item))
+        except ValueError as exc:
+            raise ValueError(f"expected comma-separated integers, got {value!r}") from exc
+    if not rows:
+        raise ValueError("expected at least one integer")
+    return rows
 
 
 def _headers_from_args(values: list) -> dict:

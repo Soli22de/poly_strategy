@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from poly_strategy.backtest import RuleSet, load_rule_set, snapshots_from_ndjson_lines
 from poly_strategy.models import BinaryMarketSnapshot, OrderBook
@@ -20,6 +20,7 @@ def maker_scan_report(
     top_n: int = 25,
     include_yes_no_pairs: bool = False,
     quote_mode: str = "near_ask",
+    quote_offset_ticks: int = 1,
 ) -> dict:
     if tick_size <= 0:
         raise ValueError("tick_size must be positive")
@@ -31,6 +32,7 @@ def maker_scan_report(
         raise ValueError("min_roi must be non-negative")
     if max_capital is not None and max_capital < 0:
         raise ValueError("max_capital must be non-negative")
+    quote_offset_ticks = _normalize_quote_offset_ticks(quote_offset_ticks)
 
     snapshots = latest_snapshot_batch(snapshots_path)
     rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
@@ -44,6 +46,7 @@ def maker_scan_report(
         max_leg_count=max_leg_count,
         include_yes_no_pairs=include_yes_no_pairs,
         quote_mode=quote_mode,
+        quote_offset_ticks=quote_offset_ticks,
     )
     return {
         "type": "maker_scan_report",
@@ -58,6 +61,7 @@ def maker_scan_report(
         "max_capital": max_capital,
         "max_leg_count": max_leg_count,
         "quote_mode": _normalize_quote_mode(quote_mode),
+        "quote_offset_ticks": quote_offset_ticks,
         "candidate_count": len(candidates),
         "by_kind": _summary_by_kind(candidates),
         "top": candidates[:top_n],
@@ -78,35 +82,40 @@ def maker_fill_sim_report(
     max_candidates_per_batch: int = 25,
     top_n: int = 25,
     include_yes_no_pairs: bool = False,
+    quote_offset_ticks: int = 1,
 ) -> dict:
+    if tick_size <= 0:
+        raise ValueError("tick_size must be positive")
+    if max_leg_count < 2:
+        raise ValueError("max_leg_count must be at least 2")
+    if min_roi is not None and min_roi < 0:
+        raise ValueError("min_roi must be non-negative")
+    if max_capital is not None and max_capital < 0:
+        raise ValueError("max_capital must be non-negative")
     if horizon_seconds < 0:
         raise ValueError("horizon_seconds must be non-negative")
     if max_candidates_per_batch < 1:
         raise ValueError("max_candidates_per_batch must be at least 1")
     if top_n < 0:
         raise ValueError("top_n must be non-negative")
+    quote_offset_ticks = _normalize_quote_offset_ticks(quote_offset_ticks)
 
     rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
     batches = list(snapshot_batches_from_path(snapshots_path))
-    results = []
-    for index, batch in enumerate(batches[:-1]):
-        candidates = scan_maker_candidates(
-            batch,
-            rule_set,
-            tick_size=tick_size,
-            min_edge=min_edge,
-            min_roi=min_roi,
-            max_capital=max_capital,
-            max_leg_count=max_leg_count,
-            include_yes_no_pairs=include_yes_no_pairs,
-            quote_mode=quote_mode,
-        )
-        candidates = _dedupe_sim_candidates(candidates)[:max_candidates_per_batch]
-        if not candidates:
-            continue
-        future_batches = _future_batches_within_horizon(batches, index, horizon_seconds)
-        for candidate in candidates:
-            results.append(_simulate_candidate_fills(candidate, future_batches))
+    results = simulate_maker_fills(
+        batches,
+        rule_set,
+        tick_size=tick_size,
+        min_edge=min_edge,
+        min_roi=min_roi,
+        max_capital=max_capital,
+        max_leg_count=max_leg_count,
+        quote_mode=quote_mode,
+        quote_offset_ticks=quote_offset_ticks,
+        horizon_seconds=horizon_seconds,
+        max_candidates_per_batch=max_candidates_per_batch,
+        include_yes_no_pairs=include_yes_no_pairs,
+    )
 
     completed = [row for row in results if row["completed"]]
     partial = [row for row in results if row["partial_fill"] and not row["completed"]]
@@ -125,11 +134,144 @@ def maker_fill_sim_report(
         "partial_rate": len(partial) / len(results) if results else 0.0,
         "completed_expected_edge_at_cap": sum(float(row.get("expected_edge_at_cap") or 0.0) for row in completed),
         "max_completed_expected_edge_at_cap": max((float(row.get("expected_edge_at_cap") or 0.0) for row in completed), default=0.0),
+        "quote_mode": _normalize_quote_mode(quote_mode),
+        "quote_offset_ticks": quote_offset_ticks,
         "by_kind": _fill_summary_by_kind(results),
         "top_completed": sorted(completed, key=_fill_result_sort_key)[:top_n],
         "top_partial": sorted(partial, key=_fill_result_sort_key)[:top_n],
         "top_unfilled": sorted(no_fill, key=_fill_result_sort_key)[:top_n],
     }
+
+
+def maker_adaptive_quote_report(
+    snapshots_path: Path,
+    rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
+    tick_size: float = 0.001,
+    min_edge: float = 0.0,
+    min_roi: Optional[float] = None,
+    max_capital: Optional[float] = None,
+    max_leg_count: int = 30,
+    quote_offset_ticks_options: Optional[Sequence[int]] = None,
+    include_improve_bid: bool = True,
+    horizon_seconds: float = 300.0,
+    max_candidates_per_batch: int = 25,
+    top_n: int = 25,
+    include_yes_no_pairs: bool = False,
+    partial_loss_rate: float = 1.0,
+    min_observations: int = 5,
+) -> dict:
+    if tick_size <= 0:
+        raise ValueError("tick_size must be positive")
+    if max_leg_count < 2:
+        raise ValueError("max_leg_count must be at least 2")
+    if min_roi is not None and min_roi < 0:
+        raise ValueError("min_roi must be non-negative")
+    if max_capital is not None and max_capital < 0:
+        raise ValueError("max_capital must be non-negative")
+    if horizon_seconds < 0:
+        raise ValueError("horizon_seconds must be non-negative")
+    if max_candidates_per_batch < 1:
+        raise ValueError("max_candidates_per_batch must be at least 1")
+    if top_n < 0:
+        raise ValueError("top_n must be non-negative")
+    if partial_loss_rate < 0:
+        raise ValueError("partial_loss_rate must be non-negative")
+    if min_observations < 0:
+        raise ValueError("min_observations must be non-negative")
+
+    offsets = _normalize_quote_offset_ticks_options(quote_offset_ticks_options)
+    configs = [{"quote_mode": "near_ask", "quote_offset_ticks": offset} for offset in offsets]
+    if include_improve_bid:
+        configs.append({"quote_mode": "improve_bid", "quote_offset_ticks": 1})
+
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
+    batches = list(snapshot_batches_from_path(snapshots_path))
+    rows = []
+    for config in configs:
+        results = simulate_maker_fills(
+            batches,
+            rule_set,
+            tick_size=tick_size,
+            min_edge=min_edge,
+            min_roi=min_roi,
+            max_capital=max_capital,
+            max_leg_count=max_leg_count,
+            quote_mode=config["quote_mode"],
+            quote_offset_ticks=config["quote_offset_ticks"],
+            horizon_seconds=horizon_seconds,
+            max_candidates_per_batch=max_candidates_per_batch,
+            include_yes_no_pairs=include_yes_no_pairs,
+        )
+        rows.append(_adaptive_config_summary(config, results, partial_loss_rate))
+
+    ranked = sorted(rows, key=_adaptive_config_sort_key)
+    recommended = next(
+        (
+            row
+            for row in ranked
+            if row["candidate_observation_count"] >= min_observations
+            and row["risk_adjusted_total_ev_at_cap"] > 0
+            and row["completed_count"] > 0
+        ),
+        None,
+    )
+    return {
+        "type": "maker_adaptive_quote_report",
+        "snapshots_path": str(snapshots_path),
+        "rules_path": str(rules_path) if rules_path else None,
+        "gamma_path": str(gamma_path) if gamma_path else None,
+        "batch_count": len(batches),
+        "tick_size": tick_size,
+        "min_edge": min_edge,
+        "min_roi": min_roi,
+        "max_capital": max_capital,
+        "max_leg_count": max_leg_count,
+        "horizon_seconds": horizon_seconds,
+        "max_candidates_per_batch": max_candidates_per_batch,
+        "partial_loss_rate": partial_loss_rate,
+        "min_observations": min_observations,
+        "status": "positive_ev_config_found" if recommended else "no_positive_ev_config",
+        "recommended_config": recommended,
+        "ranked_configs": ranked[:top_n],
+    }
+
+
+def simulate_maker_fills(
+    batches: List[List[BinaryMarketSnapshot]],
+    rule_set: RuleSet,
+    tick_size: float = 0.001,
+    min_edge: float = 0.0,
+    min_roi: Optional[float] = None,
+    max_capital: Optional[float] = None,
+    max_leg_count: int = 30,
+    quote_mode: str = "near_ask",
+    quote_offset_ticks: int = 1,
+    horizon_seconds: float = 300.0,
+    max_candidates_per_batch: int = 25,
+    include_yes_no_pairs: bool = False,
+) -> List[dict]:
+    results = []
+    for index, batch in enumerate(batches[:-1]):
+        candidates = scan_maker_candidates(
+            batch,
+            rule_set,
+            tick_size=tick_size,
+            min_edge=min_edge,
+            min_roi=min_roi,
+            max_capital=max_capital,
+            max_leg_count=max_leg_count,
+            include_yes_no_pairs=include_yes_no_pairs,
+            quote_mode=quote_mode,
+            quote_offset_ticks=quote_offset_ticks,
+        )
+        candidates = _dedupe_sim_candidates(candidates)[:max_candidates_per_batch]
+        if not candidates:
+            continue
+        future_batches = _future_batches_within_horizon(batches, index, horizon_seconds)
+        for candidate in candidates:
+            results.append(_simulate_candidate_fills(candidate, future_batches))
+    return results
 
 
 def scan_maker_candidates(
@@ -142,8 +284,18 @@ def scan_maker_candidates(
     max_leg_count: int = 30,
     include_yes_no_pairs: bool = False,
     quote_mode: str = "near_ask",
+    quote_offset_ticks: int = 1,
 ) -> List[dict]:
+    if tick_size <= 0:
+        raise ValueError("tick_size must be positive")
+    if max_leg_count < 2:
+        raise ValueError("max_leg_count must be at least 2")
+    if min_roi is not None and min_roi < 0:
+        raise ValueError("min_roi must be non-negative")
+    if max_capital is not None and max_capital < 0:
+        raise ValueError("max_capital must be non-negative")
     quote_mode = _normalize_quote_mode(quote_mode)
+    quote_offset_ticks = _normalize_quote_offset_ticks(quote_offset_ticks)
     by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
     rows = []
 
@@ -158,6 +310,7 @@ def scan_maker_candidates(
                 min_roi=min_roi,
                 max_capital=max_capital,
                 quote_mode=quote_mode,
+                quote_offset_ticks=quote_offset_ticks,
             )
             if row:
                 rows.append(row)
@@ -178,6 +331,7 @@ def scan_maker_candidates(
             min_roi=min_roi,
             max_capital=max_capital,
             quote_mode=quote_mode,
+            quote_offset_ticks=quote_offset_ticks,
             extra={"neg_risk_market_id": rule.neg_risk_market_id},
         )
         if row:
@@ -194,6 +348,7 @@ def scan_maker_candidates(
             min_roi=min_roi,
             max_capital=max_capital,
             quote_mode=quote_mode,
+            quote_offset_ticks=quote_offset_ticks,
         )
         if row:
             rows.append(row)
@@ -214,6 +369,7 @@ def scan_maker_candidates(
             min_roi=min_roi,
             max_capital=max_capital,
             quote_mode=quote_mode,
+            quote_offset_ticks=quote_offset_ticks,
         )
         if row:
             rows.append(row)
@@ -254,6 +410,7 @@ def _maker_candidate_row(
     min_roi: Optional[float],
     max_capital: Optional[float],
     quote_mode: str,
+    quote_offset_ticks: int,
     extra: Optional[dict] = None,
 ) -> Optional[dict]:
     if len(leg_specs) < 2:
@@ -261,7 +418,7 @@ def _maker_candidate_row(
     passive_legs = []
     cost = 0.0
     for snapshot, token in leg_specs:
-        leg = _passive_buy_leg(snapshot, token, tick_size, quote_mode)
+        leg = _passive_buy_leg(snapshot, token, tick_size, quote_mode, quote_offset_ticks)
         if leg is None:
             return None
         passive_legs.append(leg)
@@ -299,6 +456,7 @@ def _maker_candidate_row(
         "max_spread": max(leg["spread"] for leg in passive_legs),
         "avg_spread": sum(leg["spread"] for leg in passive_legs) / len(passive_legs),
         "quote_mode": quote_mode,
+        "quote_offset_ticks": quote_offset_ticks,
         "risk_flags": [
             "requires_all_legs_fill",
             "non_atomic_execution",
@@ -312,7 +470,13 @@ def _maker_candidate_row(
     return row
 
 
-def _passive_buy_leg(snapshot: BinaryMarketSnapshot, token: str, tick_size: float, quote_mode: str) -> Optional[dict]:
+def _passive_buy_leg(
+    snapshot: BinaryMarketSnapshot,
+    token: str,
+    tick_size: float,
+    quote_mode: str,
+    quote_offset_ticks: int,
+) -> Optional[dict]:
     book = _token_book(snapshot, token)
     if not book.asks:
         return None
@@ -322,7 +486,7 @@ def _passive_buy_leg(snapshot: BinaryMarketSnapshot, token: str, tick_size: floa
         return None
 
     if quote_mode == "near_ask":
-        limit_price = best_ask - tick_size
+        limit_price = best_ask - tick_size * quote_offset_ticks
     elif quote_mode == "improve_bid":
         limit_price = min(best_bid + tick_size, best_ask - tick_size)
     else:
@@ -345,6 +509,7 @@ def _passive_buy_leg(snapshot: BinaryMarketSnapshot, token: str, tick_size: floa
         "distance_to_best_ask": best_ask - limit_price,
         "fee_rate_assumption": 0.0,
         "quote_mode": quote_mode,
+        "quote_offset_ticks": quote_offset_ticks,
     }
 
 
@@ -355,6 +520,24 @@ def _normalize_quote_mode(value: str) -> str:
     if normalized in {"improve_bid", "bid_plus_tick", "passive"}:
         return "improve_bid"
     raise ValueError("quote_mode must be near_ask or improve_bid")
+
+
+def _normalize_quote_offset_ticks(value: int) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quote_offset_ticks must be a positive integer") from exc
+    if normalized < 1:
+        raise ValueError("quote_offset_ticks must be a positive integer")
+    return normalized
+
+
+def _normalize_quote_offset_ticks_options(values: Optional[Sequence[int]]) -> List[int]:
+    raw_values = values if values else [1, 2, 3, 5, 10]
+    offsets = sorted({_normalize_quote_offset_ticks(value) for value in raw_values})
+    if not offsets:
+        raise ValueError("quote_offset_ticks_options must include at least one value")
+    return offsets
 
 
 def _token_book(snapshot: BinaryMarketSnapshot, token: str) -> OrderBook:
@@ -460,6 +643,52 @@ def _summary_by_kind(rows: List[dict]) -> list:
     return sorted(summary.values(), key=lambda row: (-row["max_expected_edge_at_cap"], row["kind"]))
 
 
+def _adaptive_config_summary(config: dict, results: List[dict], partial_loss_rate: float) -> dict:
+    completed = [row for row in results if row["completed"]]
+    partial = [row for row in results if row["partial_fill"] and not row["completed"]]
+    no_fill = [row for row in results if row["filled_leg_count"] == 0]
+    completed_edge_at_cap = sum(float(row.get("expected_edge_at_cap") or 0.0) for row in completed)
+    partial_filled_capital_at_cap = sum(float(row.get("filled_capital_at_cap") or 0.0) for row in partial)
+    risk_adjusted_total = completed_edge_at_cap - partial_loss_rate * partial_filled_capital_at_cap
+    observation_count = len(results)
+    return {
+        "quote_mode": config["quote_mode"],
+        "quote_offset_ticks": config["quote_offset_ticks"],
+        "candidate_observation_count": observation_count,
+        "completed_count": len(completed),
+        "partial_count": len(partial),
+        "no_fill_count": len(no_fill),
+        "completion_rate": len(completed) / observation_count if observation_count else 0.0,
+        "partial_rate": len(partial) / observation_count if observation_count else 0.0,
+        "no_fill_rate": len(no_fill) / observation_count if observation_count else 0.0,
+        "completed_expected_edge_at_cap": completed_edge_at_cap,
+        "partial_filled_capital_at_cap": partial_filled_capital_at_cap,
+        "partial_loss_rate": partial_loss_rate,
+        "risk_adjusted_total_ev_at_cap": risk_adjusted_total,
+        "risk_adjusted_mean_ev_at_cap": risk_adjusted_total / observation_count if observation_count else 0.0,
+        "max_completed_expected_edge_at_cap": max(
+            (float(row.get("expected_edge_at_cap") or 0.0) for row in completed),
+            default=0.0,
+        ),
+        "max_partial_filled_capital_at_cap": max(
+            (float(row.get("filled_capital_at_cap") or 0.0) for row in partial),
+            default=0.0,
+        ),
+        "by_kind": _fill_summary_by_kind(results),
+    }
+
+
+def _adaptive_config_sort_key(row: dict) -> tuple:
+    return (
+        -float(row.get("risk_adjusted_total_ev_at_cap") or 0.0),
+        -float(row.get("risk_adjusted_mean_ev_at_cap") or 0.0),
+        -float(row.get("completion_rate") or 0.0),
+        float(row.get("partial_rate") or 0.0),
+        str(row.get("quote_mode") or ""),
+        int(row.get("quote_offset_ticks") or 0),
+    )
+
+
 def _future_batches_within_horizon(
     batches: List[List[BinaryMarketSnapshot]],
     index: int,
@@ -496,6 +725,13 @@ def _simulate_candidate_fills(candidate: dict, future_batches: List[List[BinaryM
 
     leg_count = len(candidate.get("legs", []))
     filled_count = leg_count - len(open_legs)
+    filled_cost_per_share = sum(float(fill.get("limit_price") or 0.0) for fill in fills)
+    passive_cost_per_share = float(candidate.get("passive_cost_per_share") or 0.0)
+    unfilled_cost_per_share = max(0.0, passive_cost_per_share - filled_cost_per_share)
+    suggested_quantity = candidate.get("suggested_quantity")
+    filled_capital_at_cap = None
+    if suggested_quantity is not None:
+        filled_capital_at_cap = float(suggested_quantity or 0.0) * filled_cost_per_share
     row = {
         "candidate_key": _candidate_identity(candidate),
         "kind": candidate.get("kind"),
@@ -510,6 +746,9 @@ def _simulate_candidate_fills(candidate: dict, future_batches: List[List[BinaryM
         "maker_roi": candidate.get("maker_roi"),
         "expected_edge_at_cap": candidate.get("expected_edge_at_cap"),
         "passive_cost_per_share": candidate.get("passive_cost_per_share"),
+        "filled_cost_per_share": filled_cost_per_share,
+        "unfilled_cost_per_share": unfilled_cost_per_share,
+        "filled_capital_at_cap": filled_capital_at_cap,
         "market_ids": candidate.get("market_ids"),
         "legs": candidate.get("legs"),
         "fills": fills,

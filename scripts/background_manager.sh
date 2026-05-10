@@ -214,6 +214,7 @@ case "$COMMAND" in
     RULE_PROMOTION_INTERVAL="${RULE_PROMOTION_INTERVAL:-1800}"
     MAKER_SCAN_INTERVAL="${MAKER_SCAN_INTERVAL:-300}"
     MAKER_FILL_SIM_INTERVAL="${MAKER_FILL_SIM_INTERVAL:-900}"
+    MAKER_ADAPTIVE_SIM_INTERVAL="${MAKER_ADAPTIVE_SIM_INTERVAL:-1800}"
     LOOP_SLEEP="${LOOP_SLEEP:-5}"
 
     ENABLE_ALERTS="${ENABLE_ALERTS:-1}"
@@ -226,6 +227,7 @@ case "$COMMAND" in
     ENABLE_RULE_PROMOTION="${ENABLE_RULE_PROMOTION:-1}"
     ENABLE_MAKER_SCAN="${ENABLE_MAKER_SCAN:-1}"
     ENABLE_MAKER_FILL_SIM="${ENABLE_MAKER_FILL_SIM:-1}"
+    ENABLE_MAKER_ADAPTIVE_SIM="${ENABLE_MAKER_ADAPTIVE_SIM:-1}"
 
     WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
     RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
@@ -239,6 +241,7 @@ case "$COMMAND" in
     next_promotion=0
     next_maker_scan=0
     next_maker_fill_sim=0
+    next_maker_adaptive_sim=0
 
     log "manager_started pid=$$" >> "$SUPERVISOR_LOG"
     while true; do
@@ -295,6 +298,11 @@ case "$COMMAND" in
       if [[ "$ENABLE_MAKER_FILL_SIM" == "1" && "$now" -ge "$next_maker_fill_sim" ]]; then
         run_logged maker-fill-sim scripts/run_maker_fill_sim_once.sh
         next_maker_fill_sim=$((now + MAKER_FILL_SIM_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_MAKER_ADAPTIVE_SIM" == "1" && "$now" -ge "$next_maker_adaptive_sim" ]]; then
+        run_logged maker-adaptive-sim scripts/run_maker_adaptive_sim_once.sh
+        next_maker_adaptive_sim=$((now + MAKER_ADAPTIVE_SIM_INTERVAL))
       fi
 
       if [[ "$ENABLE_DATA_ROTATION" == "1" && "$now" -ge "$next_rotation" ]]; then

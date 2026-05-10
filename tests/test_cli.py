@@ -761,6 +761,91 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["completed_count"], 1)
         self.assertIn("completed=1", stdout.getvalue())
 
+    def test_maker_adaptive_sim_command_writes_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            gamma = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "maker-adaptive.json"
+            snapshot_rows = []
+            for ts, asks in [
+                ("2026-05-10T00:00:00Z", [0.64, 0.68, 0.70]),
+                ("2026-05-10T00:01:00Z", [0.63, 0.67, 0.69]),
+            ]:
+                for index, market_id in enumerate(["a", "b", "c"]):
+                    snapshot_rows.append(
+                        {
+                            "type": "binary_snapshot",
+                            "ts": ts,
+                            "venue": "polymarket",
+                            "market_id": market_id,
+                            "fee_rate": 0.05,
+                            "yes": {"token_id": f"{market_id}-yes", "asks": [[0.30, 100]], "bids": [[0.29, 100]]},
+                            "no": {
+                                "token_id": f"{market_id}-no",
+                                "asks": [[asks[index], 100]],
+                                "bids": [[asks[index] - 0.04, 100]],
+                            },
+                        }
+                    )
+            snapshots.write_text("\n".join(json.dumps(row) for row in snapshot_rows) + "\n")
+            gamma.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "type": "raw_polymarket_gamma_market",
+                            "market_id": market_id,
+                            "raw": {
+                                "id": market_id,
+                                "question": f"Will {market_id} happen?",
+                                "closed": False,
+                                "enableOrderBook": True,
+                                "acceptingOrders": True,
+                                "outcomes": json.dumps(["Yes", "No"]),
+                                "clobTokenIds": json.dumps([f"{market_id}-yes", f"{market_id}-no"]),
+                                "negRisk": True,
+                                "negRiskMarketID": "group-1",
+                                "groupItemThreshold": str(index),
+                            },
+                        }
+                    )
+                    for index, market_id in enumerate(["a", "b", "c"])
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "maker-adaptive-sim",
+                        "--snapshots",
+                        str(snapshots),
+                        "--gamma",
+                        str(gamma),
+                        "--out",
+                        str(out),
+                        "--tick-size",
+                        "0.01",
+                        "--quote-offset-ticks",
+                        "1,2",
+                        "--no-improve-bid",
+                        "--min-edge",
+                        "0.005",
+                        "--min-roi",
+                        "0.001",
+                        "--max-capital",
+                        "100",
+                        "--min-observations",
+                        "1",
+                    ]
+                )
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["status"], "positive_ev_config_found")
+        self.assertEqual(row["recommended_config"]["quote_offset_ticks"], 1)
+        self.assertIn("status=positive_ev_config_found", stdout.getvalue())
+
     def test_monitor_analyze_command_summarizes_realtime_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "realtime.jsonl"
