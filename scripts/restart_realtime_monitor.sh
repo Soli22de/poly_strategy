@@ -33,8 +33,46 @@ INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
 INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
 MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-250}"
 WS_MAX_SIZE="${WS_MAX_SIZE:-4194304}"
+RUNTIME_DIR="${RUNTIME_DIR:-var/run}"
+MANAGER_PID_FILE="${MANAGER_PID_FILE:-$RUNTIME_DIR/poly_strategy-background.pid}"
+MONITOR_PID_FILE="${MONITOR_PID_FILE:-$RUNTIME_DIR/poly_strategy-monitor.pid}"
 
-mkdir -p "$(dirname "$LOG_PATH")"
+mkdir -p "$(dirname "$LOG_PATH")" "$RUNTIME_DIR"
+
+pid_alive() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1
+}
+
+read_pid_file() {
+  local path="$1"
+  [[ -s "$path" ]] && sed -n '1p' "$path" || true
+}
+
+stop_pid() {
+  local pid="$1"
+  pid_alive "$pid" || return 0
+  pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    pid_alive "$pid" || return 0
+    sleep 0.25
+  done
+  pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+}
+
+manager_pid="$(read_pid_file "$MANAGER_PID_FILE")"
+if pid_alive "$manager_pid"; then
+  monitor_pid="$(read_pid_file "$MONITOR_PID_FILE")"
+  if pid_alive "$monitor_pid"; then
+    stop_pid "$monitor_pid"
+  fi
+  rm -f "$MONITOR_PID_FILE"
+  echo "manager_monitor_restart_requested manager_pid=$manager_pid"
+  exit 0
+fi
+
 if [[ "${USE_KICKSTART:-1}" == "1" ]] && launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
   launchctl kickstart -k "gui/$(id -u)/$LABEL"
   launchctl print "gui/$(id -u)/$LABEL" | awk -v label="$LABEL" 'NR == 1 {print label " kickstarted"}'
