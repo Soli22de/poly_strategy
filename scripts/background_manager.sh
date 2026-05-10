@@ -253,7 +253,9 @@ case "$COMMAND" in
       fi
 
       if [[ "$ENABLE_DATA_ROTATION" == "1" && "$now" -ge "$next_rotation" ]]; then
-        run_logged data-rotation env DATA_DIR=data MAX_BYTES=104857600 RETENTION_DAYS=7 INCLUDE_REPORTS=0 scripts/rotate_data.sh
+        run_logged data-rotation env DATA_DIR=data MAX_BYTES=104857600 RETENTION_DAYS=7 INCLUDE_REPORTS=1 scripts/rotate_data.sh
+        run_logged data-prune env DATA_DIR=data DATED_CACHE_RETENTION_DAYS=7 GZIP_RETENTION_DAYS=7 scripts/prune_data_artifacts.sh
+        run_logged data-compact env GAMMA=data/polymarket-gamma.ndjson EXTERNAL_SIGNALS=data/external-signals.ndjson MAX_EXTERNAL_SIGNAL_LINES=2000 scripts/compact_data_caches.sh
         next_rotation=$((now + ROTATION_INTERVAL))
       fi
 
