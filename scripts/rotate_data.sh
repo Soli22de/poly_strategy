@@ -9,6 +9,7 @@ MAX_BYTES="${MAX_BYTES:-104857600}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 DRY_RUN="${DRY_RUN:-0}"
 INCLUDE_REPORTS="${INCLUDE_REPORTS:-0}"
+ARCHIVE_ROTATED="${ARCHIVE_ROTATED:-0}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOCK_DIR="$DATA_DIR/.rotate.lock"
 
@@ -39,13 +40,17 @@ rotate_file() {
     return 0
   fi
   local rotated="${file}.${TIMESTAMP}"
-  echo "rotate file=$file size=$size rotated=${rotated}.gz dry_run=$DRY_RUN"
+  echo "rotate file=$file size=$size rotated=${rotated}.gz dry_run=$DRY_RUN archive=$ARCHIVE_ROTATED"
   if [[ "$DRY_RUN" == "1" ]]; then
     return 0
   fi
-  cp "$file" "$rotated"
+  if [[ "$ARCHIVE_ROTATED" == "1" ]]; then
+    cp "$file" "$rotated"
+  fi
   : > "$file"
-  gzip -f "$rotated"
+  if [[ "$ARCHIVE_ROTATED" == "1" ]]; then
+    gzip -f "$rotated"
+  fi
 }
 
 shopt -s nullglob

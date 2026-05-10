@@ -6,6 +6,7 @@ from poly_strategy.backtest import RuleSet, load_rule_set, snapshots_from_ndjson
 from poly_strategy.fees import polymarket_taker_fee_per_share
 from poly_strategy.models import BinaryMarketSnapshot
 from poly_strategy.orderbook import Level
+from poly_strategy.recent_lines import read_recent_lines
 from poly_strategy.rule_discovery import MarketText, read_market_texts
 
 
@@ -246,7 +247,7 @@ def _unique_market_ids(market_ids: List[str]) -> List[str]:
 
 
 def _latest_snapshot_batch(path: Path) -> List[BinaryMarketSnapshot]:
-    snapshots = list(snapshots_from_ndjson_lines(path.read_text().splitlines()))
+    snapshots = list(snapshots_from_ndjson_lines(read_recent_lines(path)))
     if not snapshots:
         return []
     latest_ts = snapshots[-1].ts

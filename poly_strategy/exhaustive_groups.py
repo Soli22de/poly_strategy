@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 
 from poly_strategy.backtest import RuleSet, load_rule_set, snapshots_from_ndjson_lines
 from poly_strategy.near_miss import near_miss_candidates
+from poly_strategy.recent_lines import read_recent_lines
 from poly_strategy.rule_discovery import MarketText, read_market_texts
 
 
@@ -195,7 +196,7 @@ def promotion_candidate_count(
 
 
 def _latest_snapshot_batch(path: Path):
-    snapshots = list(snapshots_from_ndjson_lines(path.read_text().splitlines()))
+    snapshots = list(snapshots_from_ndjson_lines(read_recent_lines(path)))
     if not snapshots:
         return []
     latest_ts = snapshots[-1].ts

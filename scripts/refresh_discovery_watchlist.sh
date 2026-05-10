@@ -31,6 +31,7 @@ LLM_WORKERS="${LLM_WORKERS:-4}"
 LLM_ERROR_RETRIES="${LLM_ERROR_RETRIES:-2}"
 LLM_ERROR_RETRY_BATCH_SIZE="${LLM_ERROR_RETRY_BATCH_SIZE:-1}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
+LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-600}"
 LLM_RETRIES="${LLM_RETRIES:-2}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
 LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-high}"
@@ -89,6 +90,33 @@ else:
     row = json.loads(path.read_text())
     print(len(row.get("discovery_errors") or []))
 PY
+}
+
+run_with_timeout() {
+  local limit_seconds="$1"
+  shift
+  if [[ "$limit_seconds" == "0" ]]; then
+    "$@"
+    return $?
+  fi
+  "$@" &
+  local pid=$!
+  local elapsed=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( elapsed >= limit_seconds )); then
+      echo "command_timeout seconds=$limit_seconds pid=$pid" >&2
+      pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
 }
 
 run_discovery_provider() {
@@ -153,7 +181,7 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
     stage_out="$(mktemp "${RULES}.tmp.XXXXXX")"
     tmp_paths+=("$stage_out")
     set +e
-    run_discovery_provider "$label" "$model" "$base_url" "$api_mode" "$api_key" "$current_cache" "$stage_out"
+    run_with_timeout "$LLM_COMMAND_TIMEOUT" run_discovery_provider "$label" "$model" "$base_url" "$api_mode" "$api_key" "$current_cache" "$stage_out"
     status=$?
     set -e
     stage_used=0
@@ -181,6 +209,9 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
     done
   elif [[ "$ALLOW_LLM_FAILURE" == "1" && -s "$RULES" ]]; then
     echo "discover_rules_failed status=$final_status using_existing_rules=$RULES" >&2
+    for path in "${tmp_paths[@]}"; do
+      rm -f "$path"
+    done
   else
     for path in "${tmp_paths[@]}"; do rm -f "$path"; done
     exit "$final_status"

@@ -38,6 +38,7 @@ TOP="${TOP:-5}"
 MIN_CONFIDENCE="${MIN_CONFIDENCE:-0.95}"
 RECHECK_HOURS="${RECHECK_HOURS:-24}"
 TIMEOUT="${TIMEOUT:-120}"
+COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-300}"
 RETRIES="${RETRIES:-2}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-2000}"
 REASONING_EFFORT="${REASONING_EFFORT:-high}"
@@ -70,6 +71,33 @@ if [[ "$candidate_count" == "0" ]]; then
 fi
 
 rules_tmp="$(mktemp "${RULES}.promotion.XXXXXX")"
+
+run_with_timeout() {
+  local limit_seconds="$1"
+  shift
+  if [[ "$limit_seconds" == "0" ]]; then
+    "$@"
+    return $?
+  fi
+  "$@" &
+  local pid=$!
+  local elapsed=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( elapsed >= limit_seconds )); then
+      echo "command_timeout seconds=$limit_seconds pid=$pid" >&2
+      pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
+}
 
 run_verifier() {
   local label="$1"
@@ -116,16 +144,16 @@ run_verifier() {
 }
 
 set +e
-run_verifier primary "$PRIMARY_MODEL" "$PRIMARY_BASE_URL" "$PRIMARY_API_MODE" "$PRIMARY_API_KEY"
+run_with_timeout "$COMMAND_TIMEOUT" run_verifier primary "$PRIMARY_MODEL" "$PRIMARY_BASE_URL" "$PRIMARY_API_MODE" "$PRIMARY_API_KEY"
 status=$?
 if [[ "$status" != "0" && -n "$BACKUP_MODEL" ]]; then
   echo "rule_promotion_retry previous_status=$status next_label=backup next_model=$BACKUP_MODEL"
-  run_verifier backup "$BACKUP_MODEL" "$BACKUP_BASE_URL" "$BACKUP_API_MODE" "$BACKUP_API_KEY"
+  run_with_timeout "$COMMAND_TIMEOUT" run_verifier backup "$BACKUP_MODEL" "$BACKUP_BASE_URL" "$BACKUP_API_MODE" "$BACKUP_API_KEY"
   status=$?
 fi
 if [[ "$status" != "0" && -n "$FALLBACK_MODEL" ]]; then
   echo "rule_promotion_retry previous_status=$status next_label=fallback next_model=$FALLBACK_MODEL"
-  run_verifier fallback "$FALLBACK_MODEL" "$FALLBACK_BASE_URL" "$FALLBACK_API_MODE" "$FALLBACK_API_KEY"
+  run_with_timeout "$COMMAND_TIMEOUT" run_verifier fallback "$FALLBACK_MODEL" "$FALLBACK_BASE_URL" "$FALLBACK_API_MODE" "$FALLBACK_API_KEY"
   status=$?
 fi
 set -e
