@@ -7,7 +7,11 @@ from poly_strategy.cross_platform import (
     apply_cross_platform_verifications,
     cross_platform_pairs,
     cross_platform_signal_rows,
+    event_tickers_from_cross_platform_candidates,
+    expand_cross_platform_event_candidates,
     match_polymarket_kalshi_markets,
+    normalize_cross_platform_match_report,
+    opportunity_match_report_from_scan,
     write_cross_platform_signal_rows,
 )
 
@@ -138,6 +142,114 @@ class CrossPlatformTests(unittest.TestCase):
         self.assertEqual(updated["top"][1]["status"], "candidate_needs_llm_or_manual_verification")
         self.assertEqual(updated["llm_verified_count"], 1)
         self.assertEqual(updated["llm_rejected_count"], 0)
+
+    def test_normalize_candidate_file_keeps_event_candidate_unexecutable(self):
+        report = normalize_cross_platform_match_report(
+            {
+                "candidates": [
+                    {
+                        "polymarket_market_id": "pm1",
+                        "polymarket_question": "Will Lionel Messi play in the 2026 FIFA World Cup?",
+                        "kalshi_event_ticker": "KXSOCCERPLAYMESSI-26",
+                        "kalshi_title": "Will Lionel Messi play in the World Cup? In 2026",
+                        "score": 0.9,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(report["top"][0]["kalshi_event_ticker"], "KXSOCCERPLAYMESSI-26")
+        self.assertEqual(report["top"][0]["kalshi_ticker"], "")
+        self.assertEqual(report["top"][0]["status"], "candidate_needs_market_expansion")
+        self.assertEqual(
+            event_tickers_from_cross_platform_candidates(
+                {"candidates": [{"kalshi_event_ticker": "KXSOCCERPLAYMESSI-26"}]}
+            ),
+            ["KXSOCCERPLAYMESSI-26"],
+        )
+
+    def test_expand_event_candidates_uses_real_kalshi_market_tickers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kalshi = Path(tmp) / "kalshi.ndjson"
+            kalshi.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_kalshi_market",
+                        "market_id": "KXSOCCERPLAYMESSI-26",
+                        "raw": {
+                            "ticker": "KXSOCCERPLAYMESSI-26",
+                            "event_ticker": "KXSOCCERPLAYMESSI-26",
+                            "title": "Will Lionel Messi play in the World Cup?",
+                            "yes_sub_title": "Yes",
+                            "no_sub_title": "Yes",
+                            "rules_primary": "If Lionel Messi is on the final squad for World Cup 2026, resolves Yes.",
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+            report = expand_cross_platform_event_candidates(
+                {
+                    "candidates": [
+                        {
+                            "polymarket_market_id": "pm1",
+                            "polymarket_question": "Will Lionel Messi play in the 2026 FIFA World Cup?",
+                            "kalshi_event_ticker": "KXSOCCERPLAYMESSI-26",
+                            "kalshi_title": "Will Lionel Messi play in the World Cup? In 2026",
+                            "score": 0.9,
+                        }
+                    ]
+                },
+                kalshi,
+            )
+
+        self.assertEqual(report["match_count"], 1)
+        self.assertEqual(report["top"][0]["kalshi_ticker"], "KXSOCCERPLAYMESSI-26")
+        self.assertEqual(report["top"][0]["kalshi_event_ticker"], "KXSOCCERPLAYMESSI-26")
+        self.assertEqual(report["top"][0]["status"], "candidate_needs_llm_or_manual_verification")
+
+    def test_opportunity_match_report_filters_option_mismatches(self):
+        match_report = {
+            "top": [
+                {
+                    "polymarket_market_id": "pm-good",
+                    "polymarket_question": "Will David Lisnard win the 2027 French presidential election?",
+                    "kalshi_ticker": "KXFRENCH-DLIS",
+                    "kalshi_title": "Will David Lisnard win the 2027 French presidential election?",
+                    "source_kalshi_market": {"yes_sub_title": "David Lisnard"},
+                },
+                {
+                    "polymarket_market_id": "pm-bad",
+                    "polymarket_question": "Will Pedri win the 2026 Ballon d'Or?",
+                    "kalshi_ticker": "KXBALLON-HKAN",
+                    "kalshi_title": "Who will win the Ballon d'Or in 2026? | Harry Kane",
+                    "source_kalshi_market": {"yes_sub_title": "Harry Kane"},
+                },
+            ]
+        }
+        scan_report = {
+            "opportunities": [
+                {
+                    "net_edge_per_share": 0.02,
+                    "total_edge": 2.0,
+                    "quantity": 100,
+                    "pair": {"polymarket_market_id": "pm-bad", "kalshi_ticker": "KXBALLON-HKAN"},
+                },
+                {
+                    "net_edge_per_share": 0.01,
+                    "total_edge": 1.0,
+                    "quantity": 100,
+                    "pair": {"polymarket_market_id": "pm-good", "kalshi_ticker": "KXFRENCH-DLIS"},
+                },
+            ]
+        }
+
+        filtered = opportunity_match_report_from_scan(scan_report, match_report, min_net_edge=0.005)
+
+        self.assertEqual(filtered["match_count"], 1)
+        self.assertEqual(filtered["top"][0]["polymarket_market_id"], "pm-good")
+        self.assertTrue(filtered["top"][0]["option_match"])
 
 
 if __name__ == "__main__":

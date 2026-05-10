@@ -274,6 +274,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(collect_pages.call_args.kwargs["pages"], 2)
         self.assertIn("wrote=6", stdout.getvalue())
 
+    def test_collect_kalshi_event_markets_command_uses_candidate_event_tickers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = Path(tmp) / "candidates.json"
+            candidates.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {"kalshi_event_ticker": "KXEVENT"},
+                            {"kalshi_event_ticker": "KXEVENT"},
+                            {"kalshi_event_ticker": "KXOTHER"},
+                        ]
+                    }
+                )
+            )
+            with patch("poly_strategy.cli.collect_kalshi_markets_by_event_tickers", return_value=2) as collect:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "collect-kalshi-event-markets",
+                            "--candidates",
+                            str(candidates),
+                            "--out",
+                            "data/kalshi-event-markets.ndjson",
+                            "--limit",
+                            "1000",
+                            "--timeout",
+                            "7",
+                            "--proxy",
+                            "127.0.0.1:10808",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(str(collect.call_args.args[0]), "data/kalshi-event-markets.ndjson")
+        self.assertEqual(collect.call_args.args[1], ["KXEVENT", "KXOTHER"])
+        self.assertIn("events=2", stdout.getvalue())
+
     def test_collect_external_signal_markets_command_fetches_missing_gamma_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             signals = Path(tmp) / "signals.ndjson"
@@ -1364,6 +1402,63 @@ class CliTests(unittest.TestCase):
         self.assertEqual(signal_rows[0]["type"], "external_signal")
         self.assertIn("wrote=1", stdout.getvalue())
 
+    def test_expand_cross_platform_candidates_command_writes_market_level_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = Path(tmp) / "candidates.json"
+            kalshi = Path(tmp) / "kalshi.ndjson"
+            out = Path(tmp) / "expanded.json"
+            candidates.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "polymarket_market_id": "pm1",
+                                "polymarket_question": "Will Lionel Messi play in the 2026 FIFA World Cup?",
+                                "kalshi_event_ticker": "KXSOCCERPLAYMESSI-26",
+                                "kalshi_title": "Will Lionel Messi play in the World Cup? In 2026",
+                                "score": 0.9,
+                            }
+                        ]
+                    }
+                )
+            )
+            kalshi.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_kalshi_market",
+                        "market_id": "KXSOCCERPLAYMESSI-26",
+                        "raw": {
+                            "ticker": "KXSOCCERPLAYMESSI-26",
+                            "event_ticker": "KXSOCCERPLAYMESSI-26",
+                            "title": "Will Lionel Messi play in the World Cup?",
+                            "yes_sub_title": "Yes",
+                            "no_sub_title": "Yes",
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "expand-cross-platform-candidates",
+                        "--candidates",
+                        str(candidates),
+                        "--kalshi-markets",
+                        str(kalshi),
+                        "--out",
+                        str(out),
+                    ]
+                )
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["match_count"], 1)
+        self.assertEqual(row["top"][0]["kalshi_ticker"], "KXSOCCERPLAYMESSI-26")
+        self.assertIn("matches=1", stdout.getvalue())
+
     def test_verify_cross_platform_command_reports_parsed_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             matches = Path(tmp) / "matches.json"
@@ -1419,6 +1514,70 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["llm_verification_row_count"], 1)
         self.assertEqual(row["llm_rejected_count"], 1)
         self.assertIn("parsed=1", stdout.getvalue())
+
+    def test_verify_cross_platform_command_falls_back_after_provider_error(self):
+        class FakeVerifier:
+            def __init__(self, model, **kwargs):
+                self.model = model
+
+            def verify_matches(self, matches):
+                if self.model == "bad-model":
+                    raise TimeoutError("provider timeout")
+                return [
+                    {
+                        "polymarket_market_id": matches[0]["polymarket_market_id"],
+                        "kalshi_ticker": matches[0]["kalshi_ticker"],
+                        "verified_same_binary_event": True,
+                        "trade_allowed": True,
+                        "confidence": 0.99,
+                        "risk_flags": [],
+                        "reason": "same binary event",
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            matches = Path(tmp) / "matches.json"
+            out = Path(tmp) / "verified.json"
+            matches.write_text(
+                json.dumps(
+                    {
+                        "top": [
+                            {
+                                "polymarket_market_id": "pm1",
+                                "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                                "kalshi_ticker": "KXBTC100K",
+                                "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                            }
+                        ]
+                    }
+                )
+            )
+
+            stdout = io.StringIO()
+            with patch("poly_strategy.cli.OpenAICrossPlatformVerifierClient", side_effect=FakeVerifier):
+                with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
+                    with redirect_stdout(stdout):
+                        code = main(
+                            [
+                                "verify-cross-platform-matches",
+                                "--matches",
+                                str(matches),
+                                "--out",
+                                str(out),
+                                "--model",
+                                "bad-model",
+                                "--fallback-model",
+                                "good-model",
+                                "--client-workers",
+                                "2",
+                            ]
+                        )
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["llm_verified_count"], 1)
+        self.assertEqual([attempt["status"] for attempt in row["llm_provider_attempts"]], ["error", "ok"])
+        self.assertIn("verified=1", stdout.getvalue())
 
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):
         result = SimpleNamespace(

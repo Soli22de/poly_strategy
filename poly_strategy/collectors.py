@@ -334,6 +334,32 @@ def collect_kalshi_markets(
     return _write_kalshi_market_rows(path, markets)
 
 
+def collect_kalshi_markets_by_event_tickers(
+    path: Path,
+    event_tickers: Iterable[str],
+    limit: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    status: Optional[str] = "open",
+) -> int:
+    total = 0
+    seen = set()
+    for event_ticker in event_tickers:
+        normalized_event_ticker = str(event_ticker or "").strip()
+        if not normalized_event_ticker or normalized_event_ticker in seen:
+            continue
+        seen.add(normalized_event_ticker)
+        markets, _ = fetch_kalshi_markets_page(
+            limit,
+            timeout,
+            proxy,
+            status=status,
+            event_ticker=normalized_event_ticker,
+        )
+        total += _write_kalshi_market_rows(path, markets)
+    return total
+
+
 def collect_kalshi_markets_pages(
     path: Path,
     limit: int,
@@ -376,6 +402,7 @@ def fetch_kalshi_markets_page(
     cursor: Optional[str] = None,
     status: Optional[str] = "open",
     tickers: Optional[Iterable[str]] = None,
+    event_ticker: Optional[str] = None,
 ) -> tuple:
     if limit < 0:
         raise ValueError("limit must be non-negative")
@@ -387,6 +414,8 @@ def fetch_kalshi_markets_page(
     ticker_list = [str(ticker) for ticker in tickers or [] if ticker]
     if ticker_list:
         params["tickers"] = ",".join(ticker_list)
+    if event_ticker:
+        params["event_ticker"] = str(event_ticker)
     row = _fetch_json(f"{KALSHI_API_URL}/markets?{urlencode(params)}", timeout, proxy=proxy)
     markets = row.get("markets") if isinstance(row, dict) else None
     if not isinstance(markets, list):
@@ -463,37 +492,41 @@ def write_kalshi_binary_snapshots(orderbooks_path: Path, out_path: Path) -> int:
 
 def kalshi_binary_snapshot_rows_from_orderbooks(path: Path) -> Iterable[dict]:
     with path.open() as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            if row.get("type") != "raw_kalshi_orderbook":
-                continue
-            market_id = str(row.get("market_id") or "").strip()
-            if not market_id:
-                continue
-            orderbook = _kalshi_orderbook_payload(row.get("raw") or {})
-            yes_bids = _kalshi_levels(orderbook, "yes")
-            no_bids = _kalshi_levels(orderbook, "no")
-            # Kalshi exposes bids. In a binary market, a NO bid at p is a YES ask at 1-p, and vice versa.
-            yield {
-                "ts": row.get("ts") or _utc_now(),
-                "type": "binary_snapshot",
-                "venue": "kalshi",
-                "market_id": market_id,
-                "fee_rate": 0.0,
-                "yes": {
-                    "token_id": f"{market_id}:YES",
-                    "asks": _complement_asks(no_bids),
-                    "bids": yes_bids,
-                },
-                "no": {
-                    "token_id": f"{market_id}:NO",
-                    "asks": _complement_asks(yes_bids),
-                    "bids": no_bids,
-                },
-            }
+        yield from kalshi_binary_snapshot_rows_from_orderbook_lines(handle)
+
+
+def kalshi_binary_snapshot_rows_from_orderbook_lines(lines: Iterable[str]) -> Iterable[dict]:
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if row.get("type") != "raw_kalshi_orderbook":
+            continue
+        market_id = str(row.get("market_id") or "").strip()
+        if not market_id:
+            continue
+        orderbook = _kalshi_orderbook_payload(row.get("raw") or {})
+        yes_bids = _kalshi_levels(orderbook, "yes")
+        no_bids = _kalshi_levels(orderbook, "no")
+        # Kalshi exposes bids. In a binary market, a NO bid at p is a YES ask at 1-p, and vice versa.
+        yield {
+            "ts": row.get("ts") or _utc_now(),
+            "type": "binary_snapshot",
+            "venue": "kalshi",
+            "market_id": market_id,
+            "fee_rate": 0.0,
+            "yes": {
+                "token_id": f"{market_id}:YES",
+                "asks": _complement_asks(no_bids),
+                "bids": yes_bids,
+            },
+            "no": {
+                "token_id": f"{market_id}:NO",
+                "asks": _complement_asks(yes_bids),
+                "bids": no_bids,
+            },
+        }
 
 
 def collect_polymarket_binary_snapshots(
@@ -1091,6 +1124,8 @@ def _levels(levels: Iterable[dict], reverse: bool) -> List[List[float]]:
 def _kalshi_orderbook_payload(row: dict) -> dict:
     if "orderbook" in row and isinstance(row["orderbook"], dict):
         return row["orderbook"]
+    if "orderbook_fp" in row and isinstance(row["orderbook_fp"], dict):
+        return row["orderbook_fp"]
     return row if isinstance(row, dict) else {}
 
 

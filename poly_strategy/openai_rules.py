@@ -744,7 +744,11 @@ def _cross_platform_prompt_row(match: dict) -> dict:
         "polymarket_market_id": str(match.get("polymarket_market_id") or ""),
         "polymarket_title": str(match.get("polymarket_title") or ""),
         "polymarket_question": str(match.get("polymarket_question") or match.get("polymarket_title") or ""),
+        "polymarket_description": str(match.get("polymarket_description") or "")[:2000],
+        "polymarket_end_date": str(match.get("polymarket_end_date") or ""),
+        "polymarket_resolution_source": str(match.get("polymarket_resolution_source") or ""),
         "kalshi_ticker": str(match.get("kalshi_ticker") or ""),
+        "kalshi_event_ticker": str(match.get("kalshi_event_ticker") or ""),
         "kalshi_title": str(match.get("kalshi_title") or ""),
         "score": float(match.get("score") or 0.0),
         "status": str(match.get("status") or ""),
@@ -763,6 +767,9 @@ Workflow:
 - Reject pairs with different subjects, different deadlines, or different resolution sources.
 - Reject pairs where one market is conditional, multi-outcome, or not obviously the same binary event.
 - Ignore market prices and liquidity.
+- Every verification row MUST include confidence as a number from 0 to 1.
+- If trade_allowed=true, confidence must be at least 0.95 and risk_flags must be empty.
+- If confidence is missing, the downstream trading system will reject the pair.
 - Return only structured JSON matching the schema."""
 
 

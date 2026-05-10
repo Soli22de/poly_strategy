@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
@@ -16,10 +17,12 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
     collect_kalshi_markets,
+    collect_kalshi_markets_by_event_tickers,
     collect_kalshi_markets_pages,
     collect_kalshi_orderbooks,
     collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
+    kalshi_binary_snapshot_rows_from_orderbook_lines,
     market_id_alias_map,
     raw_gamma_markets_from_ndjson,
     write_kalshi_binary_snapshots,
@@ -29,7 +32,11 @@ from poly_strategy.cross_platform import (
     apply_cross_platform_verifications,
     cross_platform_pairs,
     cross_platform_signal_rows,
+    event_tickers_from_cross_platform_candidates,
+    expand_cross_platform_event_candidates,
     match_polymarket_kalshi_markets,
+    normalize_cross_platform_match_report,
+    opportunity_match_report_from_scan,
     write_cross_platform_signal_rows,
 )
 from poly_strategy.openai_rules import (
@@ -180,6 +187,22 @@ def main(argv=None) -> int:
                     tickers=args.ticker,
                 )
             print(f"wrote={count} out={args.out}")
+            return 0
+        if args.command == "collect-kalshi-event-markets":
+            event_tickers = list(args.event_ticker or [])
+            if args.candidates:
+                event_tickers.extend(
+                    event_tickers_from_cross_platform_candidates(json.loads(Path(args.candidates).read_text()))
+                )
+            count = collect_kalshi_markets_by_event_tickers(
+                Path(args.out),
+                event_tickers,
+                args.limit,
+                args.timeout,
+                args.proxy,
+                status=args.status,
+            )
+            print(f"events={len(set(event_tickers))} wrote={count} out={args.out}")
             return 0
         if args.command == "collect-kalshi-orderbooks":
             tickers = list(args.ticker or [])
@@ -481,6 +504,7 @@ def main(argv=None) -> int:
                 monitor_report_path=Path(args.monitor_report) if args.monitor_report else None,
                 execution_plans_path=Path(args.execution_plans) if args.execution_plans else None,
                 maker_adaptive_path=Path(args.maker_adaptive) if args.maker_adaptive else None,
+                cross_platform_scan_path=Path(args.cross_platform_scan) if args.cross_platform_scan else None,
             )
             if args.out:
                 write_success_status(
@@ -694,40 +718,58 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
+        if args.command == "expand-cross-platform-candidates":
+            row = expand_cross_platform_event_candidates(
+                json.loads(Path(args.candidates).read_text()),
+                Path(args.kalshi_markets),
+                polymarket_gamma_path=Path(args.polymarket_gamma) if args.polymarket_gamma else None,
+                top_n=args.top,
+                min_score=args.min_score,
+            )
+            if args.signals_out:
+                count = write_cross_platform_signal_rows(
+                    cross_platform_signal_rows(row, verified_only=args.verified_only),
+                    Path(args.signals_out),
+                )
+                row["signals_written"] = count
+                row["signals_out"] = args.signals_out
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"matches={row['match_count']} out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
         if args.command == "verify-cross-platform-matches":
-            model = args.model or os.environ.get("OPENAI_MODEL")
-            if not model:
+            clients = _cross_platform_verifier_clients(args)
+            if not clients:
                 print("error: model is required via --model or OPENAI_MODEL", file=sys.stderr)
                 return 1
-            match_report = json.loads(Path(args.matches).read_text())
+            match_report = normalize_cross_platform_match_report(json.loads(Path(args.matches).read_text()), top_n=args.top)
             matches = list(match_report.get("top", []))[: args.top]
-            client = OpenAICrossPlatformVerifierClient(
-                model=model,
-                timeout=args.timeout,
-                base_url=args.base_url,
-                retries=args.retries,
-                max_output_tokens=args.max_output_tokens,
-                reasoning_effort=args.reasoning_effort,
-                verbosity=args.verbosity,
-                api_mode=args.api_mode,
-            )
             verifications = []
             verification_errors = []
-            for batch in _chunks(matches, args.batch_size):
-                try:
-                    verifications.extend(client.verify_matches(batch))
-                except (OpenAIResponseError, OSError, TimeoutError, RuntimeError) as exc:
-                    verification_errors.append(
-                        {
-                            "error_type": exc.__class__.__name__,
-                            "message": str(exc),
-                            "batch_size": len(batch),
-                        }
-                    )
-                    if not args.continue_on_error:
-                        raise
+            provider_attempts = []
+            batch_jobs = list(enumerate(_chunks(matches, args.batch_size), start=1))
+            if args.client_workers <= 1 or len(batch_jobs) <= 1:
+                batch_results = [_verify_cross_platform_batch(batch_index, batch, clients) for batch_index, batch in batch_jobs]
+            else:
+                with ThreadPoolExecutor(max_workers=min(args.client_workers, len(batch_jobs))) as executor:
+                    futures = {
+                        executor.submit(_verify_cross_platform_batch, batch_index, batch, clients): batch_index
+                        for batch_index, batch in batch_jobs
+                    }
+                    batch_results = [future.result() for future in as_completed(futures)]
+                batch_results.sort(key=lambda item: item["batch_index"])
+            for batch_result in batch_results:
+                verifications.extend(batch_result["verifications"])
+                verification_errors.extend(batch_result["errors"])
+                provider_attempts.extend(batch_result["provider_attempts"])
+                if batch_result["failed"] and not args.continue_on_error:
+                    raise OpenAIResponseError("all configured cross-platform verifier providers failed")
             row = apply_cross_platform_verifications(match_report, verifications)
             row["llm_verification_row_count"] = len(verifications)
+            row["llm_provider_attempts"] = provider_attempts
             if verification_errors:
                 row["verification_errors"] = verification_errors
             if args.signals_out:
@@ -756,6 +798,23 @@ def main(argv=None) -> int:
                     f"pairs={row['pair_count']} snapshots={row['snapshot_count']} "
                     f"opportunities={row['opportunity_count']} out={args.out}"
                 )
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "filter-cross-platform-opportunities":
+            scan_report = json.loads(Path(args.scan).read_text())
+            scan_report["path"] = args.scan
+            row = opportunity_match_report_from_scan(
+                scan_report,
+                json.loads(Path(args.matches).read_text()),
+                top_n=args.top,
+                min_net_edge=args.min_net_edge,
+                require_option_match=not args.no_option_match,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"matches={row['match_count']} out={args.out}")
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
@@ -927,6 +986,18 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_kalshi.add_argument("--all-pages", action="store_true", help="fetch until the API cursor is exhausted")
     collect_kalshi.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     collect_kalshi.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+
+    collect_kalshi_event_markets = subparsers.add_parser(
+        "collect-kalshi-event-markets",
+        help="collect Kalshi market metadata for event tickers from cross-platform candidates",
+    )
+    collect_kalshi_event_markets.add_argument("--out", required=True, help="output raw Kalshi market NDJSON path")
+    collect_kalshi_event_markets.add_argument("--candidates", help="cross-platform candidate JSON with kalshi_event_ticker values")
+    collect_kalshi_event_markets.add_argument("--event-ticker", action="append", help="Kalshi event ticker; can be repeated")
+    collect_kalshi_event_markets.add_argument("--limit", type=int, default=1000, help="maximum markets per event")
+    collect_kalshi_event_markets.add_argument("--status", default="open", help="market status filter; empty string disables")
+    collect_kalshi_event_markets.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    collect_kalshi_event_markets.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
 
     collect_kalshi_books = subparsers.add_parser("collect-kalshi-orderbooks", help="collect Kalshi orderbooks by ticker")
     collect_kalshi_books.add_argument("--out", required=True, help="output raw Kalshi orderbook NDJSON path")
@@ -1264,6 +1335,7 @@ def _build_parser() -> argparse.ArgumentParser:
     success_status.add_argument("--monitor-report", help="realtime/paper monitor JSONL path")
     success_status.add_argument("--execution-plans", help="latest execution_plan NDJSON path")
     success_status.add_argument("--maker-adaptive", help="maker adaptive quote report JSON path")
+    success_status.add_argument("--cross-platform-scan", help="latest cross_platform_scan_report JSON path")
     success_status.add_argument("--out", help="output status JSON path; prints JSON when omitted")
     success_status.add_argument("--success-log", help="append non-empty success statuses to this NDJSON log")
 
@@ -1406,6 +1478,19 @@ def _build_parser() -> argparse.ArgumentParser:
     match_cross.add_argument("--top", type=int, default=100, help="maximum matches to include")
     match_cross.add_argument("--verified-only", action="store_true", help="write only semantically verified same-binary signals")
 
+    expand_cross = subparsers.add_parser(
+        "expand-cross-platform-candidates",
+        help="expand Kalshi event-level candidates into market-ticker match candidates",
+    )
+    expand_cross.add_argument("--candidates", required=True, help="cross-platform event candidate JSON path")
+    expand_cross.add_argument("--kalshi-markets", required=True, help="raw Kalshi market NDJSON path")
+    expand_cross.add_argument("--polymarket-gamma", help="raw Polymarket Gamma NDJSON path for resolution details")
+    expand_cross.add_argument("--out", help="output JSON match report path")
+    expand_cross.add_argument("--signals-out", help="append candidate matches as external_signal rows")
+    expand_cross.add_argument("--top", type=int, default=300, help="maximum expanded market matches to include")
+    expand_cross.add_argument("--min-score", type=float, default=0.0, help="minimum expanded text score")
+    expand_cross.add_argument("--verified-only", action="store_true", help="write only verified same-binary signals")
+
     verify_cross = subparsers.add_parser(
         "verify-cross-platform-matches",
         help="LLM-verify Polymarket/Kalshi same-binary match candidates",
@@ -1415,12 +1500,21 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_cross.add_argument("--signals-out", help="append verified matches as external_signal rows")
     verify_cross.add_argument("--top", type=int, default=50, help="top match candidates to verify")
     verify_cross.add_argument("--batch-size", type=int, default=5, help="match candidates per LLM verification request")
+    verify_cross.add_argument("--client-workers", type=int, default=1, help="parallel LLM verification batch workers")
     verify_cross.add_argument("--continue-on-error", action="store_true", help="keep verified rows from successful batches when a batch fails")
     verify_cross.add_argument("--verified-only", action="store_true", help="write only verified same-binary signals")
     verify_cross.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
     verify_cross.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
     verify_cross.add_argument("--api-mode", choices=["responses", "chat"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
+    verify_cross.add_argument("--backup-model", help="backup model; defaults to OPENAI_BACKUP_MODEL")
+    verify_cross.add_argument("--backup-base-url", help="backup OpenAI-compatible base URL; defaults to OPENAI_BACKUP_BASE_URL")
+    verify_cross.add_argument("--backup-api-mode", choices=["responses", "chat"], help="backup API mode; defaults to OPENAI_BACKUP_API_MODE")
+    verify_cross.add_argument("--fallback-model", help="fallback model; defaults to OPENAI_FALLBACK_MODEL")
+    verify_cross.add_argument("--fallback-base-url", help="fallback OpenAI-compatible base URL; defaults to OPENAI_FALLBACK_BASE_URL")
+    verify_cross.add_argument("--fallback-api-mode", choices=["responses", "chat"], help="fallback API mode; defaults to OPENAI_FALLBACK_API_MODE")
     verify_cross.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")
+    verify_cross.add_argument("--backup-timeout", type=float, help="backup provider HTTP timeout; defaults to OPENAI_BACKUP_TIMEOUT or --timeout")
+    verify_cross.add_argument("--fallback-timeout", type=float, help="fallback provider HTTP timeout; defaults to OPENAI_FALLBACK_TIMEOUT or --timeout")
     verify_cross.add_argument("--retries", type=int, default=2, help="retry count for retryable OpenAI-compatible API errors")
     verify_cross.add_argument("--max-output-tokens", type=int, default=4000, help="maximum model output tokens")
     verify_cross.add_argument("--reasoning-effort", default="medium", help="OpenAI-compatible reasoning effort")
@@ -1439,7 +1533,19 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_cross.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
     scan_cross.add_argument("--book-workers", type=int, default=1, help="parallel Polymarket CLOB book fetch workers")
     scan_cross.add_argument("--min-net-edge", type=float, default=0.0, help="minimum cross-platform edge per share")
+    scan_cross.add_argument("--max-capital-per-trade", type=float, help="capital cap used for small-bankroll edge estimates")
     scan_cross.add_argument("--include-unverified", action="store_true", help="also scan unverified match candidates")
+
+    filter_cross = subparsers.add_parser(
+        "filter-cross-platform-opportunities",
+        help="turn cross-platform scan opportunities back into LLM verification candidates",
+    )
+    filter_cross.add_argument("--scan", required=True, help="cross_platform_scan_report JSON path")
+    filter_cross.add_argument("--matches", required=True, help="source cross_platform_match_report JSON path")
+    filter_cross.add_argument("--out", help="output filtered match report path")
+    filter_cross.add_argument("--top", type=int, default=60, help="maximum opportunity candidates to keep")
+    filter_cross.add_argument("--min-net-edge", type=float, default=0.0, help="minimum scanned edge per share")
+    filter_cross.add_argument("--no-option-match", action="store_true", help="do not require option text to match")
 
     watchlist = subparsers.add_parser("build-watchlist", help="write a standardized Polymarket token watchlist")
     watchlist.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
@@ -1699,6 +1805,7 @@ def _scan_cross_platform_once(args) -> dict:
     snapshots_path = Path(args.snapshots_out)
     kalshi_orderbooks_path = Path(args.kalshi_orderbooks_out)
     snapshot_offset = _file_size(snapshots_path)
+    kalshi_orderbook_offset = _file_size(kalshi_orderbooks_path)
     poly_market_ids = [pair["polymarket_market_id"] for pair in pairs]
     kalshi_tickers = [pair["kalshi_ticker"] for pair in pairs]
 
@@ -1714,7 +1821,13 @@ def _scan_cross_platform_once(args) -> dict:
         refresh_missing_gamma=True,
     )
     kalshi_orderbook_count = collect_kalshi_orderbooks(kalshi_orderbooks_path, kalshi_tickers, args.timeout, args.proxy)
-    kalshi_snapshot_count = write_kalshi_binary_snapshots(kalshi_orderbooks_path, snapshots_path)
+    orderbook_text, _ = _read_appended_text(kalshi_orderbooks_path, kalshi_orderbook_offset)
+    kalshi_snapshot_rows = list(kalshi_binary_snapshot_rows_from_orderbook_lines(orderbook_text.splitlines()))
+    snapshots_path.parent.mkdir(parents=True, exist_ok=True)
+    with snapshots_path.open("a") as handle:
+        for row in kalshi_snapshot_rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    kalshi_snapshot_count = len(kalshi_snapshot_rows)
     appended_text, _ = _read_appended_text(snapshots_path, snapshot_offset)
     snapshots = list(snapshots_from_ndjson_lines(appended_text.splitlines()))
     by_venue_market = {(snapshot.venue, snapshot.market_id): snapshot for snapshot in snapshots}
@@ -1736,6 +1849,11 @@ def _scan_cross_platform_once(args) -> dict:
         for opportunity in find_cross_venue_same_binary(polymarket_snapshot, kalshi_snapshot, min_net_edge=args.min_net_edge):
             opportunity_row = opportunity_to_row(opportunity)
             opportunity_row["pair"] = pair
+            if args.max_capital_per_trade is not None:
+                opportunity_row["capital_capped"] = _capital_capped_opportunity_row(
+                    opportunity_row,
+                    args.max_capital_per_trade,
+                )
             opportunities.append(opportunity_row)
 
     opportunities.sort(key=lambda row: (-float(row.get("net_edge_per_share") or 0.0), row.get("key") or ""))
@@ -1755,6 +1873,148 @@ def _scan_cross_platform_once(args) -> dict:
         "opportunities": opportunities,
         "skipped_pairs": skipped_pairs,
     }
+
+
+def _cross_platform_verifier_clients(args) -> list:
+    specs = [
+        (
+            "primary",
+            args.model or os.environ.get("OPENAI_MODEL"),
+            os.environ.get("OPENAI_API_KEY"),
+            args.base_url or os.environ.get("OPENAI_BASE_URL"),
+            args.api_mode or os.environ.get("OPENAI_API_MODE"),
+            args.timeout,
+        ),
+        (
+            "backup",
+            args.backup_model or os.environ.get("OPENAI_BACKUP_MODEL"),
+            os.environ.get("OPENAI_BACKUP_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+            args.backup_base_url or os.environ.get("OPENAI_BACKUP_BASE_URL"),
+            args.backup_api_mode or os.environ.get("OPENAI_BACKUP_API_MODE"),
+            _optional_float(args.backup_timeout, os.environ.get("OPENAI_BACKUP_TIMEOUT"), args.timeout),
+        ),
+        (
+            "fallback",
+            args.fallback_model or os.environ.get("OPENAI_FALLBACK_MODEL"),
+            os.environ.get("OPENAI_FALLBACK_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+            args.fallback_base_url or os.environ.get("OPENAI_FALLBACK_BASE_URL"),
+            args.fallback_api_mode or os.environ.get("OPENAI_FALLBACK_API_MODE"),
+            _optional_float(args.fallback_timeout, os.environ.get("OPENAI_FALLBACK_TIMEOUT"), args.timeout),
+        ),
+    ]
+    clients = []
+    seen = set()
+    for label, model, api_key, base_url, api_mode, timeout in specs:
+        if not model:
+            continue
+        identity = (model, api_key, base_url, api_mode)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        clients.append(
+            (
+                label,
+                OpenAICrossPlatformVerifierClient(
+                    model=model,
+                    api_key=api_key,
+                    timeout=timeout,
+                    base_url=base_url,
+                    retries=args.retries,
+                    max_output_tokens=args.max_output_tokens,
+                    reasoning_effort=args.reasoning_effort,
+                    verbosity=args.verbosity,
+                    api_mode=api_mode,
+                ),
+            )
+        )
+    return clients
+
+
+def _verify_cross_platform_batch(batch_index: int, batch: list, clients: list) -> dict:
+    verifications = []
+    errors = []
+    provider_attempts = []
+    batch_verified = False
+    for provider_label, client in clients:
+        try:
+            rows = client.verify_matches(batch)
+            if batch and not rows:
+                raise OpenAIResponseError("parsed zero cross-platform verifications")
+            verifications.extend(rows)
+            provider_attempts.append(
+                {
+                    "batch_index": batch_index,
+                    "provider": provider_label,
+                    "status": "ok",
+                    "batch_size": len(batch),
+                    "parsed_rows": len(rows),
+                }
+            )
+            batch_verified = True
+            break
+        except (OpenAIResponseError, OSError, TimeoutError, RuntimeError) as exc:
+            errors.append(
+                {
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                    "batch_size": len(batch),
+                    "batch_index": batch_index,
+                    "provider": provider_label,
+                }
+            )
+            provider_attempts.append(
+                {
+                    "batch_index": batch_index,
+                    "provider": provider_label,
+                    "status": "error",
+                    "batch_size": len(batch),
+                    "error_type": exc.__class__.__name__,
+                }
+            )
+    if not batch_verified:
+        errors.append(
+            {
+                "batch_size": len(batch),
+                "batch_index": batch_index,
+                "error_type": "all_providers_failed",
+                "message": "all configured cross-platform verifier providers failed",
+            }
+        )
+    return {
+        "batch_index": batch_index,
+        "verifications": verifications,
+        "errors": errors,
+        "provider_attempts": provider_attempts,
+        "failed": not batch_verified,
+    }
+
+
+def _capital_capped_opportunity_row(opportunity_row: dict, max_capital: float) -> dict:
+    if max_capital <= 0:
+        raise ValueError("--max-capital-per-trade must be positive")
+    cost_per_share = float(opportunity_row.get("cost_per_share") or 0.0)
+    quantity = float(opportunity_row.get("quantity") or 0.0)
+    edge_per_share = float(opportunity_row.get("net_edge_per_share") or 0.0)
+    if cost_per_share <= 0 or quantity <= 0:
+        capped_quantity = 0.0
+    else:
+        capped_quantity = min(quantity, max_capital / cost_per_share)
+    capital_used = capped_quantity * cost_per_share
+    return {
+        "max_capital": max_capital,
+        "quantity": capped_quantity,
+        "capital_used": capital_used,
+        "edge": capped_quantity * edge_per_share,
+        "roi": (edge_per_share / cost_per_share) if cost_per_share > 0 else 0.0,
+    }
+
+
+def _optional_float(primary, env_value, default: float) -> float:
+    if primary is not None:
+        return float(primary)
+    if env_value not in (None, ""):
+        return float(env_value)
+    return float(default)
 
 
 def _current_monitor_opportunities(result) -> list:

@@ -13,22 +13,26 @@ def success_status_report(
     monitor_report_path: Optional[Path] = None,
     execution_plans_path: Optional[Path] = None,
     maker_adaptive_path: Optional[Path] = None,
+    cross_platform_scan_path: Optional[Path] = None,
     generated_at: Optional[str] = None,
 ) -> dict:
     monitor = _monitor_summary(monitor_report_path)
     plans = _execution_plan_summary(execution_plans_path)
     maker = _maker_adaptive_summary(maker_adaptive_path)
-    status = _success_status(monitor, plans, maker)
+    cross_platform = _cross_platform_summary(cross_platform_scan_path)
+    status = _success_status(monitor, plans, maker, cross_platform)
     return {
         "type": "success_status_report",
         "generated_at": generated_at or _utc_now(),
         "status": status,
         "live_success": status == "live_success",
         "dry_run_executable": status == "dry_run_executable",
-        "paper_success_candidate": status in {"live_success", "dry_run_executable", "stable_paper_opportunity"},
+        "paper_success_candidate": status
+        in {"live_success", "dry_run_executable", "stable_paper_opportunity", "cross_platform_paper_opportunity"},
         "monitor": monitor,
         "execution_plans": plans,
         "maker_adaptive": maker,
+        "cross_platform": cross_platform,
     }
 
 
@@ -100,13 +104,45 @@ def _maker_adaptive_summary(path: Optional[Path]) -> dict:
     }
 
 
-def _success_status(monitor: dict, plans: dict, maker: dict) -> str:
+def _cross_platform_summary(path: Optional[Path]) -> dict:
+    row = _read_json(path)
+    if not row:
+        return {"path": str(path) if path else None, "found": False}
+    opportunities = list(row.get("opportunities") or [])
+    positive = [
+        opportunity
+        for opportunity in opportunities
+        if float(opportunity.get("net_edge_per_share") or 0.0) > 0
+        and bool((opportunity.get("pair") or {}).get("trade_allowed"))
+    ]
+    positive.sort(
+        key=lambda opportunity: -float(
+            ((opportunity.get("capital_capped") or {}).get("edge"))
+            if (opportunity.get("capital_capped") or {}).get("edge") is not None
+            else opportunity.get("total_edge") or 0.0
+        )
+    )
+    top = positive[0] if positive else None
+    return {
+        "path": str(path),
+        "found": True,
+        "pair_count": int(row.get("pair_count") or 0),
+        "opportunity_count": int(row.get("opportunity_count") or 0),
+        "verified_positive_count": len(positive),
+        "top_verified_positive": top,
+        "top_capital_capped_edge": float(((top or {}).get("capital_capped") or {}).get("edge") or 0.0),
+    }
+
+
+def _success_status(monitor: dict, plans: dict, maker: dict, cross_platform: dict) -> str:
     if plans.get("live_success_count", 0) > 0:
         return "live_success"
     if plans.get("dry_run_passed_count", 0) > 0:
         return "dry_run_executable"
     if monitor.get("stable_paper_trade_count", 0) > 0 and monitor.get("stable_paper_edge", 0.0) > 0:
         return "stable_paper_opportunity"
+    if cross_platform.get("verified_positive_count", 0) > 0:
+        return "cross_platform_paper_opportunity"
     if maker.get("status") == "positive_ev_config_found":
         return "maker_positive_ev"
     return "no_success"

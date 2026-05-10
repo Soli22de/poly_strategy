@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from poly_strategy.collectors import (
     binary_snapshot_rows_from_gamma_markets,
+    collect_kalshi_markets_by_event_tickers,
     collect_kalshi_markets_pages,
     collect_polymarket_binary_snapshots_for_market_ids,
     collect_polymarket_binary_snapshots_for_markets,
@@ -14,6 +15,7 @@ from poly_strategy.collectors import (
     collect_polymarket_gamma_markets_by_id,
     fetch_polymarket_books_by_token_id,
     kalshi_binary_snapshot_rows_from_orderbooks,
+    kalshi_binary_snapshot_rows_from_orderbook_lines,
     expand_market_ids_with_neg_risk_groups,
     limit_market_ids_by_gamma_order,
     market_ids_from_rule_file,
@@ -133,6 +135,30 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual([row["market_id"] for row in rows], ["A", "B"])
         self.assertEqual([call[3] for call in calls], [None, "cursor-1"])
+
+    def test_collect_kalshi_markets_by_event_tickers_filters_each_event(self):
+        calls = []
+
+        def fetch_page(limit, timeout, proxy, cursor=None, status="open", tickers=None, event_ticker=None):
+            calls.append((limit, timeout, proxy, status, event_ticker))
+            return ([{"ticker": f"{event_ticker}-MKT", "event_ticker": event_ticker}], None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "kalshi-event-markets.ndjson"
+            with patch("poly_strategy.collectors.fetch_kalshi_markets_page", side_effect=fetch_page):
+                count = collect_kalshi_markets_by_event_tickers(
+                    path,
+                    ["KXEVENT", "KXEVENT", "KXOTHER"],
+                    limit=1000,
+                    timeout=3.0,
+                    proxy="127.0.0.1:10808",
+                    status="open",
+                )
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual([call[4] for call in calls], ["KXEVENT", "KXOTHER"])
+        self.assertEqual([row["market_id"] for row in rows], ["KXEVENT-MKT", "KXOTHER-MKT"])
 
     def test_expand_market_ids_with_neg_risk_groups_adds_known_group_members(self):
         markets = [
@@ -535,6 +561,7 @@ class CollectorTests(unittest.TestCase):
             )
 
             rows = list(kalshi_binary_snapshot_rows_from_orderbooks(orderbooks))
+            rows_from_lines = list(kalshi_binary_snapshot_rows_from_orderbook_lines(orderbooks.read_text().splitlines()))
             count = write_kalshi_binary_snapshots(orderbooks, out)
             written = [json.loads(line) for line in out.read_text().splitlines()]
 
@@ -543,7 +570,29 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(rows[0]["yes"]["bids"], [[0.45, 10.0], [0.4, 5.0]])
         self.assertEqual(rows[0]["yes"]["asks"], [[0.45, 8.0]])
         self.assertEqual(rows[0]["no"]["asks"], [[0.55, 10.0], [0.6, 5.0]])
+        self.assertEqual(rows_from_lines, rows)
         self.assertEqual(written[0]["market_id"], "KXTEST")
+
+    def test_kalshi_orderbooks_accept_orderbook_fp_payloads(self):
+        row = json.dumps(
+            {
+                "type": "raw_kalshi_orderbook",
+                "ts": "2026-05-09T00:00:00Z",
+                "market_id": "KXTEST",
+                "raw": {
+                    "orderbook_fp": {
+                        "yes_dollars": [["0.9100", "5.00"]],
+                        "no_dollars": [["0.0700", "4.00"]],
+                    }
+                },
+            }
+        )
+
+        snapshots = list(kalshi_binary_snapshot_rows_from_orderbook_lines([row]))
+
+        self.assertEqual(snapshots[0]["yes"]["bids"], [[0.91, 5.0]])
+        self.assertEqual(snapshots[0]["yes"]["asks"], [[0.93, 4.0]])
+        self.assertEqual(snapshots[0]["no"]["asks"], [[0.09, 5.0]])
 
     def test_raw_gamma_markets_from_ndjson_dedupes_repeated_collections(self):
         rows = [
