@@ -54,7 +54,7 @@ from poly_strategy.external_signals import (
     polymarket_market_ids_from_external_signals,
 )
 from poly_strategy.exhaustive_groups import promotion_candidate_count, promote_exhaustive_groups, result_to_row
-from poly_strategy.maker import maker_scan_report
+from poly_strategy.maker import maker_fill_sim_report, maker_scan_report
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
@@ -305,6 +305,32 @@ def main(argv=None) -> int:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
                 print(f"candidates={row['candidate_count']} out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "maker-fill-sim":
+            row = maker_fill_sim_report(
+                Path(args.snapshots),
+                rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
+                tick_size=args.tick_size,
+                min_edge=args.min_edge,
+                min_roi=args.min_roi,
+                max_capital=args.max_capital,
+                max_leg_count=args.max_leg_count,
+                quote_mode=args.quote_mode,
+                horizon_seconds=args.horizon_seconds,
+                max_candidates_per_batch=args.max_candidates_per_batch,
+                top_n=args.top,
+                include_yes_no_pairs=args.include_yes_no_pairs,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(
+                    f"observations={row['candidate_observation_count']} completed={row['completed_count']} "
+                    f"partial={row['partial_count']} out={args.out}"
+                )
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
@@ -1011,6 +1037,25 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include single-market paired maker quotes; these are market-making candidates, not arbitrage",
     )
+
+    maker_fill = subparsers.add_parser(
+        "maker-fill-sim",
+        help="simulate whether passive maker basket candidates would have filled in later snapshots",
+    )
+    maker_fill.add_argument("--snapshots", required=True, help="historical binary snapshot NDJSON path")
+    maker_fill.add_argument("--rules", help="JSON file with discovered rules")
+    maker_fill.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk groups")
+    maker_fill.add_argument("--out", help="output maker fill simulation JSON path; prints JSON when omitted")
+    maker_fill.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
+    maker_fill.add_argument("--quote-mode", choices=["near_ask", "improve_bid"], default="near_ask")
+    maker_fill.add_argument("--min-edge", type=float, default=0.0, help="minimum maker edge per completed bundle")
+    maker_fill.add_argument("--min-roi", type=float, help="minimum maker ROI per completed bundle")
+    maker_fill.add_argument("--max-capital", type=float, help="capital cap used for suggested quantity and expected edge")
+    maker_fill.add_argument("--max-leg-count", type=int, default=30, help="maximum basket leg count")
+    maker_fill.add_argument("--horizon-seconds", type=float, default=300.0, help="seconds after quote time to look for fills")
+    maker_fill.add_argument("--max-candidates-per-batch", type=int, default=25, help="top maker candidates to simulate per timestamp")
+    maker_fill.add_argument("--top", type=int, default=25, help="top fill results to include")
+    maker_fill.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired maker quotes")
 
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")

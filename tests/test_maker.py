@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from poly_strategy.maker import maker_scan_report
+from poly_strategy.maker import maker_fill_sim_report, maker_scan_report
 
 
 class MakerTests(unittest.TestCase):
@@ -54,13 +54,79 @@ class MakerTests(unittest.TestCase):
 
         self.assertEqual(report["candidate_count"], 0)
 
+    def test_maker_fill_sim_counts_completed_candidates(self):
+        rows = [
+            _snapshot("a", 0.60, 0.64, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", 0.63, 0.68, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", 0.66, 0.70, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", 0.60, 0.63, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", 0.63, 0.67, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", 0.66, 0.69, ts="2026-05-10T00:01:00Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
 
-def _snapshot(market_id: str, no_bid: float, no_ask: float):
+            report = maker_fill_sim_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(report["candidate_observation_count"], 1)
+        self.assertEqual(report["completed_count"], 1)
+        self.assertEqual(report["partial_count"], 0)
+        self.assertEqual(report["top_completed"][0]["filled_leg_count"], 3)
+        self.assertEqual(report["top_completed"][0]["completion_ts"], "2026-05-10T00:01:00Z")
+
+    def test_maker_fill_sim_counts_partial_candidates(self):
+        rows = [
+            _snapshot("a", 0.60, 0.64, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", 0.63, 0.68, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", 0.66, 0.70, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", 0.60, 0.63, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", 0.63, 0.80, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", 0.66, 0.80, ts="2026-05-10T00:01:00Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            report = maker_fill_sim_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(report["completed_count"], 0)
+        self.assertEqual(report["partial_count"], 1)
+        self.assertEqual(report["top_partial"][0]["filled_leg_count"], 1)
+
+
+def _snapshot(market_id: str, no_bid: float, no_ask: float, ts: str = "2026-05-10T00:00:00Z"):
     yes_bid = max(0.0, 1.0 - no_ask - 0.02)
     yes_ask = min(1.0, 1.0 - no_bid + 0.02)
     return {
         "type": "binary_snapshot",
-        "ts": "2026-05-10T00:00:00Z",
+        "ts": ts,
         "venue": "polymarket",
         "market_id": market_id,
         "fee_rate": 0.05,

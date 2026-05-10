@@ -213,6 +213,7 @@ case "$COMMAND" in
     DISCOVERY_INTERVAL="${DISCOVERY_INTERVAL:-3600}"
     RULE_PROMOTION_INTERVAL="${RULE_PROMOTION_INTERVAL:-1800}"
     MAKER_SCAN_INTERVAL="${MAKER_SCAN_INTERVAL:-300}"
+    MAKER_FILL_SIM_INTERVAL="${MAKER_FILL_SIM_INTERVAL:-900}"
     LOOP_SLEEP="${LOOP_SLEEP:-5}"
 
     ENABLE_ALERTS="${ENABLE_ALERTS:-1}"
@@ -224,6 +225,7 @@ case "$COMMAND" in
     ENABLE_DISCOVERY_REFRESH="${ENABLE_DISCOVERY_REFRESH:-1}"
     ENABLE_RULE_PROMOTION="${ENABLE_RULE_PROMOTION:-1}"
     ENABLE_MAKER_SCAN="${ENABLE_MAKER_SCAN:-1}"
+    ENABLE_MAKER_FILL_SIM="${ENABLE_MAKER_FILL_SIM:-1}"
 
     WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
     RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
@@ -236,6 +238,7 @@ case "$COMMAND" in
     next_discovery=0
     next_promotion=0
     next_maker_scan=0
+    next_maker_fill_sim=0
 
     log "manager_started pid=$$" >> "$SUPERVISOR_LOG"
     while true; do
@@ -287,6 +290,11 @@ case "$COMMAND" in
       if [[ "$ENABLE_MAKER_SCAN" == "1" && "$now" -ge "$next_maker_scan" ]]; then
         run_logged maker-scan scripts/run_maker_scan_once.sh
         next_maker_scan=$((now + MAKER_SCAN_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_MAKER_FILL_SIM" == "1" && "$now" -ge "$next_maker_fill_sim" ]]; then
+        run_logged maker-fill-sim scripts/run_maker_fill_sim_once.sh
+        next_maker_fill_sim=$((now + MAKER_FILL_SIM_INTERVAL))
       fi
 
       if [[ "$ENABLE_DATA_ROTATION" == "1" && "$now" -ge "$next_rotation" ]]; then

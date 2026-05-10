@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -60,6 +61,74 @@ def maker_scan_report(
         "candidate_count": len(candidates),
         "by_kind": _summary_by_kind(candidates),
         "top": candidates[:top_n],
+    }
+
+
+def maker_fill_sim_report(
+    snapshots_path: Path,
+    rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
+    tick_size: float = 0.001,
+    min_edge: float = 0.0,
+    min_roi: Optional[float] = None,
+    max_capital: Optional[float] = None,
+    max_leg_count: int = 30,
+    quote_mode: str = "near_ask",
+    horizon_seconds: float = 300.0,
+    max_candidates_per_batch: int = 25,
+    top_n: int = 25,
+    include_yes_no_pairs: bool = False,
+) -> dict:
+    if horizon_seconds < 0:
+        raise ValueError("horizon_seconds must be non-negative")
+    if max_candidates_per_batch < 1:
+        raise ValueError("max_candidates_per_batch must be at least 1")
+    if top_n < 0:
+        raise ValueError("top_n must be non-negative")
+
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
+    batches = list(snapshot_batches_from_path(snapshots_path))
+    results = []
+    for index, batch in enumerate(batches[:-1]):
+        candidates = scan_maker_candidates(
+            batch,
+            rule_set,
+            tick_size=tick_size,
+            min_edge=min_edge,
+            min_roi=min_roi,
+            max_capital=max_capital,
+            max_leg_count=max_leg_count,
+            include_yes_no_pairs=include_yes_no_pairs,
+            quote_mode=quote_mode,
+        )
+        candidates = _dedupe_sim_candidates(candidates)[:max_candidates_per_batch]
+        if not candidates:
+            continue
+        future_batches = _future_batches_within_horizon(batches, index, horizon_seconds)
+        for candidate in candidates:
+            results.append(_simulate_candidate_fills(candidate, future_batches))
+
+    completed = [row for row in results if row["completed"]]
+    partial = [row for row in results if row["partial_fill"] and not row["completed"]]
+    no_fill = [row for row in results if row["filled_leg_count"] == 0]
+    return {
+        "type": "maker_fill_sim_report",
+        "snapshots_path": str(snapshots_path),
+        "rules_path": str(rules_path) if rules_path else None,
+        "gamma_path": str(gamma_path) if gamma_path else None,
+        "batch_count": len(batches),
+        "candidate_observation_count": len(results),
+        "completed_count": len(completed),
+        "partial_count": len(partial),
+        "no_fill_count": len(no_fill),
+        "completion_rate": len(completed) / len(results) if results else 0.0,
+        "partial_rate": len(partial) / len(results) if results else 0.0,
+        "completed_expected_edge_at_cap": sum(float(row.get("expected_edge_at_cap") or 0.0) for row in completed),
+        "max_completed_expected_edge_at_cap": max((float(row.get("expected_edge_at_cap") or 0.0) for row in completed), default=0.0),
+        "by_kind": _fill_summary_by_kind(results),
+        "top_completed": sorted(completed, key=_fill_result_sort_key)[:top_n],
+        "top_partial": sorted(partial, key=_fill_result_sort_key)[:top_n],
+        "top_unfilled": sorted(no_fill, key=_fill_result_sort_key)[:top_n],
     }
 
 
@@ -160,6 +229,20 @@ def latest_snapshot_batch(path: Path) -> List[BinaryMarketSnapshot]:
         return []
     latest_ts = snapshots[-1].ts
     return [snapshot for snapshot in snapshots if snapshot.ts == latest_ts]
+
+
+def snapshot_batches_from_path(path: Path) -> Iterable[List[BinaryMarketSnapshot]]:
+    batch = []
+    current_ts = object()
+    with path.open() as handle:
+        for snapshot in snapshots_from_ndjson_lines(handle):
+            if snapshot.ts != current_ts and batch:
+                yield batch
+                batch = []
+            current_ts = snapshot.ts
+            batch.append(snapshot)
+    if batch:
+        yield batch
 
 
 def _maker_candidate_row(
@@ -375,3 +458,166 @@ def _summary_by_kind(rows: List[dict]) -> list:
         item["max_maker_roi"] = max(item["max_maker_roi"], row["maker_roi"])
         item["max_expected_edge_at_cap"] = max(item["max_expected_edge_at_cap"], row.get("expected_edge_at_cap") or 0.0)
     return sorted(summary.values(), key=lambda row: (-row["max_expected_edge_at_cap"], row["kind"]))
+
+
+def _future_batches_within_horizon(
+    batches: List[List[BinaryMarketSnapshot]],
+    index: int,
+    horizon_seconds: float,
+) -> List[List[BinaryMarketSnapshot]]:
+    future = []
+    start_ts = _batch_ts(batches[index])
+    start_dt = _parse_ts(start_ts)
+    for batch in batches[index + 1 :]:
+        if horizon_seconds > 0 and start_dt is not None:
+            batch_dt = _parse_ts(_batch_ts(batch))
+            if batch_dt is not None and (batch_dt - start_dt).total_seconds() > horizon_seconds:
+                break
+        future.append(batch)
+    return future
+
+
+def _simulate_candidate_fills(candidate: dict, future_batches: List[List[BinaryMarketSnapshot]]) -> dict:
+    open_legs = {index: leg for index, leg in enumerate(candidate.get("legs", []))}
+    fills = []
+    for batch in future_batches:
+        by_market_id = {snapshot.market_id: snapshot for snapshot in batch}
+        for index, leg in list(open_legs.items()):
+            snapshot = by_market_id.get(str(leg.get("market_id") or ""))
+            if snapshot is None:
+                continue
+            observation = _leg_fill_observation(snapshot, leg)
+            if observation is None:
+                continue
+            fills.append({"leg_index": index, **observation})
+            del open_legs[index]
+        if not open_legs:
+            break
+
+    leg_count = len(candidate.get("legs", []))
+    filled_count = leg_count - len(open_legs)
+    row = {
+        "candidate_key": _candidate_identity(candidate),
+        "kind": candidate.get("kind"),
+        "start_ts": candidate.get("ts"),
+        "completion_ts": fills[-1]["fill_ts"] if filled_count == leg_count and fills else None,
+        "completed": filled_count == leg_count and leg_count > 0,
+        "partial_fill": 0 < filled_count < leg_count,
+        "filled_leg_count": filled_count,
+        "leg_count": leg_count,
+        "fill_ratio": filled_count / leg_count if leg_count else 0.0,
+        "maker_edge_per_share": candidate.get("maker_edge_per_share"),
+        "maker_roi": candidate.get("maker_roi"),
+        "expected_edge_at_cap": candidate.get("expected_edge_at_cap"),
+        "passive_cost_per_share": candidate.get("passive_cost_per_share"),
+        "market_ids": candidate.get("market_ids"),
+        "legs": candidate.get("legs"),
+        "fills": fills,
+        "unfilled_legs": [open_legs[index] for index in sorted(open_legs)],
+        "risk_flags": candidate.get("risk_flags"),
+    }
+    return row
+
+
+def _leg_fill_observation(snapshot: BinaryMarketSnapshot, leg: dict) -> Optional[dict]:
+    token = str(leg.get("token") or "")
+    book = _token_book(snapshot, token)
+    if not book.asks:
+        return None
+    best_ask = book.asks[0].price
+    limit_price = float(leg.get("limit_price") or 0.0)
+    if best_ask > limit_price:
+        return None
+    return {
+        "fill_ts": snapshot.ts,
+        "market_id": snapshot.market_id,
+        "token": token,
+        "limit_price": limit_price,
+        "observed_best_ask": best_ask,
+    }
+
+
+def _dedupe_sim_candidates(candidates: List[dict]) -> List[dict]:
+    deduped = {}
+    for candidate in candidates:
+        key = tuple(
+            sorted(
+                (
+                    str(leg.get("venue") or ""),
+                    str(leg.get("market_id") or ""),
+                    str(leg.get("token") or ""),
+                    float(leg.get("limit_price") or 0.0),
+                )
+                for leg in candidate.get("legs", [])
+            )
+        )
+        previous = deduped.get(key)
+        if previous is None or _candidate_sort_key(candidate) < _candidate_sort_key(previous):
+            deduped[key] = candidate
+    rows = list(deduped.values())
+    rows.sort(key=_candidate_sort_key)
+    return rows
+
+
+def _fill_summary_by_kind(rows: List[dict]) -> list:
+    summary = {}
+    for row in rows:
+        item = summary.setdefault(
+            row.get("kind") or "unknown",
+            {
+                "kind": row.get("kind") or "unknown",
+                "candidate_observation_count": 0,
+                "completed_count": 0,
+                "partial_count": 0,
+                "no_fill_count": 0,
+                "max_completed_expected_edge_at_cap": 0.0,
+            },
+        )
+        item["candidate_observation_count"] += 1
+        if row.get("completed"):
+            item["completed_count"] += 1
+            item["max_completed_expected_edge_at_cap"] = max(
+                item["max_completed_expected_edge_at_cap"],
+                float(row.get("expected_edge_at_cap") or 0.0),
+            )
+        elif row.get("partial_fill"):
+            item["partial_count"] += 1
+        elif row.get("filled_leg_count") == 0:
+            item["no_fill_count"] += 1
+    for item in summary.values():
+        count = item["candidate_observation_count"]
+        item["completion_rate"] = item["completed_count"] / count if count else 0.0
+        item["partial_rate"] = item["partial_count"] / count if count else 0.0
+    return sorted(summary.values(), key=lambda row: (-row["completed_count"], row["kind"]))
+
+
+def _fill_result_sort_key(row: dict) -> tuple:
+    return (
+        not bool(row.get("completed")),
+        -float(row.get("expected_edge_at_cap") or 0.0),
+        -float(row.get("fill_ratio") or 0.0),
+        str(row.get("candidate_key") or ""),
+    )
+
+
+def _candidate_identity(candidate: dict) -> str:
+    legs = "|".join(
+        sorted(
+            f"{leg.get('venue')}:{leg.get('market_id')}:{leg.get('token')}:{leg.get('side')}@{leg.get('limit_price')}"
+            for leg in candidate.get("legs", [])
+        )
+    )
+    return f"{candidate.get('kind')}:{legs}"
+
+
+def _batch_ts(batch: List[BinaryMarketSnapshot]) -> Optional[str]:
+    return batch[0].ts if batch else None
+
+
+def _parse_ts(value: Optional[str]):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None

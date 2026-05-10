@@ -138,6 +138,10 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - These are not safe live trades yet; they require all legs to fill and remain dry-run only.
 - [x] Added an overwrite-only latest snapshot file for realtime scans, so wider watchlists can feed maker diagnostics without relying only on ever-growing raw snapshot logs.
 - [x] Raised default realtime watchlist coverage to 1000 markets with more high-liquidity and neg-risk groups.
+- [x] Added conservative maker fill simulation.
+  - A maker buy leg counts as possibly filled only if a later snapshot shows `best_ask <= our_limit`.
+  - Current short-window result: no completed fills observed yet.
+  - This means the maker candidates are currently theoretical only; they need longer paper observation or different quote logic before live use.
 
 ## Current Profitability Status
 
@@ -149,7 +153,8 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
 
 - [ ] Keep the realtime monitor running in paper mode and collect at least 24 hours of stable-paper-trade evidence before enabling any live order path.
 - [x] Add a maker-order research module that computes passive bid limits for complete/neg-risk baskets; this is not pure arbitrage and stays dry-run until fill/reconciliation risk is modeled.
-- [ ] Add maker fill simulation from WebSocket deltas so candidates are ranked by realized fill probability, not only theoretical edge.
+- [x] Add maker fill simulation from WebSocket/snapshot deltas so candidates are ranked by realized fill probability, not only theoretical edge.
+- [ ] Add adaptive quote placement that compares near-ask edge against observed fill probability and rejects expected-value-negative quotes.
 - [ ] Improve cross-platform matching beyond token Jaccard by adding event/category filters and rejecting Kalshi multi-leg combo markets before LLM verification.
 - [ ] Add ROI-first opportunity ranking so small-bankroll alerts prioritize executable dollars and not only edge per share.
 - [x] Add a compact latest-snapshot store so wide probes can be run without writing tens of MB per minute.
