@@ -73,6 +73,46 @@ class PaperTests(unittest.TestCase):
         self.assertAlmostEqual(trade.opportunity.net_edge_per_share, 0.20)
         self.assertEqual([leg.worst_price for leg in trade.opportunity.legs], [0.40, 0.40])
 
+    def test_select_paper_trades_reprices_kalshi_fee_by_venue(self):
+        opportunity = Opportunity(
+            kind="cross_venue_same_binary",
+            quantity=100,
+            cost_per_share=0.980773,
+            net_edge_per_share=0.019227,
+            legs=[
+                Leg(
+                    "polymarket",
+                    "pm",
+                    "YES",
+                    "buy",
+                    0.16,
+                    100,
+                    "pm-yes",
+                    levels=[Level(0.16, 100)],
+                ),
+                Leg(
+                    "kalshi",
+                    "kx",
+                    "NO",
+                    "buy",
+                    0.81,
+                    100,
+                    "kx-no",
+                    fee_rate=0.07,
+                    levels=[Level(0.81, 100)],
+                ),
+            ],
+        )
+
+        selection = select_paper_trades([opportunity], max_capital_per_trade=10)
+
+        self.assertEqual(len(selection.trades), 1)
+        trade = selection.trades[0]
+        expected_cost_per_share = 0.16 + 0.81 + (0.07 * 0.81 * 0.19)
+        self.assertAlmostEqual(trade.opportunity.cost_per_share, expected_cost_per_share)
+        self.assertAlmostEqual(trade.quantity, 10 / expected_cost_per_share)
+        self.assertAlmostEqual(trade.edge, trade.quantity * (1.0 - expected_cost_per_share))
+
     def test_select_paper_trades_rejects_below_min_roi_after_repricing(self):
         opportunity = Opportunity(
             kind="yes_no_bundle",

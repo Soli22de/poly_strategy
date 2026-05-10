@@ -675,6 +675,10 @@ def _cross_platform_verification_from_row(row: dict) -> dict:
         )
         if verified_same_binary_event is None:
             verified_same_binary_event = trade_allowed
+        if trade_allowed and (not verified_same_binary_event or confidence < 0.95 or risk_flags):
+            trade_allowed = False
+            if confidence < 0.95 and "confidence_below_trade_threshold" not in risk_flags:
+                risk_flags.append("confidence_below_trade_threshold")
         polymarket_market_id = _first_present(
             row, ["polymarket_market_id", "poly_market_id", "polymarket_id", "poly_id", "market_id"]
         )
@@ -750,6 +754,10 @@ def _cross_platform_prompt_row(match: dict) -> dict:
         "kalshi_ticker": str(match.get("kalshi_ticker") or ""),
         "kalshi_event_ticker": str(match.get("kalshi_event_ticker") or ""),
         "kalshi_title": str(match.get("kalshi_title") or ""),
+        "kalshi_rules_primary": str(match.get("kalshi_rules_primary") or ""),
+        "kalshi_rules_secondary": str(match.get("kalshi_rules_secondary") or "")[:2500],
+        "kalshi_close_time": str(match.get("kalshi_close_time") or ""),
+        "kalshi_early_close_condition": str(match.get("kalshi_early_close_condition") or ""),
         "score": float(match.get("score") or 0.0),
         "status": str(match.get("status") or ""),
     }
@@ -764,8 +772,11 @@ Definitions:
 Workflow:
 - Compare question/title, subject, deadline, resolution source, and wording.
 - Be conservative: prefer false negatives over false positives.
-- Reject pairs with different subjects, different deadlines, or different resolution sources.
-- Reject pairs where one market is conditional, multi-outcome, or not obviously the same binary event.
+- Treat a pair as tradeable only when YES on one venue and YES on the other venue are economically equivalent.
+- Reject pairs with different subjects, different event deadlines that can change payout, or clearly incompatible resolution criteria.
+- Do not reject solely because one venue has a later administrative close/settlement time after the underlying event deadline.
+- A Polymarket market that belongs to a multi-outcome event can still match a Kalshi binary market when the provided group item/candidate name makes the YES condition the same.
+- Reject pairs where the supplied text leaves a realistic path for one venue to resolve YES while the other resolves NO.
 - Ignore market prices and liquidity.
 - Every verification row MUST include confidence as a number from 0 to 1.
 - If trade_allowed=true, confidence must be at least 0.95 and risk_flags must be empty.

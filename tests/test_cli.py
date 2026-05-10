@@ -1433,6 +1433,9 @@ class CliTests(unittest.TestCase):
                             "title": "Will Lionel Messi play in the World Cup?",
                             "yes_sub_title": "Yes",
                             "no_sub_title": "Yes",
+                            "rules_primary": "If Lionel Messi plays in the 2026 FIFA World Cup, then Yes.",
+                            "rules_secondary": "Only an official match appearance counts.",
+                            "close_time": "2026-07-20T00:00:00Z",
                         },
                     }
                 )
@@ -1457,6 +1460,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(row["match_count"], 1)
         self.assertEqual(row["top"][0]["kalshi_ticker"], "KXSOCCERPLAYMESSI-26")
+        self.assertEqual(row["top"][0]["kalshi_rules_secondary"], "Only an official match appearance counts.")
+        self.assertIn("official match appearance", row["top"][0]["kalshi_title"])
         self.assertIn("matches=1", stdout.getvalue())
 
     def test_verify_cross_platform_command_reports_parsed_rows(self):

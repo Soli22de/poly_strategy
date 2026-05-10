@@ -96,6 +96,26 @@ class ScannerTests(unittest.TestCase):
         self.assertAlmostEqual(opportunities[0].cost_per_share, 0.97)
         self.assertAlmostEqual(opportunities[0].net_edge_per_share, 0.03)
 
+    def test_cross_venue_same_binary_accounts_for_kalshi_fee_rate(self):
+        polymarket = VenueBinarySnapshot(
+            market_id="france-world-cup",
+            venue="polymarket",
+            yes=OrderBook(asks=[Level(0.16, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.86, 100)], bids=[]),
+            fee_rate=0.0,
+        )
+        kalshi = VenueBinarySnapshot(
+            market_id="france-world-cup",
+            venue="kalshi",
+            yes=OrderBook(asks=[Level(0.20, 100)], bids=[]),
+            no=OrderBook(asks=[Level(0.84, 100)], bids=[]),
+            fee_rate=0.07,
+        )
+
+        opportunities = find_cross_venue_same_binary(polymarket, kalshi, min_net_edge=0.0)
+
+        self.assertEqual(opportunities, [])
+
     def test_implication_arb_buys_consequent_yes_and_antecedent_no(self):
         antecedent = BinaryMarketSnapshot(
             market_id="france-wins-world-cup",

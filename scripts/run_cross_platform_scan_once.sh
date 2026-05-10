@@ -30,6 +30,7 @@ FINAL_SNAPSHOTS="${CROSS_PLATFORM_FINAL_SNAPSHOTS:-data/cross-platform-verified-
 KALSHI_ORDERBOOKS="${CROSS_PLATFORM_KALSHI_ORDERBOOKS:-data/cross-platform-kalshi-orderbooks.ndjson}"
 FINAL_KALSHI_ORDERBOOKS="${CROSS_PLATFORM_FINAL_KALSHI_ORDERBOOKS:-data/cross-platform-verified-kalshi-orderbooks.ndjson}"
 SIGNALS="${CROSS_PLATFORM_SIGNALS:-data/cross-platform-signals-expanded.ndjson}"
+CROSS_PLATFORM_CAPITAL="${CROSS_PLATFORM_MAX_CAPITAL_PER_TRADE:-${BANKROLL:-100}}"
 
 PROXY_ARG=()
 if [[ -n "${PROXY:-}" ]]; then
@@ -77,10 +78,10 @@ fi
   --top "${CROSS_PLATFORM_VERIFY_TOP:-60}" \
   --batch-size "${CROSS_PLATFORM_VERIFY_BATCH_SIZE:-1}" \
   --client-workers "${CROSS_PLATFORM_VERIFY_WORKERS:-4}" \
-  --timeout "${CROSS_PLATFORM_CHAT_TIMEOUT:-2}" \
-  --backup-timeout "${CROSS_PLATFORM_BACKUP_TIMEOUT:-2}" \
+  --timeout "${CROSS_PLATFORM_CHAT_TIMEOUT:-30}" \
+  --backup-timeout "${CROSS_PLATFORM_BACKUP_TIMEOUT:-30}" \
   --fallback-timeout "${CROSS_PLATFORM_FALLBACK_TIMEOUT:-120}" \
-  --retries "${CROSS_PLATFORM_LLM_RETRIES:-0}" \
+  --retries "${CROSS_PLATFORM_LLM_RETRIES:-1}" \
   --max-output-tokens "${CROSS_PLATFORM_MAX_OUTPUT_TOKENS:-1600}" \
   --reasoning-effort "${CROSS_PLATFORM_REASONING_EFFORT:-high}" \
   --verified-only \
@@ -95,5 +96,5 @@ fi
   --timeout "${CROSS_PLATFORM_TIMEOUT:-20}" \
   "${PROXY_ARG[@]}" \
   --book-workers "${CROSS_PLATFORM_BOOK_WORKERS:-12}" \
-  --min-net-edge "${CROSS_PLATFORM_FINAL_MIN_EDGE:-0.001}" \
-  --max-capital-per-trade "${MAX_CAPITAL_PER_TRADE:-100}"
+  --min-net-edge "${CROSS_PLATFORM_FINAL_MIN_EDGE:-0.005}" \
+  --max-capital-per-trade "$CROSS_PLATFORM_CAPITAL"

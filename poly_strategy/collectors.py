@@ -12,6 +12,7 @@ GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 POLYMARKET_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 POLYMARKET_CLOB_BOOKS_URL = "https://clob.polymarket.com/books"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
+KALSHI_DEFAULT_TAKER_FEE_RATE = 0.07
 
 
 def write_sample_snapshot(path: Path) -> int:
@@ -515,7 +516,7 @@ def kalshi_binary_snapshot_rows_from_orderbook_lines(lines: Iterable[str]) -> It
             "type": "binary_snapshot",
             "venue": "kalshi",
             "market_id": market_id,
-            "fee_rate": 0.0,
+            "fee_rate": KALSHI_DEFAULT_TAKER_FEE_RATE,
             "yes": {
                 "token_id": f"{market_id}:YES",
                 "asks": _complement_asks(no_bids),

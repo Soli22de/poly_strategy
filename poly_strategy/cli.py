@@ -505,6 +505,7 @@ def main(argv=None) -> int:
                 execution_plans_path=Path(args.execution_plans) if args.execution_plans else None,
                 maker_adaptive_path=Path(args.maker_adaptive) if args.maker_adaptive else None,
                 cross_platform_scan_path=Path(args.cross_platform_scan) if args.cross_platform_scan else None,
+                min_cross_platform_capital_edge=args.min_cross_platform_capital_edge,
             )
             if args.out:
                 write_success_status(
@@ -1336,6 +1337,12 @@ def _build_parser() -> argparse.ArgumentParser:
     success_status.add_argument("--execution-plans", help="latest execution_plan NDJSON path")
     success_status.add_argument("--maker-adaptive", help="maker adaptive quote report JSON path")
     success_status.add_argument("--cross-platform-scan", help="latest cross_platform_scan_report JSON path")
+    success_status.add_argument(
+        "--min-cross-platform-capital-edge",
+        type=float,
+        default=0.0,
+        help="minimum capital-capped edge required to treat a cross-platform scan as actionable",
+    )
     success_status.add_argument("--out", help="output status JSON path; prints JSON when omitted")
     success_status.add_argument("--success-log", help="append non-empty success statuses to this NDJSON log")
 
@@ -1850,10 +1857,7 @@ def _scan_cross_platform_once(args) -> dict:
             opportunity_row = opportunity_to_row(opportunity)
             opportunity_row["pair"] = pair
             if args.max_capital_per_trade is not None:
-                opportunity_row["capital_capped"] = _capital_capped_opportunity_row(
-                    opportunity_row,
-                    args.max_capital_per_trade,
-                )
+                opportunity_row["capital_capped"] = _capital_capped_opportunity(opportunity, args.max_capital_per_trade)
             opportunities.append(opportunity_row)
 
     opportunities.sort(key=lambda row: (-float(row.get("net_edge_per_share") or 0.0), row.get("key") or ""))
@@ -1989,23 +1993,34 @@ def _verify_cross_platform_batch(batch_index: int, batch: list, clients: list) -
     }
 
 
-def _capital_capped_opportunity_row(opportunity_row: dict, max_capital: float) -> dict:
+def _capital_capped_opportunity(opportunity, max_capital: float) -> dict:
     if max_capital <= 0:
         raise ValueError("--max-capital-per-trade must be positive")
-    cost_per_share = float(opportunity_row.get("cost_per_share") or 0.0)
-    quantity = float(opportunity_row.get("quantity") or 0.0)
-    edge_per_share = float(opportunity_row.get("net_edge_per_share") or 0.0)
-    if cost_per_share <= 0 or quantity <= 0:
-        capped_quantity = 0.0
-    else:
-        capped_quantity = min(quantity, max_capital / cost_per_share)
-    capital_used = capped_quantity * cost_per_share
+    selection = select_paper_trades(
+        [opportunity],
+        max_capital_per_trade=max_capital,
+        min_quantity=0.0,
+    )
+    if selection.trades:
+        trade = selection.trades[0]
+        return {
+            "max_capital": max_capital,
+            "quantity": trade.quantity,
+            "capital_used": trade.capital_used,
+            "edge": trade.edge,
+            "roi": trade.roi,
+            "cost_per_share": trade.opportunity.cost_per_share,
+            "net_edge_per_share": trade.opportunity.net_edge_per_share,
+            "quality": trade_to_row(trade).get("quality"),
+        }
     return {
         "max_capital": max_capital,
-        "quantity": capped_quantity,
-        "capital_used": capital_used,
-        "edge": capped_quantity * edge_per_share,
-        "roi": (edge_per_share / cost_per_share) if cost_per_share > 0 else 0.0,
+        "quantity": 0.0,
+        "capital_used": 0.0,
+        "edge": 0.0,
+        "roi": 0.0,
+        "rejected": True,
+        "rejections": [rejection_to_row(rejection) for rejection in selection.rejections],
     }
 
 

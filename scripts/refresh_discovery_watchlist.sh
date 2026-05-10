@@ -30,21 +30,23 @@ PAGES="${PAGES:-5}"
 OFFSET="${OFFSET:-0}"
 TIMEOUT="${TIMEOUT:-15}"
 BATCH_SIZE="${BATCH_SIZE:-10}"
-CONTEXT_MARKET_LIMIT="${CONTEXT_MARKET_LIMIT:-10}"
+CONTEXT_MARKET_LIMIT="${CONTEXT_MARKET_LIMIT:-20}"
 LLM_WORKERS="${LLM_WORKERS:-4}"
 LLM_ERROR_RETRIES="${LLM_ERROR_RETRIES:-2}"
 LLM_ERROR_RETRY_BATCH_SIZE="${LLM_ERROR_RETRY_BATCH_SIZE:-1}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
-LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-600}"
+LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-900}"
 LLM_RETRIES="${LLM_RETRIES:-2}"
 LLM_CHAT_TIMEOUT="${LLM_CHAT_TIMEOUT:-25}"
-LLM_CHAT_COMMAND_TIMEOUT="${LLM_CHAT_COMMAND_TIMEOUT:-90}"
+LLM_CHAT_COMMAND_TIMEOUT="${LLM_CHAT_COMMAND_TIMEOUT:-300}"
 LLM_CHAT_RETRIES="${LLM_CHAT_RETRIES:-0}"
+LLM_PROVIDER_HEALTHCHECK="${LLM_PROVIDER_HEALTHCHECK:-1}"
+LLM_HEALTH_TIMEOUT="${LLM_HEALTH_TIMEOUT:-20}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
 LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-high}"
 LLM_VERBOSITY="${LLM_VERBOSITY:-}"
 LLM_TOPIC_CLUSTER="${LLM_TOPIC_CLUSTER:-1}"
-LLM_MAX_NEW_MARKETS_PER_REFRESH="${LLM_MAX_NEW_MARKETS_PER_REFRESH:-120}"
+LLM_MAX_NEW_MARKETS_PER_REFRESH="${LLM_MAX_NEW_MARKETS_PER_REFRESH:-240}"
 ALLOW_LLM_FAILURE="${ALLOW_LLM_FAILURE:-1}"
 MIN_CONFIDENCE="${MIN_CONFIDENCE:-0.95}"
 INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-400}"
@@ -125,6 +127,84 @@ run_with_timeout() {
     elapsed=$((elapsed + 1))
   done
   wait "$pid"
+}
+
+provider_health_check() {
+  local label="$1"
+  local model="$2"
+  local base_url="$3"
+  local api_mode="$4"
+  local api_key="$5"
+  if [[ "$LLM_PROVIDER_HEALTHCHECK" != "1" ]]; then
+    return 0
+  fi
+  [[ -n "$model" ]] || return 1
+  echo "provider_health_check label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default}"
+  if [[ -n "$api_key" ]]; then
+    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" - "$model" "$base_url" "$api_mode" "$LLM_HEALTH_TIMEOUT" <<'PY'
+import sys
+from poly_strategy.openai_rules import OpenAIRuleDiscoveryClient
+from poly_strategy.rule_discovery import MarketText
+
+model, base_url, api_mode, timeout = sys.argv[1], sys.argv[2] or None, sys.argv[3] or None, float(sys.argv[4])
+market = MarketText(
+    "healthcheck",
+    "Will Bitcoin be above $100,000 by December 31, 2026?",
+    "Resolves Yes if Bitcoin trades above $100,000 before the deadline.",
+    ["Yes", "No"],
+    "2026-12-31",
+    "Crypto",
+    "bitcoin-above-100k-2026",
+)
+try:
+    client = OpenAIRuleDiscoveryClient(
+        model=model,
+        timeout=timeout,
+        base_url=base_url,
+        retries=0,
+        max_output_tokens=800,
+        reasoning_effort="high",
+        api_mode=api_mode,
+    )
+    client.discover_relations([market])
+except Exception as exc:
+    print(f"provider_health_error type={exc.__class__.__name__} message={str(exc)[:240]}", file=sys.stderr)
+    raise SystemExit(42)
+print("provider_health_ok=1")
+PY
+  else
+    "$PYTHON_BIN" - "$model" "$base_url" "$api_mode" "$LLM_HEALTH_TIMEOUT" <<'PY'
+import sys
+from poly_strategy.openai_rules import OpenAIRuleDiscoveryClient
+from poly_strategy.rule_discovery import MarketText
+
+model, base_url, api_mode, timeout = sys.argv[1], sys.argv[2] or None, sys.argv[3] or None, float(sys.argv[4])
+market = MarketText(
+    "healthcheck",
+    "Will Bitcoin be above $100,000 by December 31, 2026?",
+    "Resolves Yes if Bitcoin trades above $100,000 before the deadline.",
+    ["Yes", "No"],
+    "2026-12-31",
+    "Crypto",
+    "bitcoin-above-100k-2026",
+)
+try:
+    client = OpenAIRuleDiscoveryClient(
+        model=model,
+        timeout=timeout,
+        base_url=base_url,
+        retries=0,
+        max_output_tokens=800,
+        reasoning_effort="high",
+        api_mode=api_mode,
+    )
+    client.discover_relations([market])
+except Exception as exc:
+    print(f"provider_health_error type={exc.__class__.__name__} message={str(exc)[:240]}", file=sys.stderr)
+    raise SystemExit(42)
+print("provider_health_ok=1")
+PY
+  fi
 }
 
 run_discovery_provider() {
@@ -209,6 +289,15 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
     "fallback|$FALLBACK_MODEL|$FALLBACK_BASE_URL|$FALLBACK_API_MODE|$FALLBACK_API_KEY"; do
     IFS='|' read -r label model base_url api_mode api_key <<< "$spec"
     [[ -n "$model" ]] || continue
+    set +e
+    provider_health_check "$label" "$model" "$base_url" "$api_mode" "$api_key"
+    health_status=$?
+    set -e
+    if [[ "$health_status" != "0" ]]; then
+      final_status="$health_status"
+      echo "discover_provider_skip label=$label reason=healthcheck_failed status=$health_status"
+      continue
+    fi
     stage_out="$(mktemp "${RULES}.tmp.XXXXXX")"
     tmp_paths+=("$stage_out")
     command_timeout="$(provider_command_timeout "$api_mode")"

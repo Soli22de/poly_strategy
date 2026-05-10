@@ -2,7 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from poly_strategy.fees import polymarket_taker_fee_per_share
+from poly_strategy.fees import taker_fee_per_share
 from poly_strategy.models import Leg, Opportunity
 from poly_strategy.orderbook import insufficient_liquidity, take_levels
 
@@ -226,7 +226,7 @@ def _leg_notional(leg: Leg, quantity: float) -> float:
         if remaining <= 0:
             break
         used = min(remaining, level.size)
-        total += used * (level.price + polymarket_taker_fee_per_share(level.price, leg.fee_rate))
+        total += used * (level.price + taker_fee_per_share(leg.venue, level.price, leg.fee_rate))
         remaining -= used
     return total
 

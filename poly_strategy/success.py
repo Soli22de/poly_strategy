@@ -14,12 +14,13 @@ def success_status_report(
     execution_plans_path: Optional[Path] = None,
     maker_adaptive_path: Optional[Path] = None,
     cross_platform_scan_path: Optional[Path] = None,
+    min_cross_platform_capital_edge: float = 0.0,
     generated_at: Optional[str] = None,
 ) -> dict:
     monitor = _monitor_summary(monitor_report_path)
     plans = _execution_plan_summary(execution_plans_path)
     maker = _maker_adaptive_summary(maker_adaptive_path)
-    cross_platform = _cross_platform_summary(cross_platform_scan_path)
+    cross_platform = _cross_platform_summary(cross_platform_scan_path, min_cross_platform_capital_edge)
     status = _success_status(monitor, plans, maker, cross_platform)
     return {
         "type": "success_status_report",
@@ -104,7 +105,7 @@ def _maker_adaptive_summary(path: Optional[Path]) -> dict:
     }
 
 
-def _cross_platform_summary(path: Optional[Path]) -> dict:
+def _cross_platform_summary(path: Optional[Path], min_capital_edge: float = 0.0) -> dict:
     row = _read_json(path)
     if not row:
         return {"path": str(path) if path else None, "found": False}
@@ -123,12 +124,20 @@ def _cross_platform_summary(path: Optional[Path]) -> dict:
         )
     )
     top = positive[0] if positive else None
+    actionable = [
+        opportunity
+        for opportunity in positive
+        if float(((opportunity.get("capital_capped") or {}).get("edge")) or opportunity.get("total_edge") or 0.0)
+        >= min_capital_edge
+    ]
     return {
         "path": str(path),
         "found": True,
+        "min_capital_edge": min_capital_edge,
         "pair_count": int(row.get("pair_count") or 0),
         "opportunity_count": int(row.get("opportunity_count") or 0),
         "verified_positive_count": len(positive),
+        "actionable_verified_positive_count": len(actionable),
         "top_verified_positive": top,
         "top_capital_capped_edge": float(((top or {}).get("capital_capped") or {}).get("edge") or 0.0),
     }
@@ -141,7 +150,7 @@ def _success_status(monitor: dict, plans: dict, maker: dict, cross_platform: dic
         return "dry_run_executable"
     if monitor.get("stable_paper_trade_count", 0) > 0 and monitor.get("stable_paper_edge", 0.0) > 0:
         return "stable_paper_opportunity"
-    if cross_platform.get("verified_positive_count", 0) > 0:
+    if cross_platform.get("actionable_verified_positive_count", 0) > 0:
         return "cross_platform_paper_opportunity"
     if maker.get("status") == "positive_ev_config_found":
         return "maker_positive_ev"

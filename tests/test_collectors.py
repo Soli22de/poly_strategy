@@ -567,6 +567,7 @@ class CollectorTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertEqual(rows[0]["venue"], "kalshi")
+        self.assertEqual(rows[0]["fee_rate"], 0.07)
         self.assertEqual(rows[0]["yes"]["bids"], [[0.45, 10.0], [0.4, 5.0]])
         self.assertEqual(rows[0]["yes"]["asks"], [[0.45, 8.0]])
         self.assertEqual(rows[0]["no"]["asks"], [[0.55, 10.0], [0.6, 5.0]])
@@ -591,6 +592,7 @@ class CollectorTests(unittest.TestCase):
         snapshots = list(kalshi_binary_snapshot_rows_from_orderbook_lines([row]))
 
         self.assertEqual(snapshots[0]["yes"]["bids"], [[0.91, 5.0]])
+        self.assertEqual(snapshots[0]["fee_rate"], 0.07)
         self.assertEqual(snapshots[0]["yes"]["asks"], [[0.93, 4.0]])
         self.assertEqual(snapshots[0]["no"]["asks"], [[0.09, 5.0]])
 

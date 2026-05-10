@@ -118,7 +118,7 @@ start_monitor() {
     export SNAPSHOT_INTERVAL="${SNAPSHOT_INTERVAL:-2}"
     export STALE_TIMEOUT="${STALE_TIMEOUT:-30}"
     export RECONNECT_DELAY="${RECONNECT_DELAY:-2}"
-    export MIN_NET_EDGE="${MIN_NET_EDGE:-0.002}"
+    export MIN_NET_EDGE="${MIN_NET_EDGE:-0.001}"
     export MAX_CAPITAL_PER_TRADE="${MAX_CAPITAL_PER_TRADE:-10}"
     export BANKROLL="${BANKROLL:-100}"
     export MIN_PAPER_ROI="${MIN_PAPER_ROI:-0.01}"
@@ -296,7 +296,7 @@ case "$COMMAND" in
 
       if [[ "$ENABLE_RULE_PROMOTION" == "1" && "$now" -ge "$next_promotion" ]]; then
         before_rules="$(file_sig "$RULES")"
-        run_logged rule-promotion env REBUILD_WATCHLIST_ON_ADD=0 COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-60}" scripts/run_rule_promotion_once.sh
+        run_logged rule-promotion env REBUILD_WATCHLIST_ON_ADD=0 COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-600}" scripts/run_rule_promotion_once.sh
         after_rules="$(file_sig "$RULES")"
         if [[ "$before_rules" != "$after_rules" ]]; then
           run_logged watchlist-after-promotion env SKIP_GAMMA=1 SKIP_LLM=1 RESTART_ON_CHANGE=0 scripts/refresh_discovery_watchlist.sh

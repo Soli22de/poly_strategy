@@ -403,6 +403,10 @@ def _candidate_row_to_match_row(candidate: dict) -> dict:
         "kalshi_title": kalshi_title,
         "kalshi_category": str(candidate.get("kalshi_category") or "").strip(),
         "kalshi_series_ticker": str(candidate.get("kalshi_series_ticker") or "").strip(),
+        "kalshi_rules_primary": str(candidate.get("kalshi_rules_primary") or "").strip(),
+        "kalshi_rules_secondary": str(candidate.get("kalshi_rules_secondary") or "").strip(),
+        "kalshi_close_time": str(candidate.get("kalshi_close_time") or "").strip(),
+        "kalshi_early_close_condition": str(candidate.get("kalshi_early_close_condition") or "").strip(),
         "score": score,
         "status": status,
         "trade_allowed": False,
@@ -431,6 +435,10 @@ def _candidate_event_market_row(candidate: dict, kalshi_market: dict, polymarket
             "kalshi_title": kalshi_title,
             "kalshi_category": kalshi_market.get("category") or candidate.get("kalshi_category") or "",
             "kalshi_series_ticker": kalshi_market.get("series_ticker") or candidate.get("kalshi_series_ticker") or "",
+            "kalshi_rules_primary": str(raw.get("rules_primary") or "").strip(),
+            "kalshi_rules_secondary": str(raw.get("rules_secondary") or "").strip(),
+            "kalshi_close_time": str(raw.get("close_time") or "").strip(),
+            "kalshi_early_close_condition": str(raw.get("early_close_condition") or "").strip(),
             "score": score,
             "event_title_score": source_score,
             "market_title_score": market_score,
@@ -442,6 +450,10 @@ def _candidate_event_market_row(candidate: dict, kalshi_market: dict, polymarket
                 "title": raw.get("title") or kalshi_market.get("title"),
                 "yes_sub_title": raw.get("yes_sub_title"),
                 "no_sub_title": raw.get("no_sub_title"),
+                "rules_primary": raw.get("rules_primary"),
+                "rules_secondary": raw.get("rules_secondary"),
+                "close_time": raw.get("close_time"),
+                "early_close_condition": raw.get("early_close_condition"),
             },
         }
     )
@@ -466,9 +478,12 @@ def _kalshi_market_prompt_title(kalshi_market: dict) -> str:
         raw.get("yes_sub_title"),
         raw.get("no_sub_title"),
         raw.get("rules_primary"),
+        raw.get("rules_secondary"),
+        raw.get("close_time"),
+        raw.get("early_close_condition"),
     ]
     text = " | ".join(str(part).strip() for part in parts if str(part or "").strip())
-    return text[:1200]
+    return text[:2500]
 
 
 def _option_match(row: dict) -> tuple:

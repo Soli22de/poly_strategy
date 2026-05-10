@@ -1,7 +1,7 @@
 from collections import defaultdict
 from typing import List, Optional, Tuple
 
-from poly_strategy.fees import polymarket_taker_fee_per_share
+from poly_strategy.fees import taker_fee_per_share
 from poly_strategy.models import (
     BinaryMarketSnapshot,
     CollectivelyExhaustiveRule,
@@ -18,8 +18,8 @@ from poly_strategy.models import (
 from poly_strategy.orderbook import Level, insufficient_liquidity, take_levels
 
 
-def _buy_cost_per_share(price: float, fee_rate: float) -> float:
-    return price + polymarket_taker_fee_per_share(price, fee_rate)
+def _buy_cost_per_share(venue: str, price: float, fee_rate: float) -> float:
+    return price + taker_fee_per_share(venue, price, fee_rate)
 
 
 def find_yes_no_bundle_arbs(
@@ -405,7 +405,7 @@ def _max_profitable_quantity(
         return None
 
     target_cost = payout_per_share - min_net_edge
-    best_cost = sum(_buy_cost_per_share(levels[0].price, snapshot.fee_rate) for snapshot, _, levels in leg_specs)
+    best_cost = sum(_buy_cost_per_share(snapshot.venue, levels[0].price, snapshot.fee_rate) for snapshot, _, levels in leg_specs)
     if best_cost >= target_cost:
         return None
 
@@ -434,11 +434,11 @@ def _max_profitable_quantity(
 def _bundle_cost_per_share(leg_specs: List[Tuple[BinaryMarketSnapshot, str, List[Level]]], quantity: float) -> float:
     total = 0.0
     for snapshot, _, levels in leg_specs:
-        total += _fee_adjusted_notional(levels, quantity, snapshot.fee_rate) / quantity
+        total += _fee_adjusted_notional(levels, quantity, snapshot.venue, snapshot.fee_rate) / quantity
     return total
 
 
-def _fee_adjusted_notional(levels: List[Level], quantity: float, fee_rate: float) -> float:
+def _fee_adjusted_notional(levels: List[Level], quantity: float, venue: str, fee_rate: float) -> float:
     if insufficient_liquidity(levels, quantity):
         raise ValueError("insufficient liquidity")
     remaining = quantity
@@ -447,7 +447,7 @@ def _fee_adjusted_notional(levels: List[Level], quantity: float, fee_rate: float
         if remaining <= 0:
             break
         used = min(remaining, level.size)
-        notional += used * _buy_cost_per_share(level.price, fee_rate)
+        notional += used * _buy_cost_per_share(venue, level.price, fee_rate)
         remaining -= used
     return notional
 
