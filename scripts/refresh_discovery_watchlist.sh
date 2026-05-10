@@ -79,6 +79,30 @@ fi
 
 mkdir -p "$(dirname "$GAMMA")" "$(dirname "$RULES")" "$(dirname "$WATCHLIST")"
 
+pid_alive() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] && { kill -0 "$pid" >/dev/null 2>&1 || ps -p "$pid" >/dev/null 2>&1; }
+}
+
+LOCK_DIR="${REFRESH_LOCK_DIR:-var/run/refresh_discovery_watchlist.lock}"
+if [[ "${REFRESH_LOCK:-1}" == "1" ]]; then
+  mkdir -p "$(dirname "$LOCK_DIR")"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "$$" > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT
+  else
+    existing_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if pid_alive "$existing_pid"; then
+      echo "refresh_lock_busy pid=$existing_pid lock=$LOCK_DIR"
+      exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR"
+    echo "$$" > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT
+  fi
+fi
+
 if [[ "$SKIP_GAMMA" != "1" ]]; then
   "$PYTHON_BIN" -m poly_strategy.cli collect-polymarket \
     --out "$GAMMA" \
