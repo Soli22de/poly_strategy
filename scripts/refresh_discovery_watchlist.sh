@@ -42,6 +42,7 @@ LLM_CHAT_COMMAND_TIMEOUT="${LLM_CHAT_COMMAND_TIMEOUT:-300}"
 LLM_CHAT_RETRIES="${LLM_CHAT_RETRIES:-1}"
 LLM_PROVIDER_HEALTHCHECK="${LLM_PROVIDER_HEALTHCHECK:-1}"
 LLM_HEALTH_TIMEOUT="${LLM_HEALTH_TIMEOUT:-20}"
+LLM_HEALTH_PARSE_RETRIES="${LLM_HEALTH_PARSE_RETRIES:-1}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
 LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-high}"
 LLM_VERBOSITY="${LLM_VERBOSITY:-}"
@@ -146,12 +147,18 @@ provider_health_check() {
   [[ -n "$model" ]] || return 1
   echo "provider_health_check label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default}"
   if [[ -n "$api_key" ]]; then
-    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" - "$model" "$base_url" "$api_mode" "$LLM_HEALTH_TIMEOUT" <<'PY'
+    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" - "$model" "$base_url" "$api_mode" "$LLM_HEALTH_TIMEOUT" "$LLM_HEALTH_PARSE_RETRIES" <<'PY'
 import sys
-from poly_strategy.openai_rules import OpenAIRuleDiscoveryClient
+from poly_strategy.openai_rules import OpenAIResponseError, OpenAIRuleDiscoveryClient
 from poly_strategy.rule_discovery import MarketText
 
-model, base_url, api_mode, timeout = sys.argv[1], sys.argv[2] or None, sys.argv[3] or None, float(sys.argv[4])
+model, base_url, api_mode, timeout, parse_retries = (
+    sys.argv[1],
+    sys.argv[2] or None,
+    sys.argv[3] or None,
+    float(sys.argv[4]),
+    int(sys.argv[5]),
+)
 markets = [
     MarketText(
         "healthcheck_low",
@@ -182,21 +189,33 @@ try:
         reasoning_effort="high",
         api_mode=api_mode,
     )
-    relations = client.discover_relations(markets)
-    if not relations:
-        raise RuntimeError("provider healthcheck did not find threshold implication")
+    for attempt in range(parse_retries + 1):
+        try:
+            relations = client.discover_relations(markets)
+            if not relations:
+                raise OpenAIResponseError("provider healthcheck did not find threshold implication")
+            break
+        except OpenAIResponseError:
+            if attempt >= parse_retries:
+                raise
 except Exception as exc:
     print(f"provider_health_error type={exc.__class__.__name__} message={str(exc)[:240]}", file=sys.stderr)
     raise SystemExit(42)
 print("provider_health_ok=1")
 PY
   else
-    "$PYTHON_BIN" - "$model" "$base_url" "$api_mode" "$LLM_HEALTH_TIMEOUT" <<'PY'
+    "$PYTHON_BIN" - "$model" "$base_url" "$api_mode" "$LLM_HEALTH_TIMEOUT" "$LLM_HEALTH_PARSE_RETRIES" <<'PY'
 import sys
-from poly_strategy.openai_rules import OpenAIRuleDiscoveryClient
+from poly_strategy.openai_rules import OpenAIResponseError, OpenAIRuleDiscoveryClient
 from poly_strategy.rule_discovery import MarketText
 
-model, base_url, api_mode, timeout = sys.argv[1], sys.argv[2] or None, sys.argv[3] or None, float(sys.argv[4])
+model, base_url, api_mode, timeout, parse_retries = (
+    sys.argv[1],
+    sys.argv[2] or None,
+    sys.argv[3] or None,
+    float(sys.argv[4]),
+    int(sys.argv[5]),
+)
 markets = [
     MarketText(
         "healthcheck_low",
@@ -227,9 +246,15 @@ try:
         reasoning_effort="high",
         api_mode=api_mode,
     )
-    relations = client.discover_relations(markets)
-    if not relations:
-        raise RuntimeError("provider healthcheck did not find threshold implication")
+    for attempt in range(parse_retries + 1):
+        try:
+            relations = client.discover_relations(markets)
+            if not relations:
+                raise OpenAIResponseError("provider healthcheck did not find threshold implication")
+            break
+        except OpenAIResponseError:
+            if attempt >= parse_retries:
+                raise
 except Exception as exc:
     print(f"provider_health_error type={exc.__class__.__name__} message={str(exc)[:240]}", file=sys.stderr)
     raise SystemExit(42)
