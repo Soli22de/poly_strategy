@@ -3,13 +3,14 @@ import os
 import time
 from typing import Callable, Iterable, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from poly_strategy.rule_discovery import MarketText, RelationCandidate, market_texts_to_prompt_rows
 
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODE = "responses"
+DEFAULT_CHAT_RESPONSE_FORMAT = "json_object"
 
 
 def _model_supports_reasoning(model: str) -> bool:
@@ -23,6 +24,122 @@ def _normalize_api_mode(api_mode: Optional[str]) -> str:
     if value in {"chat", "chat_completions", "chat-completions", "chatcompletions"}:
         return "chat"
     raise OpenAIConfigError(f"unsupported OPENAI_API_MODE: {api_mode!r}")
+
+
+def _normalize_chat_response_format(value: Optional[str]) -> str:
+    normalized = (value or os.environ.get("OPENAI_CHAT_RESPONSE_FORMAT") or DEFAULT_CHAT_RESPONSE_FORMAT).strip().lower()
+    if normalized in {"json_object", "json-object", "object"}:
+        return "json_object"
+    if normalized in {"json_schema", "json-schema", "schema"}:
+        return "json_schema"
+    if normalized in {"none", "off", "disabled"}:
+        return "none"
+    raise OpenAIConfigError(f"unsupported OPENAI_CHAT_RESPONSE_FORMAT: {value!r}")
+
+
+def _optional_float(value: Optional[object]) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "off", "disabled"}:
+        return None
+    return float(value)
+
+
+def _normalize_proxy_url(proxy: Optional[str]) -> Optional[str]:
+    value = str(proxy or "").strip()
+    if not value or value.lower() in {"0", "false", "none", "off"}:
+        return None
+    if "://" not in value:
+        return f"http://{value}"
+    return value
+
+
+def _chat_output_contract(schema_name: str) -> str:
+    if schema_name == "polymarket_relation_discovery":
+        return json.dumps(
+            {
+                "relations": [
+                    {
+                        "relation_type": "implies",
+                        "market_a_id": "market_id_that_implies",
+                        "market_b_id": "market_id_implied_by_a",
+                        "direction": "a_implies_b",
+                        "confidence": 0.99,
+                        "trade_allowed": True,
+                        "risk_flags": [],
+                        "reason": "Short wording-based reason.",
+                    }
+                ]
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    if schema_name == "polymarket_exhaustive_group_verification":
+        return json.dumps(
+            {
+                "verdict": "exhaustive_group",
+                "confidence": 0.99,
+                "trade_allowed": True,
+                "risk_flags": [],
+                "reason": "Short wording-based reason.",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    if schema_name == "polymarket_kalshi_cross_platform_verification":
+        return json.dumps(
+            {
+                "verifications": [
+                    {
+                        "polymarket_market_id": "polymarket_id",
+                        "kalshi_ticker": "kalshi_ticker",
+                        "verified_same_binary_event": True,
+                        "trade_allowed": True,
+                        "confidence": 0.99,
+                        "risk_flags": [],
+                        "reason": "Short wording-based reason.",
+                    }
+                ]
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    return "{}"
+
+
+def _chat_output_instruction(schema_name: str) -> str:
+    if schema_name == "polymarket_relation_discovery":
+        return (
+            'Return {"relations":[]} when no relation exists. '
+            "For same-subject same-deadline numeric thresholds, the higher threshold YES implies the lower threshold YES. "
+            "Example: if market b is X > 20 and market a is X > 10, use "
+            '"market_a_id":"b","market_b_id":"a","direction":"a_implies_b".'
+        )
+    if schema_name == "polymarket_exhaustive_group_verification":
+        return "Return verdict=not_exhaustive or verdict=uncertain when completeness is not proven."
+    if schema_name == "polymarket_kalshi_cross_platform_verification":
+        return 'Return {"verifications":[]} when no provided pair is the same binary event.'
+    return ""
+
+
+def _relation_chat_prompts(prompt_text: str) -> tuple[str, str]:
+    output_contract = _chat_output_contract("polymarket_relation_discovery")
+    system_prompt = (
+        "You output JSON only. Schema name: polymarket_relation_discovery. "
+        "Find deterministic logical relations between binary prediction markets using only the provided market text and market_id values. "
+        "Do not predict outcomes, do not cite sources, do not use prices, and do not echo the input. "
+        "Never return markdown, safe_items, markets, sources, claims, or answers. "
+        "Allowed relation_type values: implies, equivalent, mutually_exclusive, collectively_exhaustive, complement, unknown. "
+        "Prefer false negatives over false positives. "
+        "For same-subject same-deadline numeric thresholds, higher threshold YES implies lower threshold YES."
+    )
+    user_prompt = (
+        f"Input markets JSON: {prompt_text}\n"
+        f"Return exactly one JSON object shaped like this: {output_contract}\n"
+        'If no deterministic relation exists, return exactly {"relations":[]}.\n'
+        'For threshold implication, set market_a_id to the higher-threshold market, market_b_id to the lower-threshold market, and direction to "a_implies_b".'
+    )
+    return system_prompt, user_prompt
 
 
 class OpenAIConfigError(RuntimeError):
@@ -45,6 +162,9 @@ class OpenAIRuleDiscoveryClient:
         reasoning_effort: Optional[str] = "medium",
         verbosity: Optional[str] = None,
         api_mode: Optional[str] = None,
+        chat_response_format: Optional[str] = None,
+        temperature: Optional[float] = None,
+        proxy: Optional[str] = None,
         transport: Optional[Callable[[dict, float], dict]] = None,
     ):
         self.model = model
@@ -58,6 +178,15 @@ class OpenAIRuleDiscoveryClient:
         self.reasoning_effort = reasoning_effort
         self.verbosity = verbosity
         self.api_mode = _normalize_api_mode(api_mode)
+        self.chat_response_format = _normalize_chat_response_format(chat_response_format)
+        temperature_value = os.environ.get("OPENAI_TEMPERATURE") if temperature is None else temperature
+        self.temperature = _optional_float(0.0 if temperature_value is None else temperature_value)
+        self.proxy = _normalize_proxy_url(proxy or os.environ.get("OPENAI_PROXY") or os.environ.get("PROXY"))
+        self._opener = (
+            build_opener(ProxyHandler({"http": self.proxy, "https": self.proxy}))
+            if self.proxy
+            else None
+        )
         self._transport = transport or (self._post_chat_completions if self.api_mode == "chat" else self._post_responses)
 
     def build_payload(self, markets: Iterable[MarketText]) -> dict:
@@ -72,34 +201,44 @@ class OpenAIRuleDiscoveryClient:
         market_rows = market_texts_to_prompt_rows(list(markets))
         prompt_text = json.dumps({"markets": market_rows}, ensure_ascii=True, sort_keys=True)
         if self.api_mode == "chat":
-            chat_system_prompt = (
-                f"{system_prompt}\n\n"
-                "Return exactly one JSON object matching this schema. Do not echo the input markets.\n"
-                f"{json.dumps(schema, ensure_ascii=True, sort_keys=True)}"
-            )
-            chat_user_prompt = (
-                "Do not answer the prediction market question and do not estimate probabilities. "
-                "Apply the verification/discovery task from the system message. "
-                "Return only one JSON object matching the schema; no markdown, no prose, no input echo.\n\n"
-                f"Input markets JSON:\n{prompt_text}"
-            )
+            if schema_name == "polymarket_relation_discovery":
+                chat_system_prompt, chat_user_prompt = _relation_chat_prompts(prompt_text)
+            else:
+                required_keys = ", ".join(schema.get("required", []))
+                output_contract = _chat_output_contract(schema_name)
+                output_instruction = _chat_output_instruction(schema_name)
+                chat_system_prompt = (
+                    f"{system_prompt}\n\n"
+                    "Output rules for chat-compatible providers:\n"
+                    "- Return exactly one valid JSON object and nothing else.\n"
+                    "- Do not use markdown fences, prose, citations, sources, or external facts.\n"
+                    "- Do not echo the input rows or create top-level keys such as markets, safe_items, sources, claims, or answers.\n"
+                    f"- Schema name: {schema_name}.\n"
+                    f"- The top-level required key(s) are: {required_keys}.\n"
+                    f"- Required JSON shape example:\n{output_contract}\n"
+                    f"- {output_instruction}"
+                )
+                if self.chat_response_format == "json_schema":
+                    chat_system_prompt += f"\n- Full JSON Schema:\n{json.dumps(schema, ensure_ascii=True, sort_keys=True)}"
+                chat_user_prompt = (
+                    "Do not answer the prediction market question and do not estimate probabilities. "
+                    "Compare only the provided market rows under the system task. "
+                    "Use only the required output shape. "
+                    "Never return verification sources, market summaries, safe_items, or a top-level markets key.\n\n"
+                    f"Input markets JSON:\n{prompt_text}"
+                )
             payload = {
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": chat_system_prompt},
                     {"role": "user", "content": chat_user_prompt},
                 ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema_name,
-                        "strict": True,
-                        "schema": schema,
-                    },
-                },
             }
+            self._apply_chat_response_format(payload, schema_name, schema)
             if self.max_output_tokens is not None:
                 payload["max_completion_tokens"] = self.max_output_tokens
+            if self.temperature is not None:
+                payload["temperature"] = self.temperature
             return payload
 
         payload = {
@@ -157,7 +296,7 @@ class OpenAIRuleDiscoveryClient:
             },
             method="POST",
         )
-        with urlopen(request, timeout=timeout) as response:
+        with self._open_request(request, timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def _post_chat_completions(self, payload: dict, timeout: float) -> dict:
@@ -172,8 +311,30 @@ class OpenAIRuleDiscoveryClient:
             },
             method="POST",
         )
-        with urlopen(request, timeout=timeout) as response:
+        with self._open_request(request, timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _open_request(self, request: Request, timeout: float):
+        if self._opener is not None:
+            return self._opener.open(request, timeout=timeout)
+        return urlopen(request, timeout=timeout)
+
+    def _apply_chat_response_format(self, payload: dict, schema_name: str, schema: dict) -> None:
+        if self.chat_response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+            return
+        if self.chat_response_format == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": schema,
+                },
+            }
+            return
+        if self.chat_response_format != "none":
+            raise OpenAIConfigError(f"unsupported chat response format: {self.chat_response_format!r}")
 
     def _call_with_retries(self, payload: dict) -> dict:
         last_error = None
@@ -207,13 +368,27 @@ class OpenAICrossPlatformVerifierClient(OpenAIRuleDiscoveryClient):
         rows = [_cross_platform_prompt_row(match) for match in matches]
         prompt_text = json.dumps({"matches": rows}, ensure_ascii=True, sort_keys=True)
         if self.api_mode == "chat":
+            required_keys = ", ".join(_CROSS_PLATFORM_RESPONSE_SCHEMA.get("required", []))
+            output_contract = _chat_output_contract("polymarket_kalshi_cross_platform_verification")
+            output_instruction = _chat_output_instruction("polymarket_kalshi_cross_platform_verification")
             chat_system_prompt = (
                 f"{_CROSS_PLATFORM_SYSTEM_PROMPT}\n\n"
-                "Return exactly one JSON object matching this schema. Do not echo the input matches.\n"
-                f"{json.dumps(_CROSS_PLATFORM_RESPONSE_SCHEMA, ensure_ascii=True, sort_keys=True)}"
+                "Output rules for chat-compatible providers:\n"
+                "- Return exactly one valid JSON object and nothing else.\n"
+                "- Do not use markdown fences, prose, citations, sources, or external facts.\n"
+                "- Do not echo the input rows or create top-level keys such as matches, safe_items, sources, claims, or answers.\n"
+                "- Schema name: polymarket_kalshi_cross_platform_verification.\n"
+                f"- The top-level required key(s) are: {required_keys}.\n"
+                f"- Required JSON shape example:\n{output_contract}\n"
+                f"- {output_instruction}"
             )
+            if self.chat_response_format == "json_schema":
+                chat_system_prompt += (
+                    f"\n- Full JSON Schema:\n{json.dumps(_CROSS_PLATFORM_RESPONSE_SCHEMA, ensure_ascii=True, sort_keys=True)}"
+                )
             chat_user_prompt = (
                 "Use only the provided market text. Do not estimate probabilities or use prices. "
+                "Never return verification sources, market summaries, safe_items, or a top-level matches key. "
                 "Return only one JSON object matching the schema; no markdown, no prose.\n\n"
                 f"Input matches JSON:\n{prompt_text}"
             )
@@ -223,17 +398,16 @@ class OpenAICrossPlatformVerifierClient(OpenAIRuleDiscoveryClient):
                     {"role": "system", "content": chat_system_prompt},
                     {"role": "user", "content": chat_user_prompt},
                 ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "polymarket_kalshi_cross_platform_verification",
-                        "strict": True,
-                        "schema": _CROSS_PLATFORM_RESPONSE_SCHEMA,
-                    },
-                },
             }
+            self._apply_chat_response_format(
+                payload,
+                "polymarket_kalshi_cross_platform_verification",
+                _CROSS_PLATFORM_RESPONSE_SCHEMA,
+            )
             if self.max_output_tokens is not None:
                 payload["max_completion_tokens"] = self.max_output_tokens
+            if self.temperature is not None:
+                payload["temperature"] = self.temperature
             return payload
 
         payload = {

@@ -39,7 +39,7 @@ LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-900}"
 LLM_RETRIES="${LLM_RETRIES:-2}"
 LLM_CHAT_TIMEOUT="${LLM_CHAT_TIMEOUT:-25}"
 LLM_CHAT_COMMAND_TIMEOUT="${LLM_CHAT_COMMAND_TIMEOUT:-300}"
-LLM_CHAT_RETRIES="${LLM_CHAT_RETRIES:-0}"
+LLM_CHAT_RETRIES="${LLM_CHAT_RETRIES:-1}"
 LLM_PROVIDER_HEALTHCHECK="${LLM_PROVIDER_HEALTHCHECK:-1}"
 LLM_HEALTH_TIMEOUT="${LLM_HEALTH_TIMEOUT:-20}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
@@ -147,15 +147,26 @@ from poly_strategy.openai_rules import OpenAIRuleDiscoveryClient
 from poly_strategy.rule_discovery import MarketText
 
 model, base_url, api_mode, timeout = sys.argv[1], sys.argv[2] or None, sys.argv[3] or None, float(sys.argv[4])
-market = MarketText(
-    "healthcheck",
-    "Will Bitcoin be above $100,000 by December 31, 2026?",
-    "Resolves Yes if Bitcoin trades above $100,000 before the deadline.",
-    ["Yes", "No"],
-    "2026-12-31",
-    "Crypto",
-    "bitcoin-above-100k-2026",
-)
+markets = [
+    MarketText(
+        "healthcheck_low",
+        "Will Bitcoin be above $100,000 by December 31, 2026?",
+        "Resolves Yes if Bitcoin trades above $100,000 before the deadline.",
+        ["Yes", "No"],
+        "2026-12-31",
+        "Crypto",
+        "bitcoin-above-100k-2026",
+    ),
+    MarketText(
+        "healthcheck_high",
+        "Will Bitcoin be above $150,000 by December 31, 2026?",
+        "Resolves Yes if Bitcoin trades above $150,000 before the deadline.",
+        ["Yes", "No"],
+        "2026-12-31",
+        "Crypto",
+        "bitcoin-above-150k-2026",
+    ),
+]
 try:
     client = OpenAIRuleDiscoveryClient(
         model=model,
@@ -166,7 +177,9 @@ try:
         reasoning_effort="high",
         api_mode=api_mode,
     )
-    client.discover_relations([market])
+    relations = client.discover_relations(markets)
+    if not relations:
+        raise RuntimeError("provider healthcheck did not find threshold implication")
 except Exception as exc:
     print(f"provider_health_error type={exc.__class__.__name__} message={str(exc)[:240]}", file=sys.stderr)
     raise SystemExit(42)
@@ -179,15 +192,26 @@ from poly_strategy.openai_rules import OpenAIRuleDiscoveryClient
 from poly_strategy.rule_discovery import MarketText
 
 model, base_url, api_mode, timeout = sys.argv[1], sys.argv[2] or None, sys.argv[3] or None, float(sys.argv[4])
-market = MarketText(
-    "healthcheck",
-    "Will Bitcoin be above $100,000 by December 31, 2026?",
-    "Resolves Yes if Bitcoin trades above $100,000 before the deadline.",
-    ["Yes", "No"],
-    "2026-12-31",
-    "Crypto",
-    "bitcoin-above-100k-2026",
-)
+markets = [
+    MarketText(
+        "healthcheck_low",
+        "Will Bitcoin be above $100,000 by December 31, 2026?",
+        "Resolves Yes if Bitcoin trades above $100,000 before the deadline.",
+        ["Yes", "No"],
+        "2026-12-31",
+        "Crypto",
+        "bitcoin-above-100k-2026",
+    ),
+    MarketText(
+        "healthcheck_high",
+        "Will Bitcoin be above $150,000 by December 31, 2026?",
+        "Resolves Yes if Bitcoin trades above $150,000 before the deadline.",
+        ["Yes", "No"],
+        "2026-12-31",
+        "Crypto",
+        "bitcoin-above-150k-2026",
+    ),
+]
 try:
     client = OpenAIRuleDiscoveryClient(
         model=model,
@@ -198,7 +222,9 @@ try:
         reasoning_effort="high",
         api_mode=api_mode,
     )
-    client.discover_relations([market])
+    relations = client.discover_relations(markets)
+    if not relations:
+        raise RuntimeError("provider healthcheck did not find threshold implication")
 except Exception as exc:
     print(f"provider_health_error type={exc.__class__.__name__} message={str(exc)[:240]}", file=sys.stderr)
     raise SystemExit(42)
