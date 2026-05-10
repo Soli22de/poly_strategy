@@ -1,5 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
+import re
 from typing import List, Optional, Tuple
 
 from poly_strategy.backtest import RuleSet, load_rule_set, snapshots_from_ndjson_lines
@@ -364,6 +365,14 @@ def _neg_risk_group_diagnostic(
                 "rejection_reason": "candidate_omits_known_markets_from_the_same_neg_risk_group",
             }
         )
+    elif group_rejection := _deterministic_group_exhaustiveness_rejection(known_group_markets):
+        row.update(
+            {
+                "status": "known_neg_risk_group_not_exhaustive_by_wording",
+                "trade_status": "rejected",
+                "rejection_reason": group_rejection,
+            }
+        )
     else:
         row.update(
             {
@@ -406,6 +415,83 @@ def _market_sort_key(market: MarketText):
     except (TypeError, ValueError):
         threshold_key = (1, str(threshold))
     return (threshold_key, market.group_item_title, market.market_id)
+
+
+def _deterministic_group_exhaustiveness_rejection(markets: List[MarketText]) -> Optional[str]:
+    range_rejection = _range_group_exhaustiveness_rejection(markets)
+    if range_rejection:
+        return range_rejection
+    named_candidate_rejection = _named_candidate_group_exhaustiveness_rejection(markets)
+    if named_candidate_rejection:
+        return named_candidate_rejection
+    return None
+
+
+def _range_group_exhaustiveness_rejection(markets: List[MarketText]) -> Optional[str]:
+    titles = [str(market.group_item_title or market.question or "").strip().lower() for market in markets]
+    if len(titles) < 2 or not _looks_like_ordered_numeric_range_group(titles):
+        return None
+    first_title = titles[0]
+    last_title = titles[-1]
+    if not _has_lower_tail_wording(first_title):
+        return "ordered_range_group_missing_lower_tail"
+    if not _has_upper_tail_wording(last_title):
+        return "ordered_range_group_missing_upper_tail"
+    return None
+
+
+def _looks_like_ordered_numeric_range_group(titles: List[str]) -> bool:
+    numeric_count = sum(1 for title in titles if re.search(r"\d", title))
+    if numeric_count < max(2, len(titles) // 2):
+        return False
+    has_range = any(re.search(r"\d\s*(?:-|to|through|–|—)\s*\d", title) for title in titles)
+    has_tail = any(_has_lower_tail_wording(title) or _has_upper_tail_wording(title) for title in titles)
+    has_units = any(re.search(r"(?:°|\bf\b|\bc\b|%|points?|goals?|runs?|seats?|votes?)", title) for title in titles)
+    return has_range or has_tail or has_units
+
+
+def _has_lower_tail_wording(title: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:\bor below\b|\bor less\b|\bor fewer\b|\bunder\b|\bbelow\b|\bless than\b|<=|≤)",
+            title,
+        )
+    )
+
+
+def _has_upper_tail_wording(title: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:\bor above\b|\bor more\b|\bor higher\b|\bover\b|\babove\b|\bgreater than\b|>=|≥|\+)",
+            title,
+        )
+    )
+
+
+def _named_candidate_group_exhaustiveness_rejection(markets: List[MarketText]) -> Optional[str]:
+    if len(markets) < 3:
+        return None
+    titles = [str(market.group_item_title or "").strip().lower() for market in markets]
+    if any(_is_other_or_field_title(title) for title in titles):
+        return None
+    questions = " ".join(str(market.question or "").lower() for market in markets)
+    open_ended_markers = [
+        "nobel",
+        "peace prize",
+        "oscar",
+        "academy award",
+        "grammy",
+        "emmy",
+        "person of the year",
+        "ballon d'or",
+    ]
+    if any(marker in questions for marker in open_ended_markers):
+        return "named_candidate_group_missing_other_outcome"
+    return None
+
+
+def _is_other_or_field_title(title: str) -> bool:
+    return bool(re.search(r"(?:\bother\b|\bfield\b|\banyone else\b|\bsomeone else\b|\bnone of)", title))
 
 
 def _market_row(market: MarketText) -> dict:

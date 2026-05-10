@@ -11,7 +11,8 @@ if [[ -f .env.local ]]; then
   set +a
 fi
 
-if [[ -n "${PROXY:-}" && -z "${HTTPS_PROXY:-}" ]]; then
+PROXY="${PROXY:-127.0.0.1:10808}"
+if [[ -n "$PROXY" && -z "${HTTPS_PROXY:-}" ]]; then
   export HTTPS_PROXY="http://${PROXY}"
   export HTTP_PROXY="http://${PROXY}"
 fi
@@ -20,7 +21,7 @@ PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
 GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"
 RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
-EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-}"
+EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-data/external-signals.ndjson}"
 REPORT_OUT="${REPORT_OUT:-data/realtime-monitor-24h.jsonl}"
 SNAPSHOTS_OUT="${SNAPSHOTS_OUT:-data/realtime-monitor-24h-snapshots.ndjson}"
 UPDATES_OUT="${UPDATES_OUT:-}"
@@ -28,7 +29,7 @@ INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
 INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
 MIN_LIQUIDITY="${MIN_LIQUIDITY:-0}"
 MIN_VOLUME_24H="${MIN_VOLUME_24H:-0}"
-MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-250}"
+MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-400}"
 WS_MAX_SIZE="${WS_MAX_SIZE:-4194304}"
 SNAPSHOT_INTERVAL="${SNAPSHOT_INTERVAL:-2}"
 STALE_TIMEOUT="${STALE_TIMEOUT:-30}"
@@ -40,6 +41,9 @@ MIN_PAPER_ROI="${MIN_PAPER_ROI:-0.01}"
 MIN_RUN_OBSERVATIONS="${MIN_RUN_OBSERVATIONS:-2}"
 MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-3}"
 MAX_OPPORTUNITIES_PER_ITERATION="${MAX_OPPORTUNITIES_PER_ITERATION:-10}"
+SEED_ORDERBOOKS="${SEED_ORDERBOOKS:-1}"
+SEED_TIMEOUT="${SEED_TIMEOUT:-10}"
+SEED_WORKERS="${SEED_WORKERS:-8}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -98,6 +102,15 @@ fi
 
 if [[ -n "${MAX_RECONNECTS:-}" ]]; then
   args+=(--max-reconnects "$MAX_RECONNECTS")
+fi
+
+if [[ "$SEED_ORDERBOOKS" == "1" ]]; then
+  args+=(
+    --seed-orderbooks
+    --seed-timeout "$SEED_TIMEOUT"
+    --seed-proxy "$PROXY"
+    --seed-workers "$SEED_WORKERS"
+  )
 fi
 
 exec "$PYTHON_BIN" -u -m poly_strategy.cli "${args[@]}"

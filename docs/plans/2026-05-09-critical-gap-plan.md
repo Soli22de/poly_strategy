@@ -119,3 +119,30 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
 - Default proxy for live HTTP smoke tests can be `127.0.0.1:10808` when needed.
 - Do not place API keys, private keys, or secrets in this repository.
 - Do not enable live order posting in automation; only dry-run plans are allowed for this phase.
+
+## 2026-05-10 Validation Update
+
+- [x] Re-ran the full unit test suite after installing pytest in `.venv`.
+- [x] Fixed cross-platform LLM verification parsing when OpenAI-compatible gateways return `results` rows without `confidence`.
+- [x] Verified the fallback Responses endpoint parses 20/20 cross-platform candidates and safely rejected all 20 sample false positives.
+- [x] Ran a 1000-market realtime probe with HTTP orderbook seeding.
+  - Result: 853 market snapshots per iteration, 30 iterations, 0 actionable positive-net opportunities.
+  - Best actionable candidate remained below threshold: YES/NO bundle net edge about -0.00109/share.
+- [x] Investigated large positive diagnostic baskets.
+  - Weather range groups were false positives because the upper or lower tail outcome was missing.
+  - Nobel named-candidate groups were false positives because no `Other`/field outcome existed.
+- [x] Added deterministic exhaustive-basket rejection for ordered numeric ranges and open-ended award candidate groups.
+
+## Current Profitability Status
+
+- The automation chain can collect, seed, monitor, analyze, alert, and dry-run execution plans.
+- It has not found a currently executable opportunity with positive net edge and usable ROI for a $100 bankroll.
+- The most important current result is negative but useful: the system is now rejecting high-edge-looking traps instead of promoting them as trades.
+
+## Next Useful Work
+
+- [ ] Keep the realtime monitor running in paper mode and collect at least 24 hours of stable-paper-trade evidence before enabling any live order path.
+- [ ] Add a maker-order research module that computes safe passive bid/offer limits for complete baskets; this is not pure arbitrage and must stay dry-run until fill/reconciliation risk is modeled.
+- [ ] Improve cross-platform matching beyond token Jaccard by adding event/category filters and rejecting Kalshi multi-leg combo markets before LLM verification.
+- [ ] Add ROI-first opportunity ranking so small-bankroll alerts prioritize executable dollars and not only edge per share.
+- [ ] Add a compact latest-snapshot store so wide probes can be run without writing tens of MB per minute.

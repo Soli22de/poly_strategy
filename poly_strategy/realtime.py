@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from poly_strategy.backtest import load_rule_set, snapshot_from_row
+from poly_strategy.collectors import fetch_polymarket_books_by_token_id
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.orderbook import Level
 from poly_strategy.paper import opportunity_to_row, select_paper_trades, trade_to_row
@@ -74,6 +75,15 @@ class RealtimeOrderBookStore:
         if event_type == "best_bid_ask":
             return [self._polymarket_best_bid_ask_row(message)]
         return []
+
+    def seed_polymarket_book(self, token_id: str, book: dict, ts: Optional[str] = None) -> dict:
+        normalized_token_id = str(token_id)
+        self._books[normalized_token_id] = {
+            "bids": _levels_dict(book.get("bids", [])),
+            "asks": _levels_dict(book.get("asks", [])),
+        }
+        self.last_update_ts = ts or _utc_now()
+        return _update_row("polymarket", normalized_token_id, None, "seed_book", self.book(normalized_token_id), self.last_update_ts, book)
 
     def book(self, token_id: str) -> dict:
         book = self._books.get(str(token_id), {"bids": {}, "asks": {}})
@@ -220,6 +230,10 @@ def monitor_polymarket_watchlist(
     max_opportunities_per_iteration: int = 10,
     ws_max_size: Optional[int] = DEFAULT_WS_MAX_SIZE,
     url: str = POLYMARKET_MARKET_WS_URL,
+    seed_orderbooks: bool = False,
+    seed_timeout: float = 10.0,
+    seed_proxy: Optional[str] = None,
+    seed_max_workers: int = 8,
     progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     return asyncio.run(
@@ -247,6 +261,10 @@ def monitor_polymarket_watchlist(
             max_opportunities_per_iteration=max_opportunities_per_iteration,
             ws_max_size=ws_max_size,
             url=url,
+            seed_orderbooks=seed_orderbooks,
+            seed_timeout=seed_timeout,
+            seed_proxy=seed_proxy,
+            seed_max_workers=seed_max_workers,
             progress=progress,
         )
     )
@@ -330,6 +348,10 @@ async def _monitor_polymarket_watchlist(
     max_opportunities_per_iteration: int,
     ws_max_size: Optional[int],
     url: str,
+    seed_orderbooks: bool,
+    seed_timeout: float,
+    seed_proxy: Optional[str],
+    seed_max_workers: int,
     progress: Optional[Callable[[dict], None]],
 ) -> dict:
     _validate_realtime_limits(
@@ -373,6 +395,34 @@ async def _monitor_polymarket_watchlist(
     updates_handle = updates_out_path.open("a") if updates_out_path else None
     snapshots_handle = snapshots_out_path.open("a") if snapshots_out_path else None
     try:
+        if seed_orderbooks:
+            seed_errors = []
+            seed_books = fetch_polymarket_books_by_token_id(
+                token_ids_from_watchlist(markets),
+                seed_timeout,
+                proxy=seed_proxy,
+                max_workers=seed_max_workers,
+                skip_errors=True,
+                errors=seed_errors,
+            )
+            update_rows = [
+                store.seed_polymarket_book(token_id, book)
+                for token_id, book in seed_books.items()
+            ]
+            _write_rows(updates_handle, update_rows)
+            _write_rows(
+                report_handle,
+                [
+                    {
+                        "type": "realtime_monitor_seed",
+                        "ts": _utc_now(),
+                        "requested_token_count": len(token_ids_from_watchlist(markets)),
+                        "seeded_token_count": len(seed_books),
+                        "error_count": len(seed_errors),
+                        "errors": seed_errors[:20],
+                    }
+                ],
+            )
         while not stop_requested:
             connection_count += 1
             connection_started_at = time.monotonic()

@@ -3,7 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from poly_strategy.external_signals import external_signal_report, ingest_external_signals
+from poly_strategy.external_signals import (
+    external_signal_report,
+    ingest_external_signals,
+    polymarket_market_ids_from_external_signals,
+)
 from poly_strategy.oddpool import OddpoolQuotaError, reserve_oddpool_quota
 
 
@@ -187,6 +191,27 @@ class ExternalSignalTests(unittest.TestCase):
         self.assertEqual(report["by_source"][0]["source"], "custom")
         self.assertEqual(report["top"][0]["source_id"], "b")
         self.assertIn({"venue_pair": "kalshi+polymarket", "count": 1}, report["by_venue_pair"])
+
+    def test_polymarket_market_ids_from_external_signals_dedupes_in_order(self):
+        rows = [
+            {
+                "type": "external_signal",
+                "legs": [
+                    {"venue": "polymarket", "market_id": "pm-1"},
+                    {"venue": "kalshi", "market_id": "kx-1"},
+                ],
+            },
+            {"type": "external_signal", "legs": [{"venue": "polymarket", "market_id": "pm-1"}]},
+            {"type": "external_signal", "legs": [{"venue": "Polymarket", "market_id": "pm-2"}]},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "external.ndjson"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            market_ids = polymarket_market_ids_from_external_signals(path)
+
+        self.assertEqual(market_ids, ["pm-1", "pm-2"])
 
 
 if __name__ == "__main__":

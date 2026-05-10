@@ -10,6 +10,7 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 POLYMARKET_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
+POLYMARKET_CLOB_BOOKS_URL = "https://clob.polymarket.com/books"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
 
 
@@ -86,20 +87,68 @@ def collect_polymarket_gamma_markets_by_id(
     timeout: float,
     proxy: Optional[str] = None,
     fetch_json: Optional[Callable[[str, float, Optional[str]], dict]] = None,
+    skip_errors: bool = False,
+    errors: Optional[list] = None,
+    max_workers: int = 1,
 ) -> int:
     fetch = fetch_json or _fetch_json
     path.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
+    ordered_market_ids = []
     seen = set()
-    with path.open("a") as handle:
-        for market_id in market_ids:
-            normalized_market_id = str(market_id)
-            if not normalized_market_id or normalized_market_id in seen:
+    for market_id in market_ids:
+        normalized_market_id = str(market_id)
+        if not normalized_market_id or normalized_market_id in seen:
+            continue
+        seen.add(normalized_market_id)
+        ordered_market_ids.append(normalized_market_id)
+
+    count = 0
+    rows = []
+    if max_workers <= 1 or len(ordered_market_ids) <= 1:
+        for normalized_market_id in ordered_market_ids:
+            try:
+                row = _fetch_polymarket_gamma_market_by_id(normalized_market_id, timeout, proxy, fetch)
+            except Exception as exc:
+                if not skip_errors:
+                    raise
+                _append_collection_error(
+                    errors,
+                    "gamma_market_fetch_error",
+                    market_id=normalized_market_id,
+                    message=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
                 continue
-            seen.add(normalized_market_id)
-            row = fetch(f"{GAMMA_MARKETS_URL}/{quote(normalized_market_id)}", timeout, proxy)
-            if not isinstance(row, dict):
-                raise RuntimeError("unexpected Polymarket Gamma market response")
+            rows.append((normalized_market_id, row))
+    else:
+        worker_count = min(max_workers, len(ordered_market_ids))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(_fetch_polymarket_gamma_market_by_id, normalized_market_id, timeout, proxy, fetch): normalized_market_id
+                for normalized_market_id in ordered_market_ids
+            }
+            fetched_rows = {}
+            for future in as_completed(futures):
+                normalized_market_id = futures[future]
+                try:
+                    fetched_rows[normalized_market_id] = future.result()
+                except Exception as exc:
+                    if not skip_errors:
+                        raise
+                    _append_collection_error(
+                        errors,
+                        "gamma_market_fetch_error",
+                        market_id=normalized_market_id,
+                        message=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
+            for normalized_market_id in ordered_market_ids:
+                row = fetched_rows.get(normalized_market_id)
+                if row is not None:
+                    rows.append((normalized_market_id, row))
+
+    with path.open("a") as handle:
+        for normalized_market_id, row in rows:
             handle.write(
                 json.dumps(
                     {
@@ -114,6 +163,28 @@ def collect_polymarket_gamma_markets_by_id(
             )
             count += 1
     return count
+
+
+def _fetch_polymarket_gamma_market_by_id(
+    market_id: str,
+    timeout: float,
+    proxy: Optional[str],
+    fetch_json: Callable[[str, float, Optional[str]], dict],
+) -> dict:
+    normalized_market_id = str(market_id)
+    if normalized_market_id.lower().startswith("0x"):
+        row = fetch_json(f"{GAMMA_MARKETS_URL}?{urlencode({'condition_ids': normalized_market_id})}", timeout, proxy)
+        if isinstance(row, list):
+            for market in row:
+                if str(market.get("conditionId") or "").lower() == normalized_market_id.lower():
+                    return market
+            if row:
+                return row[0]
+        raise RuntimeError("unexpected Polymarket Gamma condition_id response")
+    row = fetch_json(f"{GAMMA_MARKETS_URL}/{quote(normalized_market_id)}", timeout, proxy)
+    if not isinstance(row, dict):
+        raise RuntimeError("unexpected Polymarket Gamma market response")
+    return row
 
 
 def collect_polymarket_books(path: Path, token_ids: Iterable[str], timeout: float, proxy: Optional[str] = None) -> int:
@@ -139,6 +210,117 @@ def collect_polymarket_books(path: Path, token_ids: Iterable[str], timeout: floa
     return count
 
 
+def fetch_polymarket_books_by_token_id(
+    token_ids: Iterable[str],
+    timeout: float,
+    proxy: Optional[str] = None,
+    max_workers: int = 1,
+    skip_errors: bool = False,
+    errors: Optional[list] = None,
+    fetch_json: Optional[Callable[[str, float, Optional[str]], dict]] = None,
+    post_json: Optional[Callable[[str, object, float, Optional[str]], object]] = None,
+    batch_size: int = 500,
+) -> dict:
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    fetch = fetch_json or _fetch_json
+    post = post_json or _post_json
+    ordered_token_ids = list(dict.fromkeys(str(token_id) for token_id in token_ids if token_id))
+    if fetch_json is None and batch_size > 1:
+        return _fetch_polymarket_books_by_batch(
+            ordered_token_ids,
+            timeout,
+            proxy,
+            post,
+            batch_size,
+            max_workers,
+            skip_errors,
+            errors,
+        )
+
+    def fetch_book(token_id: str) -> dict:
+        params = urlencode({"token_id": token_id})
+        return fetch(f"{POLYMARKET_CLOB_BOOK_URL}?{params}", timeout, proxy)
+
+    return _fetch_books_by_token_id(
+        ordered_token_ids,
+        fetch_book,
+        max_workers,
+        skip_errors=skip_errors,
+        errors=errors,
+    )
+
+
+def _fetch_polymarket_books_by_batch(
+    token_ids: list,
+    timeout: float,
+    proxy: Optional[str],
+    post_json: Callable[[str, object, float, Optional[str]], object],
+    batch_size: int,
+    max_workers: int,
+    skip_errors: bool,
+    errors: Optional[list],
+) -> dict:
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+    chunks = [token_ids[index : index + batch_size] for index in range(0, len(token_ids), batch_size)]
+    if not chunks:
+        return {}
+
+    def fetch_chunk(chunk: list) -> dict:
+        payload = [{"token_id": token_id} for token_id in chunk]
+        response = post_json(POLYMARKET_CLOB_BOOKS_URL, payload, timeout, proxy)
+        if not isinstance(response, list):
+            raise RuntimeError("unexpected Polymarket batch books response")
+        books = {}
+        for index, book in enumerate(response):
+            if not isinstance(book, dict):
+                continue
+            token_id = str(book.get("asset_id") or (chunk[index] if index < len(chunk) else "")).strip()
+            if token_id:
+                books[token_id] = book
+        return books
+
+    if max_workers == 1 or len(chunks) == 1:
+        books = {}
+        for chunk in chunks:
+            try:
+                books.update(fetch_chunk(chunk))
+            except Exception as exc:
+                if not skip_errors:
+                    raise
+                for token_id in chunk:
+                    _append_collection_error(
+                        errors,
+                        "book_fetch_error",
+                        token_id=token_id,
+                        message=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
+        return books
+
+    worker_count = min(max_workers, len(chunks))
+    books = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+        for future in as_completed(futures):
+            chunk = futures[future]
+            try:
+                books.update(future.result())
+            except Exception as exc:
+                if not skip_errors:
+                    raise
+                for token_id in chunk:
+                    _append_collection_error(
+                        errors,
+                        "book_fetch_error",
+                        token_id=token_id,
+                        message=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
+    return books
+
+
 def collect_kalshi_markets(
     path: Path,
     limit: int,
@@ -148,6 +330,53 @@ def collect_kalshi_markets(
     status: Optional[str] = "open",
     tickers: Optional[Iterable[str]] = None,
 ) -> int:
+    markets, _ = fetch_kalshi_markets_page(limit, timeout, proxy, cursor=cursor, status=status, tickers=tickers)
+    return _write_kalshi_market_rows(path, markets)
+
+
+def collect_kalshi_markets_pages(
+    path: Path,
+    limit: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    cursor: Optional[str] = None,
+    status: Optional[str] = "open",
+    tickers: Optional[Iterable[str]] = None,
+    pages: Optional[int] = 1,
+) -> int:
+    if pages is not None and pages < 1:
+        raise ValueError("pages must be at least 1, or None for all pages")
+
+    total = 0
+    current_cursor = cursor
+    seen_cursors = set()
+    page_index = 0
+    while pages is None or page_index < pages:
+        markets, next_cursor = fetch_kalshi_markets_page(
+            limit,
+            timeout,
+            proxy,
+            cursor=current_cursor,
+            status=status,
+            tickers=tickers,
+        )
+        total += _write_kalshi_market_rows(path, markets)
+        page_index += 1
+        if not next_cursor or next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        current_cursor = next_cursor
+    return total
+
+
+def fetch_kalshi_markets_page(
+    limit: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    cursor: Optional[str] = None,
+    status: Optional[str] = "open",
+    tickers: Optional[Iterable[str]] = None,
+) -> tuple:
     if limit < 0:
         raise ValueError("limit must be non-negative")
     params = {"limit": str(limit)}
@@ -162,9 +391,18 @@ def collect_kalshi_markets(
     markets = row.get("markets") if isinstance(row, dict) else None
     if not isinstance(markets, list):
         raise RuntimeError("unexpected Kalshi markets response")
+    next_cursor = row.get("cursor")
+    if isinstance(next_cursor, str):
+        next_cursor = next_cursor.strip() or None
+    else:
+        next_cursor = None
+    return markets, next_cursor
 
+
+def _write_kalshi_market_rows(path: Path, markets: Iterable[dict]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
+        count = 0
         for market in markets:
             handle.write(
                 json.dumps(
@@ -178,7 +416,8 @@ def collect_kalshi_markets(
                 )
                 + "\n"
             )
-    return len(markets)
+            count += 1
+    return count
 
 
 def collect_kalshi_orderbooks(
@@ -644,23 +883,30 @@ def market_ids_from_rule_file(path: Path) -> set:
 
 
 def expand_market_ids_with_neg_risk_groups(markets: Iterable[dict], market_ids: Iterable[str]) -> set:
-    selected_market_ids = {str(market_id) for market_id in market_ids if market_id}
-    if not selected_market_ids:
-        return selected_market_ids
+    selected_aliases = {str(market_id).strip() for market_id in market_ids if market_id}
+    if not selected_aliases:
+        return selected_aliases
 
     markets_by_id = {}
     group_ids = set()
+    selected_market_ids = set()
+    alias_to_market_id = {}
     for market in markets:
-        market_id = str(market.get("id") or market.get("conditionId") or "")
+        market_id = canonical_market_id(market)
         if not market_id:
             continue
         markets_by_id[market_id] = market
-        if market_id in selected_market_ids:
+        aliases = market_id_aliases(market)
+        for alias in aliases:
+            alias_to_market_id[alias] = market_id
+        if aliases & selected_aliases:
+            selected_market_ids.add(market_id)
             group_id = str(market.get("negRiskMarketID") or "").strip()
             if group_id:
                 group_ids.add(group_id)
 
     expanded = set(selected_market_ids)
+    expanded.update(market_id for market_id in selected_aliases if market_id not in alias_to_market_id)
     for market_id, market in markets_by_id.items():
         if str(market.get("negRiskMarketID") or "").strip() in group_ids:
             expanded.add(market_id)
@@ -672,7 +918,11 @@ def limit_market_ids_by_gamma_order(
     market_ids: Iterable[str],
     max_markets: Optional[int],
 ) -> set:
-    selected_market_ids = {str(market_id) for market_id in market_ids if market_id}
+    markets = list(markets)
+    alias_to_market_id = market_id_alias_map(markets)
+    selected_market_ids = {
+        alias_to_market_id.get(str(market_id).strip(), str(market_id).strip()) for market_id in market_ids if market_id
+    }
     if max_markets is None:
         return selected_market_ids
     if max_markets < 1:
@@ -680,7 +930,7 @@ def limit_market_ids_by_gamma_order(
 
     ordered = []
     for market in markets:
-        market_id = str(market.get("id") or market.get("conditionId") or "")
+        market_id = canonical_market_id(market)
         if market_id and market_id in selected_market_ids:
             ordered.append(market_id)
             if len(ordered) >= max_markets:
@@ -690,6 +940,30 @@ def limit_market_ids_by_gamma_order(
         return set(ordered)
     remaining = sorted(selected_market_ids - set(ordered))
     return set(ordered + remaining[: max_markets - len(ordered)])
+
+
+def canonical_market_id(market: dict) -> str:
+    return str(market.get("id") or market.get("conditionId") or "").strip()
+
+
+def market_id_aliases(market: dict) -> set:
+    aliases = set()
+    for key in ["id", "conditionId"]:
+        value = market.get(key)
+        if value:
+            aliases.add(str(value).strip())
+    return aliases
+
+
+def market_id_alias_map(markets: Iterable[dict]) -> dict:
+    alias_map = {}
+    for market in markets:
+        market_id = canonical_market_id(market)
+        if not market_id:
+            continue
+        for alias in market_id_aliases(market):
+            alias_map[alias] = market_id
+    return alias_map
 
 
 def _add_if_present(target: set, row: dict, key: str) -> None:
@@ -724,6 +998,27 @@ def _candidate_is_tradeable_pair(candidate: dict) -> bool:
 
 def _fetch_json(url: str, timeout: float, proxy: Optional[str] = None):
     request = Request(url, headers={"accept": "application/json", "user-agent": "poly-strategy/0.1"})
+    if proxy:
+        proxy_url = _normalize_proxy(proxy)
+        opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        response_context = opener.open(request, timeout=timeout)
+    else:
+        response_context = urlopen(request, timeout=timeout)
+    with response_context as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _post_json(url: str, payload, timeout: float, proxy: Optional[str] = None):
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "accept": "application/json",
+            "content-type": "application/json",
+            "user-agent": "poly-strategy/0.1",
+        },
+        method="POST",
+    )
     if proxy:
         proxy_url = _normalize_proxy(proxy)
         opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))

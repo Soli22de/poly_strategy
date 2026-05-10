@@ -64,6 +64,29 @@ class WatchlistTests(unittest.TestCase):
         top = next(row for row in rows if row["market_id"] == "top")
         self.assertIn("top_liquidity", top["priority_reasons"])
 
+    def test_build_polymarket_watchlist_keeps_neg_risk_groups_atomic_under_cap(self):
+        gamma_rows = [
+            _gamma_row("group-a", "group", ["ga-yes", "ga-no"], "1", liquidity=1, volume24hr=1),
+            _gamma_row("group-b", "group", ["gb-yes", "gb-no"], "2", liquidity=1, volume24hr=1),
+            _gamma_row("solo", "", ["solo-yes", "solo-no"], "", liquidity=500, volume24hr=100),
+        ]
+        rules = {"mutually_exclusive": [{"first": "group-a", "second": "group-a"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            gamma_path.write_text("\n".join(json.dumps(row) for row in gamma_rows) + "\n")
+            rules_path.write_text(json.dumps(rules))
+
+            rows = build_polymarket_watchlist(
+                gamma_path,
+                rules_path,
+                include_top_markets=1,
+                max_markets=2,
+            )
+
+        self.assertEqual({row["market_id"] for row in rows}, {"group-a", "group-b"})
+
     def test_build_polymarket_watchlist_boosts_external_signal_markets(self):
         gamma_rows = [
             _gamma_row("signal", "", ["signal-yes", "signal-no"], "", liquidity=0, volume24hr=0),
@@ -93,6 +116,110 @@ class WatchlistTests(unittest.TestCase):
         self.assertEqual([row["market_id"] for row in rows], ["signal"])
         self.assertIn("external_signal", rows[0]["priority_reasons"])
 
+    def test_build_polymarket_watchlist_maps_external_condition_id_to_gamma_id(self):
+        gamma_rows = [
+            _gamma_row(
+                "numeric-signal",
+                "",
+                ["signal-yes", "signal-no"],
+                "",
+                condition_id="0xsignal",
+            ),
+        ]
+        rules = {"mutually_exclusive": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            signals_path = Path(tmp) / "signals.ndjson"
+            gamma_path.write_text("\n".join(json.dumps(row) for row in gamma_rows) + "\n")
+            rules_path.write_text(json.dumps(rules))
+            signals_path.write_text(
+                json.dumps(
+                    {
+                        "type": "external_signal",
+                        "quoted_edge": 0.05,
+                        "legs": [{"venue": "polymarket", "market_id": "0xsignal"}],
+                    }
+                )
+                + "\n"
+            )
+
+            rows = build_polymarket_watchlist(gamma_path, rules_path, external_signals_path=signals_path)
+
+        self.assertEqual([row["market_id"] for row in rows], ["numeric-signal"])
+        self.assertIn("external_signal", rows[0]["priority_reasons"])
+
+    def test_build_polymarket_watchlist_keeps_external_signals_under_cap(self):
+        gamma_rows = [
+            _gamma_row("group-a", "group", ["ga-yes", "ga-no"], "1", liquidity=1000, volume24hr=1000),
+            _gamma_row("group-b", "group", ["gb-yes", "gb-no"], "2", liquidity=1000, volume24hr=1000),
+            _gamma_row("signal", "", ["signal-yes", "signal-no"], "", liquidity=0, volume24hr=0),
+        ]
+        rules = {"mutually_exclusive": [{"first": "group-a", "second": "group-a"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            signals_path = Path(tmp) / "signals.ndjson"
+            gamma_path.write_text("\n".join(json.dumps(row) for row in gamma_rows) + "\n")
+            rules_path.write_text(json.dumps(rules))
+            signals_path.write_text(
+                json.dumps(
+                    {
+                        "type": "external_signal",
+                        "legs": [{"venue": "polymarket", "market_id": "signal"}],
+                    }
+                )
+                + "\n"
+            )
+
+            rows = build_polymarket_watchlist(
+                gamma_path,
+                rules_path,
+                external_signals_path=signals_path,
+                max_markets=2,
+            )
+
+        self.assertIn("signal", {row["market_id"] for row in rows})
+        signal = next(row for row in rows if row["market_id"] == "signal")
+        self.assertIn("external_signal", signal["priority_reasons"])
+
+    def test_build_polymarket_watchlist_keeps_external_signal_neg_risk_group_atomic(self):
+        gamma_rows = [
+            _gamma_row("group-a", "group", ["ga-yes", "ga-no"], "1", liquidity=100, volume24hr=10),
+            _gamma_row("group-b", "group", ["gb-yes", "gb-no"], "2", liquidity=100, volume24hr=10),
+            _gamma_row("solo", "", ["solo-yes", "solo-no"], "", liquidity=1000, volume24hr=1000),
+        ]
+        rules = {"mutually_exclusive": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            signals_path = Path(tmp) / "signals.ndjson"
+            gamma_path.write_text("\n".join(json.dumps(row) for row in gamma_rows) + "\n")
+            rules_path.write_text(json.dumps(rules))
+            signals_path.write_text(
+                json.dumps(
+                    {
+                        "type": "external_signal",
+                        "legs": [{"venue": "polymarket", "market_id": "group-a"}],
+                    }
+                )
+                + "\n"
+            )
+
+            rows = build_polymarket_watchlist(
+                gamma_path,
+                rules_path,
+                external_signals_path=signals_path,
+                max_markets=2,
+            )
+
+        self.assertEqual({row["market_id"] for row in rows}, {"group-a", "group-b"})
+        group_a = next(row for row in rows if row["market_id"] == "group-a")
+        self.assertIn("external_signal", group_a["priority_reasons"])
+
 
 def _gamma_row(
     market_id: str,
@@ -101,12 +228,14 @@ def _gamma_row(
     threshold: str,
     liquidity: float = 0.0,
     volume24hr: float = 0.0,
+    condition_id: str = "",
 ):
     return {
         "type": "raw_polymarket_gamma_market",
         "market_id": market_id,
         "raw": {
             "id": market_id,
+            "conditionId": condition_id or None,
             "question": f"{market_id} wins?",
             "active": True,
             "closed": False,

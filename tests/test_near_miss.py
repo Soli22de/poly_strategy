@@ -186,6 +186,65 @@ class NearMissTests(unittest.TestCase):
         self.assertAlmostEqual(expanded["net_edge_per_share"], -0.20)
         self.assertEqual([leg["market_id"] for leg in expanded["legs"]], ["a", "b", "c", "d"])
 
+    def test_near_miss_report_rejects_numeric_range_groups_without_upper_tail(self):
+        snapshots = [
+            _row("a", 0.004, 0.99),
+            _row("b", 0.004, 0.99),
+            _row("c", 0.005, 0.99),
+            _row("d", 0.011, 0.99),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            gamma_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(_gamma_row("a", 0, title="21C or below")),
+                        json.dumps(_gamma_row("b", 1, title="22C")),
+                        json.dumps(_gamma_row("c", 2, title="23C")),
+                        json.dumps(_gamma_row("d", 3, title="24C")),
+                    ]
+                )
+                + "\n"
+            )
+
+            report = near_miss_report(snapshot_path, gamma_path=gamma_path, top_n=10)
+
+        candidate = [row for row in report["top"] if row["kind"] == "potential_exhaustive_yes_basket"][0]
+        self.assertEqual(candidate["trade_status"], "rejected")
+        self.assertEqual(candidate["neg_risk_status"], "known_neg_risk_group_not_exhaustive_by_wording")
+        self.assertEqual(candidate["rejection_reason"], "ordered_range_group_missing_upper_tail")
+
+    def test_near_miss_report_rejects_open_ended_award_candidate_groups_without_other(self):
+        snapshots = [
+            _row("a", 0.10, 0.92),
+            _row("b", 0.10, 0.92),
+            _row("c", 0.10, 0.92),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            gamma_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(_gamma_row("a", 0, title="Candidate A", question="Will Candidate A win the Nobel Peace Prize in 2026?")),
+                        json.dumps(_gamma_row("b", 1, title="Candidate B", question="Will Candidate B win the Nobel Peace Prize in 2026?")),
+                        json.dumps(_gamma_row("c", 2, title="Candidate C", question="Will Candidate C win the Nobel Peace Prize in 2026?")),
+                    ]
+                )
+                + "\n"
+            )
+
+            report = near_miss_report(snapshot_path, gamma_path=gamma_path, top_n=10)
+
+        candidate = [row for row in report["top"] if row["kind"] == "potential_exhaustive_yes_basket"][0]
+        self.assertEqual(candidate["trade_status"], "rejected")
+        self.assertEqual(candidate["rejection_reason"], "named_candidate_group_missing_other_outcome")
+
     def test_near_miss_report_requires_all_markets_to_share_neg_risk_group(self):
         snapshots = [_row("a", 0.20, 0.82), _row("b", 0.30, 0.72), _row("c", 0.40, 0.62)]
         rules_row = {
@@ -236,14 +295,16 @@ def _row(market_id: str, yes_price: float, no_price: float):
     }
 
 
-def _gamma_row(market_id: str, threshold: int, group_id: str = "group-1"):
+def _gamma_row(market_id: str, threshold: int, group_id: str = "group-1", title: str = None, question: str = None):
+    group_title = title or market_id.upper()
+    market_question = question or f"Will {market_id.upper()} win?"
     return {
         "ts": "2026-05-09T00:00:00Z",
         "type": "raw_polymarket_gamma_market",
         "market_id": market_id,
         "raw": {
             "id": market_id,
-            "question": f"Will {market_id.upper()} win?",
+            "question": market_question,
             "description": "Same event.",
             "closed": False,
             "enableOrderBook": True,
@@ -254,7 +315,7 @@ def _gamma_row(market_id: str, threshold: int, group_id: str = "group-1"):
             "slug": f"{market_id}-wins",
             "negRisk": True,
             "negRiskMarketID": group_id,
-            "groupItemTitle": market_id.upper(),
+            "groupItemTitle": group_title,
             "groupItemThreshold": str(threshold),
         },
     }

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from poly_strategy.cross_platform import (
+    apply_cross_platform_verifications,
     cross_platform_pairs,
     cross_platform_signal_rows,
     match_polymarket_kalshi_markets,
@@ -99,6 +100,44 @@ class CrossPlatformTests(unittest.TestCase):
 
         self.assertEqual([pair["polymarket_market_id"] for pair in verified], ["verified-poly"])
         self.assertEqual(len(all_pairs), 2)
+
+    def test_apply_cross_platform_verifications_updates_trade_allowed(self):
+        report = {
+            "top": [
+                {
+                    "polymarket_market_id": "pm1",
+                    "kalshi_ticker": "KX1",
+                    "trade_allowed": False,
+                    "status": "candidate_needs_llm_or_manual_verification",
+                },
+                {
+                    "polymarket_market_id": "pm2",
+                    "kalshi_ticker": "KX2",
+                    "trade_allowed": False,
+                    "status": "candidate_needs_llm_or_manual_verification",
+                },
+            ]
+        }
+
+        updated = apply_cross_platform_verifications(
+            report,
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "kalshi_ticker": "KX1",
+                    "trade_allowed": True,
+                    "confidence": 0.99,
+                    "risk_flags": [],
+                    "reason": "same market",
+                }
+            ],
+        )
+
+        self.assertTrue(updated["top"][0]["trade_allowed"])
+        self.assertEqual(updated["top"][0]["status"], "verified_same_binary_event")
+        self.assertEqual(updated["top"][1]["status"], "candidate_needs_llm_or_manual_verification")
+        self.assertEqual(updated["llm_verified_count"], 1)
+        self.assertEqual(updated["llm_rejected_count"], 0)
 
 
 if __name__ == "__main__":

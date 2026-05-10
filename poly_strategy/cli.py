@@ -16,13 +16,17 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
     collect_kalshi_markets,
+    collect_kalshi_markets_pages,
     collect_kalshi_orderbooks,
     collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
+    market_id_alias_map,
+    raw_gamma_markets_from_ndjson,
     write_kalshi_binary_snapshots,
     write_sample_snapshot,
 )
 from poly_strategy.cross_platform import (
+    apply_cross_platform_verifications,
     cross_platform_pairs,
     cross_platform_signal_rows,
     match_polymarket_kalshi_markets,
@@ -30,6 +34,7 @@ from poly_strategy.cross_platform import (
 )
 from poly_strategy.openai_rules import (
     OpenAIConfigError,
+    OpenAICrossPlatformVerifierClient,
     OpenAIExhaustiveGroupVerifierClient,
     OpenAIResponseError,
     OpenAIRuleDiscoveryClient,
@@ -43,7 +48,11 @@ from poly_strategy.execution import (
     reconcile_execution_responses,
 )
 from poly_strategy.execution_checks import pretrade_check_row
-from poly_strategy.external_signals import external_signal_report, ingest_external_signals
+from poly_strategy.external_signals import (
+    external_signal_report,
+    ingest_external_signals,
+    polymarket_market_ids_from_external_signals,
+)
 from poly_strategy.exhaustive_groups import promotion_candidate_count, promote_exhaustive_groups, result_to_row
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.notifications import notify_alerts
@@ -136,15 +145,38 @@ def main(argv=None) -> int:
             print(f"wrote={count} out={args.out}")
             return 0
         if args.command == "collect-kalshi":
-            count = collect_kalshi_markets(
-                Path(args.out),
-                args.limit,
-                args.timeout,
-                args.proxy,
-                cursor=args.cursor,
-                status=args.status,
-                tickers=args.ticker,
-            )
+            if args.all_pages:
+                count = collect_kalshi_markets_pages(
+                    Path(args.out),
+                    args.limit,
+                    args.timeout,
+                    args.proxy,
+                    cursor=args.cursor,
+                    status=args.status,
+                    tickers=args.ticker,
+                    pages=None,
+                )
+            elif args.pages and args.pages > 1:
+                count = collect_kalshi_markets_pages(
+                    Path(args.out),
+                    args.limit,
+                    args.timeout,
+                    args.proxy,
+                    cursor=args.cursor,
+                    status=args.status,
+                    tickers=args.ticker,
+                    pages=args.pages,
+                )
+            else:
+                count = collect_kalshi_markets(
+                    Path(args.out),
+                    args.limit,
+                    args.timeout,
+                    args.proxy,
+                    cursor=args.cursor,
+                    status=args.status,
+                    tickers=args.ticker,
+                )
             print(f"wrote={count} out={args.out}")
             return 0
         if args.command == "collect-kalshi-orderbooks":
@@ -507,6 +539,41 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
+        if args.command == "collect-external-signal-markets":
+            errors = []
+            market_ids = polymarket_market_ids_from_external_signals(Path(args.external_signals), limit=args.limit)
+            known_aliases = {}
+            if Path(args.out).exists():
+                known_aliases = market_id_alias_map(raw_gamma_markets_from_ndjson(Path(args.out)))
+            missing_market_ids = [market_id for market_id in market_ids if market_id not in known_aliases]
+            count = collect_polymarket_gamma_markets_by_id(
+                Path(args.out),
+                missing_market_ids,
+                args.timeout,
+                args.proxy,
+                skip_errors=args.skip_errors,
+                errors=errors,
+                max_workers=args.max_workers,
+            )
+            row = {
+                "type": "external_signal_market_collection",
+                "external_signals": args.external_signals,
+                "out": args.out,
+                "market_id_count": len(market_ids),
+                "known_market_id_count": len(market_ids) - len(missing_market_ids),
+                "missing_market_id_count": len(missing_market_ids),
+                "written_count": count,
+                "error_count": len(errors),
+                "errors": errors[: args.max_errors],
+            }
+            if args.report_out:
+                Path(args.report_out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.report_out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+            print(
+                f"market_ids={len(market_ids)} missing={len(missing_market_ids)} "
+                f"wrote={count} errors={len(errors)} out={args.out}"
+            )
+            return 0
         if args.command == "match-cross-platform":
             row = match_polymarket_kalshi_markets(
                 Path(args.polymarket_gamma),
@@ -525,6 +592,59 @@ def main(argv=None) -> int:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
                 print(f"wrote=1 out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "verify-cross-platform-matches":
+            model = args.model or os.environ.get("OPENAI_MODEL")
+            if not model:
+                print("error: model is required via --model or OPENAI_MODEL", file=sys.stderr)
+                return 1
+            match_report = json.loads(Path(args.matches).read_text())
+            matches = list(match_report.get("top", []))[: args.top]
+            client = OpenAICrossPlatformVerifierClient(
+                model=model,
+                timeout=args.timeout,
+                base_url=args.base_url,
+                retries=args.retries,
+                max_output_tokens=args.max_output_tokens,
+                reasoning_effort=args.reasoning_effort,
+                verbosity=args.verbosity,
+                api_mode=args.api_mode,
+            )
+            verifications = []
+            verification_errors = []
+            for batch in _chunks(matches, args.batch_size):
+                try:
+                    verifications.extend(client.verify_matches(batch))
+                except (OpenAIResponseError, OSError, TimeoutError, RuntimeError) as exc:
+                    verification_errors.append(
+                        {
+                            "error_type": exc.__class__.__name__,
+                            "message": str(exc),
+                            "batch_size": len(batch),
+                        }
+                    )
+                    if not args.continue_on_error:
+                        raise
+            row = apply_cross_platform_verifications(match_report, verifications)
+            row["llm_verification_row_count"] = len(verifications)
+            if verification_errors:
+                row["verification_errors"] = verification_errors
+            if args.signals_out:
+                count = write_cross_platform_signal_rows(
+                    cross_platform_signal_rows(row, verified_only=args.verified_only),
+                    Path(args.signals_out),
+                )
+                row["signals_written"] = count
+                row["signals_out"] = args.signals_out
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(
+                    f"verified={row.get('llm_verified_count', 0)} rejected={row.get('llm_rejected_count', 0)} "
+                    f"parsed={row.get('llm_verification_row_count', 0)} out={args.out}"
+                )
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
@@ -592,6 +712,10 @@ def main(argv=None) -> int:
                 max_opportunities_per_iteration=args.max_opportunities_per_iteration,
                 ws_max_size=args.ws_max_size,
                 url=args.url,
+                seed_orderbooks=args.seed_orderbooks,
+                seed_timeout=args.seed_timeout,
+                seed_proxy=args.seed_proxy,
+                seed_max_workers=args.seed_workers,
                 progress=_print_realtime_monitor_progress,
             )
             print(
@@ -699,6 +823,8 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_kalshi.add_argument("--cursor", help="optional pagination cursor")
     collect_kalshi.add_argument("--status", default="open", help="market status filter; empty string disables")
     collect_kalshi.add_argument("--ticker", action="append", help="optional Kalshi ticker filter")
+    collect_kalshi.add_argument("--pages", type=int, default=1, help="number of pages to fetch")
+    collect_kalshi.add_argument("--all-pages", action="store_true", help="fetch until the API cursor is exhausted")
     collect_kalshi.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     collect_kalshi.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
 
@@ -1050,6 +1176,20 @@ def _build_parser() -> argparse.ArgumentParser:
     signal_report.add_argument("path", help="external signal NDJSON path")
     signal_report.add_argument("--out", help="output JSON path; prints JSON to stdout when omitted")
 
+    collect_signal_markets = subparsers.add_parser(
+        "collect-external-signal-markets",
+        help="append Gamma market rows for Polymarket market IDs referenced by external signals",
+    )
+    collect_signal_markets.add_argument("--external-signals", required=True, help="external signal NDJSON path")
+    collect_signal_markets.add_argument("--out", required=True, help="Polymarket Gamma NDJSON path to append")
+    collect_signal_markets.add_argument("--report-out", help="write collection summary JSON here")
+    collect_signal_markets.add_argument("--limit", type=int, help="maximum unique Polymarket market IDs to refresh")
+    collect_signal_markets.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    collect_signal_markets.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+    collect_signal_markets.add_argument("--skip-errors", action="store_true", help="skip external signal market IDs that Gamma cannot resolve")
+    collect_signal_markets.add_argument("--max-errors", type=int, default=20, help="maximum errors to include in report")
+    collect_signal_markets.add_argument("--max-workers", type=int, default=8, help="parallel Gamma market fetch workers")
+
     match_cross = subparsers.add_parser("match-cross-platform", help="match Polymarket Gamma markets to Kalshi markets")
     match_cross.add_argument("--polymarket-gamma", required=True, help="raw Polymarket Gamma NDJSON path")
     match_cross.add_argument("--kalshi-markets", required=True, help="raw Kalshi market NDJSON path")
@@ -1058,6 +1198,26 @@ def _build_parser() -> argparse.ArgumentParser:
     match_cross.add_argument("--min-score", type=float, default=0.35, help="minimum title-token Jaccard score")
     match_cross.add_argument("--top", type=int, default=100, help="maximum matches to include")
     match_cross.add_argument("--verified-only", action="store_true", help="write only semantically verified same-binary signals")
+
+    verify_cross = subparsers.add_parser(
+        "verify-cross-platform-matches",
+        help="LLM-verify Polymarket/Kalshi same-binary match candidates",
+    )
+    verify_cross.add_argument("--matches", required=True, help="cross_platform_match_report JSON path")
+    verify_cross.add_argument("--out", help="output verified cross-platform match report path")
+    verify_cross.add_argument("--signals-out", help="append verified matches as external_signal rows")
+    verify_cross.add_argument("--top", type=int, default=50, help="top match candidates to verify")
+    verify_cross.add_argument("--batch-size", type=int, default=5, help="match candidates per LLM verification request")
+    verify_cross.add_argument("--continue-on-error", action="store_true", help="keep verified rows from successful batches when a batch fails")
+    verify_cross.add_argument("--verified-only", action="store_true", help="write only verified same-binary signals")
+    verify_cross.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
+    verify_cross.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
+    verify_cross.add_argument("--api-mode", choices=["responses", "chat"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
+    verify_cross.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")
+    verify_cross.add_argument("--retries", type=int, default=2, help="retry count for retryable OpenAI-compatible API errors")
+    verify_cross.add_argument("--max-output-tokens", type=int, default=4000, help="maximum model output tokens")
+    verify_cross.add_argument("--reasoning-effort", default="medium", help="OpenAI-compatible reasoning effort")
+    verify_cross.add_argument("--verbosity", help="optional Responses API text verbosity")
 
     scan_cross = subparsers.add_parser(
         "scan-cross-platform-once",
@@ -1137,6 +1297,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="maximum current/stable opportunities to include in each report row",
     )
+    realtime_monitor.add_argument("--seed-orderbooks", action="store_true", help="seed token books via HTTP before streaming WebSocket deltas")
+    realtime_monitor.add_argument("--seed-timeout", type=float, default=10.0, help="HTTP timeout for seed orderbook requests")
+    realtime_monitor.add_argument("--seed-proxy", help="HTTP proxy for seed orderbook requests, for example 127.0.0.1:10808")
+    realtime_monitor.add_argument("--seed-workers", type=int, default=8, help="parallel seed orderbook HTTP workers")
 
     monitor_alerts = subparsers.add_parser(
         "monitor-alerts",
@@ -1728,6 +1892,12 @@ def _headers_from_args(values: list) -> dict:
 
 def _read_lines(path: Path) -> list:
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+
+def _chunks(rows: list, size: int) -> list:
+    if size < 1:
+        raise ValueError("batch size must be at least 1")
+    return [rows[index : index + size] for index in range(0, len(rows), size)]
 
 
 def _read_jsonl_rows(path: Path) -> list:

@@ -249,6 +249,82 @@ class CliTests(unittest.TestCase):
         self.assertEqual(collect.call_args.kwargs["tickers"], ["KXTEST"])
         self.assertIn("wrote=3", stdout.getvalue())
 
+    def test_collect_kalshi_command_can_page_through_results(self):
+        with patch("poly_strategy.cli.collect_kalshi_markets_pages", return_value=6) as collect_pages:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "collect-kalshi",
+                        "--out",
+                        "data/kalshi.ndjson",
+                        "--limit",
+                        "3",
+                        "--pages",
+                        "2",
+                        "--status",
+                        "open",
+                        "--timeout",
+                        "7",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(str(collect_pages.call_args.args[0]), "data/kalshi.ndjson")
+        self.assertEqual(collect_pages.call_args.kwargs["pages"], 2)
+        self.assertIn("wrote=6", stdout.getvalue())
+
+    def test_collect_external_signal_markets_command_fetches_missing_gamma_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signals = Path(tmp) / "signals.ndjson"
+            gamma = Path(tmp) / "gamma.ndjson"
+            report = Path(tmp) / "report.json"
+            signals.write_text(
+                json.dumps(
+                    {
+                        "type": "external_signal",
+                        "legs": [
+                            {"venue": "polymarket", "market_id": "0xknown"},
+                            {"venue": "polymarket", "market_id": "0xmissing"},
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            gamma.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_polymarket_gamma_market",
+                        "market_id": "known",
+                        "raw": {"id": "known", "conditionId": "0xknown"},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with patch("poly_strategy.cli.collect_polymarket_gamma_markets_by_id", return_value=1) as collect:
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "collect-external-signal-markets",
+                            "--external-signals",
+                            str(signals),
+                            "--out",
+                            str(gamma),
+                            "--report-out",
+                            str(report),
+                            "--skip-errors",
+                        ]
+                    )
+            row = json.loads(report.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(collect.call_args.args[1], ["0xmissing"])
+        self.assertEqual(row["known_market_id_count"], 1)
+        self.assertEqual(row["missing_market_id_count"], 1)
+        self.assertIn("missing=1", stdout.getvalue())
+
     def test_collect_rule_markets_passes_gamma_and_rules_to_targeted_collector(self):
         with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_rules_loop", return_value=4) as collect:
             stdout = io.StringIO()
@@ -1083,6 +1159,62 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["signals_written"], 1)
         self.assertEqual(signal_rows[0]["type"], "external_signal")
         self.assertIn("wrote=1", stdout.getvalue())
+
+    def test_verify_cross_platform_command_reports_parsed_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            matches = Path(tmp) / "matches.json"
+            out = Path(tmp) / "verified.json"
+            matches.write_text(
+                json.dumps(
+                    {
+                        "top": [
+                            {
+                                "polymarket_market_id": "pm1",
+                                "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                                "kalshi_ticker": "KXBTC100K",
+                                "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                            }
+                        ]
+                    }
+                )
+            )
+            response = {
+                "output_text": json.dumps(
+                    {
+                        "results": [
+                            {
+                                "polymarket_market_id": "pm1",
+                                "kalshi_ticker": "KXBTC100K",
+                                "verified_same_binary_event": False,
+                                "trade_allowed": False,
+                                "reason": "safe rejection",
+                            }
+                        ]
+                    }
+                )
+            }
+
+            stdout = io.StringIO()
+            with patch("poly_strategy.openai_rules.OpenAIRuleDiscoveryClient._post_responses", return_value=response):
+                with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
+                    with redirect_stdout(stdout):
+                        code = main(
+                            [
+                                "verify-cross-platform-matches",
+                                "--matches",
+                                str(matches),
+                                "--out",
+                                str(out),
+                                "--model",
+                                "test-model",
+                            ]
+                        )
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["llm_verification_row_count"], 1)
+        self.assertEqual(row["llm_rejected_count"], 1)
+        self.assertIn("parsed=1", stdout.getvalue())
 
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):
         result = SimpleNamespace(

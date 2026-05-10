@@ -125,7 +125,8 @@ start_monitor() {
     export MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-3}"
     export INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
     export INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
-    export MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-250}"
+    export MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-400}"
+    export EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-data/external-signals.ndjson}"
     export WS_MAX_SIZE="${WS_MAX_SIZE:-4194304}"
     exec scripts/run_realtime_monitor.sh
   ) >> "$monitor_log" 2>&1 &

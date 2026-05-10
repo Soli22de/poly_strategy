@@ -15,7 +15,11 @@ PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"
 RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
 WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
-EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-}"
+EXTERNAL_SIGNALS="${EXTERNAL_SIGNALS:-data/external-signals.ndjson}"
+REFRESH_EXTERNAL_SIGNAL_MARKETS="${REFRESH_EXTERNAL_SIGNAL_MARKETS:-1}"
+EXTERNAL_SIGNAL_MARKET_LIMIT="${EXTERNAL_SIGNAL_MARKET_LIMIT:-1000}"
+EXTERNAL_SIGNAL_MARKET_REPORT="${EXTERNAL_SIGNAL_MARKET_REPORT:-data/external-signal-market-refresh.json}"
+EXTERNAL_SIGNAL_MARKET_WORKERS="${EXTERNAL_SIGNAL_MARKET_WORKERS:-8}"
 PROXY="${PROXY:-127.0.0.1:10808}"
 if [[ -n "$PROXY" && -z "${HTTPS_PROXY:-}" ]]; then
   export HTTPS_PROXY="http://${PROXY}"
@@ -43,7 +47,7 @@ INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-150}"
 INCLUDE_TOP_NEG_RISK_GROUPS="${INCLUDE_TOP_NEG_RISK_GROUPS:-25}"
 MIN_LIQUIDITY="${MIN_LIQUIDITY:-0}"
 MIN_VOLUME_24H="${MIN_VOLUME_24H:-0}"
-MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-250}"
+MAX_WATCHLIST_MARKETS="${MAX_WATCHLIST_MARKETS:-400}"
 RESTART_ON_CHANGE="${RESTART_ON_CHANGE:-0}"
 RESTART_SCRIPT="${RESTART_SCRIPT:-scripts/restart_realtime_monitor.sh}"
 SKIP_GAMMA="${SKIP_GAMMA:-0}"
@@ -218,6 +222,18 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
   fi
 else
   echo "skip_llm=1 or OPENAI_MODEL is empty; reusing existing rule cache: $RULES"
+fi
+
+if [[ "$REFRESH_EXTERNAL_SIGNAL_MARKETS" == "1" && -s "$EXTERNAL_SIGNALS" ]]; then
+  "$PYTHON_BIN" -m poly_strategy.cli collect-external-signal-markets \
+    --external-signals "$EXTERNAL_SIGNALS" \
+    --out "$GAMMA" \
+    --report-out "$EXTERNAL_SIGNAL_MARKET_REPORT" \
+    --limit "$EXTERNAL_SIGNAL_MARKET_LIMIT" \
+    --max-workers "$EXTERNAL_SIGNAL_MARKET_WORKERS" \
+    --timeout "$TIMEOUT" \
+    --proxy "$PROXY" \
+    --skip-errors
 fi
 
 watchlist_tmp="$(mktemp "${WATCHLIST}.tmp.XXXXXX")"

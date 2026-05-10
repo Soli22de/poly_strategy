@@ -202,6 +202,84 @@ class OpenAIExhaustiveGroupVerifierClient(OpenAIRuleDiscoveryClient):
         return _call_parser_with_retries(self._call_with_retries, payload, self.retries, _parse_group_response)
 
 
+class OpenAICrossPlatformVerifierClient(OpenAIRuleDiscoveryClient):
+    def build_payload(self, matches: Iterable[dict]) -> dict:
+        rows = [_cross_platform_prompt_row(match) for match in matches]
+        prompt_text = json.dumps({"matches": rows}, ensure_ascii=True, sort_keys=True)
+        if self.api_mode == "chat":
+            chat_system_prompt = (
+                f"{_CROSS_PLATFORM_SYSTEM_PROMPT}\n\n"
+                "Return exactly one JSON object matching this schema. Do not echo the input matches.\n"
+                f"{json.dumps(_CROSS_PLATFORM_RESPONSE_SCHEMA, ensure_ascii=True, sort_keys=True)}"
+            )
+            chat_user_prompt = (
+                "Use only the provided market text. Do not estimate probabilities or use prices. "
+                "Return only one JSON object matching the schema; no markdown, no prose.\n\n"
+                f"Input matches JSON:\n{prompt_text}"
+            )
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": chat_system_prompt},
+                    {"role": "user", "content": chat_user_prompt},
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "polymarket_kalshi_cross_platform_verification",
+                        "strict": True,
+                        "schema": _CROSS_PLATFORM_RESPONSE_SCHEMA,
+                    },
+                },
+            }
+            if self.max_output_tokens is not None:
+                payload["max_completion_tokens"] = self.max_output_tokens
+            return payload
+
+        payload = {
+            "model": self.model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": _CROSS_PLATFORM_SYSTEM_PROMPT,
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": prompt_text,
+                        }
+                    ],
+                },
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "polymarket_kalshi_cross_platform_verification",
+                    "strict": True,
+                    "schema": _CROSS_PLATFORM_RESPONSE_SCHEMA,
+                }
+            },
+        }
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        if self.reasoning_effort and _model_supports_reasoning(self.model):
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        if self.verbosity:
+            payload.setdefault("text", {})["verbosity"] = self.verbosity
+        return payload
+
+    def verify_matches(self, matches: Iterable[dict]) -> List[dict]:
+        payload = self.build_payload(list(matches))
+        return _call_parser_with_retries(self._call_with_retries, payload, self.retries, _parse_cross_platform_response)
+
+
 _SYSTEM_PROMPT = """You identify conservative logical relations between binary prediction markets.
 
 Definitions:
@@ -537,6 +615,114 @@ def _group_verification_from_row(row: dict) -> dict:
         raise OpenAIResponseError("OpenAI exhaustive group verification is invalid") from exc
 
 
+def _parse_cross_platform_response(response: dict) -> List[dict]:
+    content = _extract_output_text(response)
+    try:
+        parsed = _loads_json_payload(content)
+    except json.JSONDecodeError as exc:
+        raise OpenAIResponseError("OpenAI response was not valid JSON") from exc
+    if isinstance(parsed, dict):
+        verifications = parsed.get("verifications")
+        if verifications is None:
+            for key in ["results", "matches", "items", "verification"]:
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    verifications = value
+                    break
+                if isinstance(value, dict):
+                    verifications = [value]
+                    break
+        if verifications is None and "polymarket_market_id" in parsed and "kalshi_ticker" in parsed:
+            verifications = [parsed]
+    elif isinstance(parsed, list):
+        verifications = parsed
+    else:
+        raise OpenAIResponseError("OpenAI cross-platform verification was not a JSON object or list")
+    if not isinstance(verifications, list):
+        raise OpenAIResponseError("OpenAI cross-platform verification is missing verifications")
+    rows = []
+    for row in verifications:
+        if not isinstance(row, dict):
+            continue
+        try:
+            rows.append(_cross_platform_verification_from_row(row))
+        except OpenAIResponseError:
+            continue
+    return rows
+
+
+def _cross_platform_verification_from_row(row: dict) -> dict:
+    try:
+        risk_flags = _risk_flags_from_value(row.get("risk_flags") or row.get("risks") or [])
+        trade_allowed = _bool_from_value(
+            _first_present(row, ["trade_allowed", "allowed", "tradeable", "is_tradeable"])
+        )
+        if trade_allowed is None:
+            raise ValueError("trade_allowed must be a boolean")
+        confidence_value = _first_present(row, ["confidence", "score"])
+        missing_confidence = confidence_value is None
+        if missing_confidence:
+            if trade_allowed:
+                risk_flags.append("missing_confidence")
+                trade_allowed = False
+            confidence = 0.0
+        else:
+            confidence = float(confidence_value)
+        if confidence < 0 or confidence > 1:
+            raise ValueError("confidence must be between 0 and 1")
+        verified_same_binary_event = _bool_from_value(
+            _first_present(row, ["verified_same_binary_event", "same_binary_event", "same_event", "same"])
+        )
+        if verified_same_binary_event is None:
+            verified_same_binary_event = trade_allowed
+        polymarket_market_id = _first_present(
+            row, ["polymarket_market_id", "poly_market_id", "polymarket_id", "poly_id", "market_id"]
+        )
+        kalshi_ticker = _first_present(row, ["kalshi_ticker", "ticker", "kalshi_market_id", "kalshi_id", "market_ticker"])
+        if polymarket_market_id is None or kalshi_ticker is None:
+            raise ValueError("missing market identifiers")
+        return {
+            "polymarket_market_id": str(polymarket_market_id),
+            "kalshi_ticker": str(kalshi_ticker),
+            "verified_same_binary_event": verified_same_binary_event,
+            "trade_allowed": trade_allowed,
+            "confidence": confidence,
+            "risk_flags": risk_flags,
+            "reason": str(row.get("reason") or ""),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OpenAIResponseError("OpenAI cross-platform verification is invalid") from exc
+
+
+def _first_present(row: dict, keys: Iterable[str]):
+    for key in keys:
+        if key in row and row[key] is not None:
+            return row[key]
+    return None
+
+
+def _bool_from_value(value) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1", "allowed", "trade_allowed", "same"}:
+            return True
+        if normalized in {"false", "no", "n", "0", "rejected", "not_allowed", "different"}:
+            return False
+    return None
+
+
+def _risk_flags_from_value(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(flag) for flag in value]
+    if isinstance(value, str):
+        return [value]
+    raise ValueError("risk_flags must be a list or string")
+
+
 def _normalize_group_verdict(row: dict) -> str:
     verdict = row.get("verdict", row.get("status"))
     if isinstance(verdict, str):
@@ -551,6 +737,82 @@ def _normalize_group_verdict(row: dict) -> str:
     if isinstance(exhaustive, bool):
         return "exhaustive_group" if exhaustive else "not_exhaustive"
     raise ValueError("missing verdict")
+
+
+def _cross_platform_prompt_row(match: dict) -> dict:
+    return {
+        "polymarket_market_id": str(match.get("polymarket_market_id") or ""),
+        "polymarket_title": str(match.get("polymarket_title") or ""),
+        "polymarket_question": str(match.get("polymarket_question") or match.get("polymarket_title") or ""),
+        "kalshi_ticker": str(match.get("kalshi_ticker") or ""),
+        "kalshi_title": str(match.get("kalshi_title") or ""),
+        "score": float(match.get("score") or 0.0),
+        "status": str(match.get("status") or ""),
+    }
+
+
+_CROSS_PLATFORM_SYSTEM_PROMPT = """You verify whether a Polymarket market and a Kalshi market are the same binary event.
+
+Definitions:
+- verified_same_binary_event means both markets resolve on the same underlying real-world event, with the same substance and compatible resolution criteria.
+- trade_allowed means the pair is safe to trade as a same-event cross-venue hedge or arb candidate.
+
+Workflow:
+- Compare question/title, subject, deadline, resolution source, and wording.
+- Be conservative: prefer false negatives over false positives.
+- Reject pairs with different subjects, different deadlines, or different resolution sources.
+- Reject pairs where one market is conditional, multi-outcome, or not obviously the same binary event.
+- Ignore market prices and liquidity.
+- Return only structured JSON matching the schema."""
+
+
+_CROSS_PLATFORM_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verifications": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "polymarket_market_id": {"type": "string"},
+                    "kalshi_ticker": {"type": "string"},
+                    "verified_same_binary_event": {"type": "boolean"},
+                    "trade_allowed": {"type": "boolean"},
+                    "confidence": {"type": "number"},
+                    "risk_flags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "different_subject",
+                                "different_deadline",
+                                "different_resolution_source",
+                                "conditional_or_fallback_resolution",
+                                "non_binary_or_non_yes_no",
+                                "ambiguous_wording",
+                                "insufficient_information",
+                                "possible_subject_mismatch",
+                            ],
+                        },
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "polymarket_market_id",
+                    "kalshi_ticker",
+                    "verified_same_binary_event",
+                    "trade_allowed",
+                    "confidence",
+                    "risk_flags",
+                    "reason",
+                ],
+            },
+        }
+    },
+    "required": ["verifications"],
+}
 
 
 def _is_retryable(exc: Exception) -> bool:

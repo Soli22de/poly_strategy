@@ -6,11 +6,13 @@ from unittest.mock import patch
 
 from poly_strategy.collectors import (
     binary_snapshot_rows_from_gamma_markets,
+    collect_kalshi_markets_pages,
     collect_polymarket_binary_snapshots_for_market_ids,
     collect_polymarket_binary_snapshots_for_markets,
     collect_polymarket_binary_snapshots_loop,
     collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
+    fetch_polymarket_books_by_token_id,
     kalshi_binary_snapshot_rows_from_orderbooks,
     expand_market_ids_with_neg_risk_groups,
     limit_market_ids_by_gamma_order,
@@ -47,6 +49,45 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(calls[0][2], "127.0.0.1:10808")
         self.assertEqual([row["type"] for row in rows], ["raw_polymarket_gamma_market", "raw_polymarket_gamma_market"])
 
+    def test_collect_polymarket_gamma_markets_by_id_can_fetch_condition_id(self):
+        calls = []
+
+        def fetch_json(url, timeout, proxy):
+            calls.append(url)
+            return [{"id": "123", "conditionId": "0xabc", "question": "Sample?"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+
+            count = collect_polymarket_gamma_markets_by_id(path, ["0xabc"], timeout=7, proxy=None, fetch_json=fetch_json)
+            row = json.loads(path.read_text().splitlines()[0])
+
+        self.assertEqual(count, 1)
+        self.assertIn("condition_ids=0xabc", calls[0])
+        self.assertEqual(row["market_id"], "123")
+
+    def test_collect_polymarket_gamma_markets_by_id_can_skip_failed_condition_id(self):
+        errors = []
+
+        def fetch_json(url, timeout, proxy):
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gamma.ndjson"
+
+            count = collect_polymarket_gamma_markets_by_id(
+                path,
+                ["0xmissing"],
+                timeout=7,
+                proxy=None,
+                fetch_json=fetch_json,
+                skip_errors=True,
+                errors=errors,
+            )
+
+        self.assertEqual(count, 0)
+        self.assertEqual(errors[0]["kind"], "gamma_market_fetch_error")
+
     def test_collect_polymarket_gamma_pages_uses_offsets(self):
         calls = []
 
@@ -70,6 +111,29 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(count, 6)
         self.assertEqual([call[4] for call in calls], [50, 150, 250])
 
+    def test_collect_kalshi_markets_pages_follows_cursor_until_exhausted(self):
+        calls = []
+
+        def fetch_page(limit, timeout, proxy, cursor=None, status="open", tickers=None):
+            calls.append((limit, timeout, proxy, cursor, status, tuple(tickers or [])))
+            if cursor is None:
+                return ([{"ticker": "A"}], "cursor-1")
+            if cursor == "cursor-1":
+                return ([{"ticker": "B"}], None)
+            return ([], None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "kalshi.ndjson"
+
+            with patch("poly_strategy.collectors.fetch_kalshi_markets_page", side_effect=fetch_page):
+                count = collect_kalshi_markets_pages(path, limit=2, timeout=3.0, proxy="127.0.0.1:10808", pages=None)
+
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual([row["market_id"] for row in rows], ["A", "B"])
+        self.assertEqual([call[3] for call in calls], [None, "cursor-1"])
+
     def test_expand_market_ids_with_neg_risk_groups_adds_known_group_members(self):
         markets = [
             {"id": "a", "negRiskMarketID": "group-1"},
@@ -81,10 +145,28 @@ class CollectorTests(unittest.TestCase):
 
         self.assertEqual(market_ids, {"a", "b"})
 
+    def test_expand_market_ids_with_neg_risk_groups_accepts_condition_id_aliases(self):
+        markets = [
+            {"id": "a", "conditionId": "0xa", "negRiskMarketID": "group-1"},
+            {"id": "b", "conditionId": "0xb", "negRiskMarketID": "group-1"},
+            {"id": "c", "conditionId": "0xc", "negRiskMarketID": "group-2"},
+        ]
+
+        market_ids = expand_market_ids_with_neg_risk_groups(markets, {"0xa"})
+
+        self.assertEqual(market_ids, {"a", "b"})
+
     def test_limit_market_ids_by_gamma_order_caps_with_stable_order(self):
         markets = [{"id": "b"}, {"id": "a"}, {"id": "c"}]
 
         market_ids = limit_market_ids_by_gamma_order(markets, {"a", "b", "c", "unknown"}, 2)
+
+        self.assertEqual(market_ids, {"b", "a"})
+
+    def test_limit_market_ids_by_gamma_order_canonicalizes_condition_ids(self):
+        markets = [{"id": "b", "conditionId": "0xb"}, {"id": "a", "conditionId": "0xa"}]
+
+        market_ids = limit_market_ids_by_gamma_order(markets, {"0xa", "0xb"}, 2)
 
         self.assertEqual(market_ids, {"b", "a"})
 
@@ -195,6 +277,49 @@ class CollectorTests(unittest.TestCase):
 
         self.assertEqual([row["market_id"] for row in rows], ["a", "b"])
         self.assertEqual(set(fetched), {"a-yes", "a-no", "b-yes", "b-no"})
+
+    def test_fetch_polymarket_books_by_token_id_uses_clob_book_endpoint(self):
+        calls = []
+
+        def fetch_json(url, timeout, proxy):
+            calls.append((url, timeout, proxy))
+            return {"asks": [{"price": "0.5", "size": "10"}], "bids": []}
+
+        books = fetch_polymarket_books_by_token_id(
+            ["token-a"],
+            timeout=7.0,
+            proxy="127.0.0.1:10808",
+            fetch_json=fetch_json,
+        )
+
+        self.assertEqual(list(books), ["token-a"])
+        self.assertIn("token_id=token-a", calls[0][0])
+        self.assertEqual(calls[0][1], 7.0)
+        self.assertEqual(calls[0][2], "127.0.0.1:10808")
+
+    def test_fetch_polymarket_books_by_token_id_uses_batch_books_endpoint(self):
+        calls = []
+
+        def post_json(url, payload, timeout, proxy):
+            calls.append((url, payload, timeout, proxy))
+            return [
+                {"asset_id": "token-a", "asks": [{"price": "0.5", "size": "10"}], "bids": []},
+                {"asset_id": "token-b", "asks": [], "bids": [{"price": "0.4", "size": "5"}]},
+            ]
+
+        books = fetch_polymarket_books_by_token_id(
+            ["token-a", "token-b"],
+            timeout=7.0,
+            proxy="127.0.0.1:10808",
+            post_json=post_json,
+            batch_size=500,
+        )
+
+        self.assertEqual(set(books), {"token-a", "token-b"})
+        self.assertTrue(calls[0][0].endswith("/books"))
+        self.assertEqual(calls[0][1], [{"token_id": "token-a"}, {"token_id": "token-b"}])
+        self.assertEqual(calls[0][2], 7.0)
+        self.assertEqual(calls[0][3], "127.0.0.1:10808")
 
     def test_binary_snapshot_rows_can_skip_failed_book_fetches(self):
         markets = [

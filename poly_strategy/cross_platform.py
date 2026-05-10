@@ -1,4 +1,5 @@
 import json
+import copy
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +98,32 @@ def cross_platform_pairs(match_report: dict, verified_only: bool = True) -> list
             }
         )
     return pairs
+
+
+def apply_cross_platform_verifications(match_report: dict, verifications: Iterable[dict]) -> dict:
+    updated = copy.deepcopy(match_report)
+    by_pair = {
+        (str(row.get("polymarket_market_id") or ""), str(row.get("kalshi_ticker") or "")): row
+        for row in verifications
+    }
+    verified_count = 0
+    rejected_count = 0
+    for match in updated.get("top", []):
+        key = (str(match.get("polymarket_market_id") or ""), str(match.get("kalshi_ticker") or ""))
+        verification = by_pair.get(key)
+        if not verification:
+            continue
+        match["llm_verification"] = verification
+        match["trade_allowed"] = bool(verification.get("trade_allowed"))
+        if verification.get("trade_allowed"):
+            verified_count += 1
+            match["status"] = "verified_same_binary_event"
+        else:
+            rejected_count += 1
+            match["status"] = "candidate_rejected_by_llm"
+    updated["llm_verified_count"] = verified_count
+    updated["llm_rejected_count"] = rejected_count
+    return updated
 
 
 def write_cross_platform_signal_rows(rows: Iterable[dict], out_path: Path) -> int:

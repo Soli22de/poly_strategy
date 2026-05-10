@@ -65,6 +65,25 @@ def external_signal_report(path: Path) -> dict:
     }
 
 
+def polymarket_market_ids_from_external_signals(path: Path, limit: Optional[int] = None) -> list:
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be at least 1")
+    market_ids = []
+    seen = set()
+    for row in _read_external_signals(path):
+        for leg in row.get("legs", []):
+            if str(leg.get("venue") or "").lower() != "polymarket":
+                continue
+            market_id = str(leg.get("market_id") or "").strip()
+            if not market_id or market_id in seen:
+                continue
+            seen.add(market_id)
+            market_ids.append(market_id)
+            if limit is not None and len(market_ids) >= limit:
+                return market_ids
+    return market_ids
+
+
 def _payloads_from_path(path: Path) -> list:
     text = path.read_text().strip()
     if not text:

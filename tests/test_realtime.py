@@ -109,6 +109,23 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(row["yes"]["asks"], [[0.45, 10.0]])
         self.assertEqual(row["no"]["bids"], [[0.52, 5.0]])
 
+    def test_store_can_seed_polymarket_book_before_websocket_updates(self):
+        store = RealtimeOrderBookStore()
+
+        row = store.seed_polymarket_book(
+            "yes-token",
+            {
+                "bids": [{"price": "0.40", "size": "5"}],
+                "asks": [{"price": "0.50", "size": "7"}],
+            },
+            ts="2026-05-10T00:00:00Z",
+        )
+
+        self.assertEqual(row["event_type"], "seed_book")
+        self.assertEqual(store.token_count, 1)
+        self.assertEqual(store.book("yes-token")["asks"][0].price, 0.5)
+        self.assertEqual(store.last_update_ts, "2026-05-10T00:00:00Z")
+
     def test_load_watchlist_markets_and_token_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "watchlist.json"

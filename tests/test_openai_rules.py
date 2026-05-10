@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from poly_strategy.openai_rules import (
     OpenAIConfigError,
+    OpenAICrossPlatformVerifierClient,
     OpenAIExhaustiveGroupVerifierClient,
     OpenAIResponseError,
     OpenAIRuleDiscoveryClient,
@@ -62,6 +63,23 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(payload["response_format"]["json_schema"]["name"], "polymarket_exhaustive_group_verification")
         self.assertEqual(payload["messages"][0]["role"], "system")
         self.assertIn("Will A win?", payload["messages"][1]["content"])
+
+    def test_cross_platform_verifier_payload_can_use_chat_completions_format(self):
+        client = OpenAICrossPlatformVerifierClient(model="test-model", api_key="test-key", api_mode="chat")
+
+        payload = client.build_payload(
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                    "kalshi_ticker": "KXBTC",
+                    "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                }
+            ]
+        )
+
+        self.assertEqual(payload["response_format"]["json_schema"]["name"], "polymarket_kalshi_cross_platform_verification")
+        self.assertIn("Will Bitcoin hit 100k in 2026?", payload["messages"][1]["content"])
 
     def test_build_payload_omits_reasoning_for_non_reasoning_model(self):
         client = OpenAIRuleDiscoveryClient(model="grok-4.20-0309-non-reasoning", api_key="test-key")
@@ -284,6 +302,122 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(result["confidence"], 0.99)
         self.assertEqual(calls[0][1], 12)
         self.assertEqual(calls[0][0]["text"]["format"]["name"], "polymarket_exhaustive_group_verification")
+
+    def test_cross_platform_verifier_parses_structured_response(self):
+        response = {
+            "output_text": json.dumps(
+                {
+                    "verifications": [
+                        {
+                            "polymarket_market_id": "pm1",
+                            "kalshi_ticker": "KXBTC",
+                            "verified_same_binary_event": True,
+                            "trade_allowed": True,
+                            "confidence": 0.99,
+                            "risk_flags": [],
+                            "reason": "same binary event",
+                        }
+                    ]
+                }
+            )
+        }
+        client = OpenAICrossPlatformVerifierClient(
+            model="test-model",
+            api_key="test-key",
+            transport=lambda payload, timeout: response,
+        )
+
+        rows = client.verify_matches(
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                    "kalshi_ticker": "KXBTC",
+                    "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["trade_allowed"])
+        self.assertEqual(rows[0]["confidence"], 0.99)
+
+    def test_cross_platform_verifier_accepts_safe_rejection_aliases(self):
+        response = {
+            "output_text": json.dumps(
+                {
+                    "results": [
+                        {
+                            "polymarket_id": "pm1",
+                            "ticker": "KXBTC",
+                            "same_event": False,
+                            "allowed": False,
+                            "reason": "different wording",
+                        }
+                    ]
+                }
+            )
+        }
+        client = OpenAICrossPlatformVerifierClient(
+            model="test-model",
+            api_key="test-key",
+            transport=lambda payload, timeout: response,
+        )
+
+        rows = client.verify_matches(
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                    "kalshi_ticker": "KXBTC",
+                    "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["polymarket_market_id"], "pm1")
+        self.assertEqual(rows[0]["kalshi_ticker"], "KXBTC")
+        self.assertFalse(rows[0]["trade_allowed"])
+        self.assertEqual(rows[0]["confidence"], 0.0)
+
+    def test_cross_platform_verifier_blocks_tradeable_row_without_confidence(self):
+        response = {
+            "output_text": json.dumps(
+                {
+                    "results": [
+                        {
+                            "polymarket_market_id": "pm1",
+                            "kalshi_ticker": "KXBTC",
+                            "verified_same_binary_event": True,
+                            "trade_allowed": True,
+                            "risk_flags": [],
+                            "reason": "same wording",
+                        }
+                    ]
+                }
+            )
+        }
+        client = OpenAICrossPlatformVerifierClient(
+            model="test-model",
+            api_key="test-key",
+            transport=lambda payload, timeout: response,
+        )
+
+        rows = client.verify_matches(
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                    "kalshi_ticker": "KXBTC",
+                    "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["trade_allowed"])
+        self.assertIn("missing_confidence", rows[0]["risk_flags"])
 
     def test_verify_group_retries_invalid_structured_response(self):
         responses = [
