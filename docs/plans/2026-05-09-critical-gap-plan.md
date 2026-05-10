@@ -132,6 +132,12 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - Weather range groups were false positives because the upper or lower tail outcome was missing.
   - Nobel named-candidate groups were false positives because no `Other`/field outcome existed.
 - [x] Added deterministic exhaustive-basket rejection for ordered numeric ranges and open-ended award candidate groups.
+- [x] Added passive maker dry-run scanning for baskets.
+  - Default mode quotes one tick below the best ask to avoid misleading zero-bid fantasy fills.
+  - Current 1000-market probe found 11 near-ask maker candidates, but the best expected edge at a $100 cap was only about $0.21 before partial-fill/adverse-selection risk.
+  - These are not safe live trades yet; they require all legs to fill and remain dry-run only.
+- [x] Added an overwrite-only latest snapshot file for realtime scans, so wider watchlists can feed maker diagnostics without relying only on ever-growing raw snapshot logs.
+- [x] Raised default realtime watchlist coverage to 1000 markets with more high-liquidity and neg-risk groups.
 
 ## Current Profitability Status
 
@@ -142,7 +148,8 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
 ## Next Useful Work
 
 - [ ] Keep the realtime monitor running in paper mode and collect at least 24 hours of stable-paper-trade evidence before enabling any live order path.
-- [ ] Add a maker-order research module that computes safe passive bid/offer limits for complete baskets; this is not pure arbitrage and must stay dry-run until fill/reconciliation risk is modeled.
+- [x] Add a maker-order research module that computes passive bid limits for complete/neg-risk baskets; this is not pure arbitrage and stays dry-run until fill/reconciliation risk is modeled.
+- [ ] Add maker fill simulation from WebSocket deltas so candidates are ranked by realized fill probability, not only theoretical edge.
 - [ ] Improve cross-platform matching beyond token Jaccard by adding event/category filters and rejecting Kalshi multi-leg combo markets before LLM verification.
 - [ ] Add ROI-first opportunity ranking so small-bankroll alerts prioritize executable dollars and not only edge per share.
-- [ ] Add a compact latest-snapshot store so wide probes can be run without writing tens of MB per minute.
+- [x] Add a compact latest-snapshot store so wide probes can be run without writing tens of MB per minute.

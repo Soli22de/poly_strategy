@@ -176,6 +176,7 @@ class RealtimeTests(unittest.TestCase):
             report = tmp_path / "report.jsonl"
             updates = tmp_path / "updates.ndjson"
             snapshots = tmp_path / "snapshots.ndjson"
+            latest_snapshots = tmp_path / "latest-snapshots.ndjson"
             watchlist.write_text(
                 json.dumps(
                     {
@@ -206,6 +207,7 @@ class RealtimeTests(unittest.TestCase):
                     rules_path=rules,
                     updates_out_path=updates,
                     snapshots_out_path=snapshots,
+                    latest_snapshots_out_path=latest_snapshots,
                     max_messages=1,
                     snapshot_interval_seconds=0,
                     stale_timeout_seconds=30,
@@ -216,6 +218,7 @@ class RealtimeTests(unittest.TestCase):
             report_rows = [json.loads(line) for line in report.read_text().splitlines()]
             update_rows = [json.loads(line) for line in updates.read_text().splitlines()]
             snapshot_rows = [json.loads(line) for line in snapshots.read_text().splitlines()]
+            latest_snapshot_rows = [json.loads(line) for line in latest_snapshots.read_text().splitlines()]
 
         self.assertEqual(summary["type"], "realtime_monitor_summary")
         self.assertEqual(summary["iterations_completed"], 1)
@@ -231,6 +234,7 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(connect_kwargs[0]["max_size"], 4 * 1024 * 1024)
         self.assertEqual(len(update_rows), 2)
         self.assertEqual(snapshot_rows[0]["type"], "binary_snapshot")
+        self.assertEqual(latest_snapshot_rows, snapshot_rows)
         self.assertEqual(json.loads(fake_socket.sent[0])["assets_ids"], ["yes-token", "no-token"])
 
     def test_monitor_polymarket_watchlist_reconnects_after_recv_error(self):

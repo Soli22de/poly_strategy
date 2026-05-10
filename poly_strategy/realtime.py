@@ -213,6 +213,7 @@ def monitor_polymarket_watchlist(
     gamma_path: Optional[Path] = None,
     updates_out_path: Optional[Path] = None,
     snapshots_out_path: Optional[Path] = None,
+    latest_snapshots_out_path: Optional[Path] = None,
     max_messages: Optional[int] = None,
     max_iterations: Optional[int] = None,
     snapshot_interval_seconds: Optional[float] = 2.0,
@@ -244,6 +245,7 @@ def monitor_polymarket_watchlist(
             gamma_path=gamma_path,
             updates_out_path=updates_out_path,
             snapshots_out_path=snapshots_out_path,
+            latest_snapshots_out_path=latest_snapshots_out_path,
             max_messages=max_messages,
             max_iterations=max_iterations,
             snapshot_interval_seconds=snapshot_interval_seconds,
@@ -331,6 +333,7 @@ async def _monitor_polymarket_watchlist(
     gamma_path: Optional[Path],
     updates_out_path: Optional[Path],
     snapshots_out_path: Optional[Path],
+    latest_snapshots_out_path: Optional[Path],
     max_messages: Optional[int],
     max_iterations: Optional[int],
     snapshot_interval_seconds: Optional[float],
@@ -382,6 +385,8 @@ async def _monitor_polymarket_watchlist(
         updates_out_path.parent.mkdir(parents=True, exist_ok=True)
     if snapshots_out_path:
         snapshots_out_path.parent.mkdir(parents=True, exist_ok=True)
+    if latest_snapshots_out_path:
+        latest_snapshots_out_path.parent.mkdir(parents=True, exist_ok=True)
 
     message_count = 0
     iteration = 0
@@ -456,6 +461,8 @@ async def _monitor_polymarket_watchlist(
                                 iteration += 1
                                 snapshots_collected += len(snapshot_rows)
                                 _write_rows(snapshots_handle, snapshot_rows)
+                                if latest_snapshots_out_path:
+                                    _write_rows_atomic(latest_snapshots_out_path, snapshot_rows)
                                 snapshots = [snapshot_from_row(row) for row in snapshot_rows]
                                 batch_result = replay_state.apply_snapshots(
                                     snapshots,
@@ -523,6 +530,7 @@ async def _monitor_polymarket_watchlist(
         watchlist_path,
         report_out_path,
         snapshots_out_path,
+        latest_snapshots_out_path,
         updates_out_path,
         message_count,
         iteration,
@@ -631,6 +639,7 @@ def _realtime_monitor_summary_row(
     watchlist_path: Path,
     report_out_path: Path,
     snapshots_out_path: Optional[Path],
+    latest_snapshots_out_path: Optional[Path],
     updates_out_path: Optional[Path],
     messages_seen: int,
     iterations_completed: int,
@@ -646,6 +655,7 @@ def _realtime_monitor_summary_row(
         "watchlist_path": str(watchlist_path),
         "report_path": str(report_out_path),
         "snapshots_path": str(snapshots_out_path) if snapshots_out_path else None,
+        "latest_snapshots_path": str(latest_snapshots_out_path) if latest_snapshots_out_path else None,
         "updates_path": str(updates_out_path) if updates_out_path else None,
         "messages_seen": messages_seen,
         "connection_count": connection_count,
@@ -715,6 +725,14 @@ def _write_rows(handle, rows: Iterable[dict]) -> None:
         wrote = True
     if wrote:
         handle.flush()
+
+
+def _write_rows_atomic(path: Path, rows: Iterable[dict]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    tmp_path.replace(path)
 
 
 def _append_jsonl_row(path: Path, row: dict) -> None:

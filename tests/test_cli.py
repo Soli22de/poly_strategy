@@ -642,6 +642,46 @@ class CliTests(unittest.TestCase):
         self.assertIn("best_actionable_candidate_below_min_edge", row["zero_opportunity_diagnosis"]["reasons"])
         self.assertIn("wrote=1", stdout.getvalue())
 
+    def test_maker_scan_command_writes_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = Path(tmp) / "snapshots.ndjson"
+            out = Path(tmp) / "maker.json"
+            snapshots.write_text(
+                json.dumps(
+                    {
+                        "type": "binary_snapshot",
+                        "ts": "2026-05-10T00:00:00Z",
+                        "venue": "polymarket",
+                        "market_id": "sample",
+                        "fee_rate": 0.05,
+                        "yes": {"token_id": "yes", "asks": [[0.49, 100]], "bids": [[0.44, 100]]},
+                        "no": {"token_id": "no", "asks": [[0.49, 100]], "bids": [[0.44, 100]]},
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "maker-scan",
+                        "--snapshots",
+                        str(snapshots),
+                        "--out",
+                        str(out),
+                        "--tick-size",
+                        "0.01",
+                        "--include-yes-no-pairs",
+                    ]
+                )
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["candidate_count"], 1)
+        self.assertEqual(row["top"][0]["kind"], "maker_yes_no_pair")
+        self.assertIn("candidates=1", stdout.getvalue())
+
     def test_monitor_analyze_command_summarizes_realtime_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "realtime.jsonl"
@@ -1426,6 +1466,7 @@ class CliTests(unittest.TestCase):
             report = Path(tmp) / "report.jsonl"
             updates = Path(tmp) / "updates.ndjson"
             snapshots = Path(tmp) / "snapshots.ndjson"
+            latest_snapshots = Path(tmp) / "latest-snapshots.ndjson"
 
             stdout = io.StringIO()
             with patch("poly_strategy.cli.monitor_polymarket_watchlist", return_value=summary) as monitor:
@@ -1445,6 +1486,8 @@ class CliTests(unittest.TestCase):
                             str(updates),
                             "--snapshots-out",
                             str(snapshots),
+                            "--latest-snapshots-out",
+                            str(latest_snapshots),
                             "--snapshot-interval",
                             "2",
                             "--stale-timeout",
@@ -1485,6 +1528,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(kwargs["gamma_path"], gamma)
         self.assertEqual(kwargs["updates_out_path"], updates)
         self.assertEqual(kwargs["snapshots_out_path"], snapshots)
+        self.assertEqual(kwargs["latest_snapshots_out_path"], latest_snapshots)
         self.assertEqual(kwargs["max_messages"], 5)
         self.assertEqual(kwargs["max_iterations"], 2)
         self.assertEqual(kwargs["snapshot_interval_seconds"], 2.0)
