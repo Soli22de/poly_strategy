@@ -198,6 +198,7 @@ def discover_rules(
     fallback_retry_failed_batches: int = 0,
     fallback_retry_failed_batch_size: int = 1,
     topic_cluster: bool = False,
+    max_new_markets: Optional[int] = None,
 ) -> DiscoveryResult:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -215,6 +216,8 @@ def discover_rules(
         raise ValueError("fallback_retry_failed_batches must be non-negative")
     if fallback_retry_failed_batch_size < 1:
         raise ValueError("fallback_retry_failed_batch_size must be at least 1")
+    if max_new_markets is not None and max_new_markets < 1:
+        raise ValueError("max_new_markets must be at least 1")
 
     markets = read_market_texts(raw_path)
     if max_markets is not None:
@@ -268,6 +271,8 @@ def discover_rules(
         checkpoint()
 
     discovery_markets = cluster_markets_by_topic(new_markets) if topic_cluster else new_markets
+    if max_new_markets is not None:
+        discovery_markets = discovery_markets[:max_new_markets]
 
     def run_batches(batches_to_run: List[List[MarketText]], attempt: int, batch_client, client_label: str) -> None:
         if not batches_to_run:

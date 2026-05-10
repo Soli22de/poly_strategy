@@ -202,7 +202,7 @@ case "$COMMAND" in
   run)
     echo "$$" > "$PID_FILE"
     load_env
-    trap 'restart_status=$?; monitor_pid="$(read_pid_file "$MONITOR_PID_FILE")"; if pid_alive "$monitor_pid"; then stop_pid "$monitor_pid"; fi; rm -f "$PID_FILE" "$MONITOR_PID_FILE"; exit "$restart_status"' INT TERM EXIT
+    trap 'restart_status=$?; monitor_pid="$(read_pid_file "$MONITOR_PID_FILE")"; if pid_alive "$monitor_pid"; then stop_pid "$monitor_pid"; fi; if pid_alive "${discovery_pid:-}"; then stop_pid "$discovery_pid"; fi; rm -f "$PID_FILE" "$MONITOR_PID_FILE"; exit "$restart_status"' INT TERM EXIT
 
     start_monitor
 
@@ -215,6 +215,7 @@ case "$COMMAND" in
     MAKER_SCAN_INTERVAL="${MAKER_SCAN_INTERVAL:-300}"
     MAKER_FILL_SIM_INTERVAL="${MAKER_FILL_SIM_INTERVAL:-900}"
     MAKER_ADAPTIVE_SIM_INTERVAL="${MAKER_ADAPTIVE_SIM_INTERVAL:-1800}"
+    SUCCESS_STATUS_INTERVAL="${SUCCESS_STATUS_INTERVAL:-60}"
     LOOP_SLEEP="${LOOP_SLEEP:-5}"
 
     ENABLE_ALERTS="${ENABLE_ALERTS:-1}"
@@ -228,6 +229,7 @@ case "$COMMAND" in
     ENABLE_MAKER_SCAN="${ENABLE_MAKER_SCAN:-1}"
     ENABLE_MAKER_FILL_SIM="${ENABLE_MAKER_FILL_SIM:-1}"
     ENABLE_MAKER_ADAPTIVE_SIM="${ENABLE_MAKER_ADAPTIVE_SIM:-1}"
+    ENABLE_SUCCESS_STATUS="${ENABLE_SUCCESS_STATUS:-1}"
 
     WATCHLIST="${WATCHLIST:-data/watchlist-current.json}"
     RULES="${RULES:-data/gpt55-candidate-rules-all.json}"
@@ -242,6 +244,8 @@ case "$COMMAND" in
     next_maker_scan=0
     next_maker_fill_sim=0
     next_maker_adaptive_sim=0
+    next_success_status=0
+    discovery_pid=""
 
     log "manager_started pid=$$" >> "$SUPERVISOR_LOG"
     while true; do
@@ -270,11 +274,19 @@ case "$COMMAND" in
       fi
 
       if [[ "$ENABLE_DISCOVERY_REFRESH" == "1" && "$now" -ge "$next_discovery" ]]; then
-        before_sig="$(file_sig "$WATCHLIST")"
-        run_logged discovery-refresh env RESTART_ON_CHANGE=0 LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-60}" scripts/refresh_discovery_watchlist.sh
-        after_sig="$(file_sig "$WATCHLIST")"
-        if [[ "$before_sig" != "$after_sig" ]]; then
-          restart_monitor
+        if pid_alive "$discovery_pid"; then
+          log "job_skip name=discovery-refresh reason=still_running pid=$discovery_pid" >> "$SUPERVISOR_LOG"
+        else
+          (
+            before_sig="$(file_sig "$WATCHLIST")"
+            run_logged discovery-refresh env RESTART_ON_CHANGE=0 LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-600}" scripts/refresh_discovery_watchlist.sh
+            after_sig="$(file_sig "$WATCHLIST")"
+            if [[ "$before_sig" != "$after_sig" ]]; then
+              restart_monitor
+            fi
+          ) &
+          discovery_pid=$!
+          log "job_background name=discovery-refresh pid=$discovery_pid" >> "$SUPERVISOR_LOG"
         fi
         next_discovery=$((now + DISCOVERY_INTERVAL))
       fi
@@ -303,6 +315,11 @@ case "$COMMAND" in
       if [[ "$ENABLE_MAKER_ADAPTIVE_SIM" == "1" && "$now" -ge "$next_maker_adaptive_sim" ]]; then
         run_logged maker-adaptive-sim scripts/run_maker_adaptive_sim_once.sh
         next_maker_adaptive_sim=$((now + MAKER_ADAPTIVE_SIM_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_SUCCESS_STATUS" == "1" && "$now" -ge "$next_success_status" ]]; then
+        run_logged success-status scripts/run_success_status_once.sh
+        next_success_status=$((now + SUCCESS_STATUS_INTERVAL))
       fi
 
       if [[ "$ENABLE_DATA_ROTATION" == "1" && "$now" -ge "$next_rotation" ]]; then

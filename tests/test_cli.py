@@ -1504,6 +1504,61 @@ class CliTests(unittest.TestCase):
         self.assertIs(discover.call_args.kwargs["fallback_client"], fallback_client)
         self.assertEqual(discover.call_args.kwargs["fallback_retry_failed_batches"], 2)
 
+    def test_discover_rules_command_can_limit_new_markets(self):
+        result = SimpleNamespace(
+            markets_read=2,
+            candidates_found=0,
+            implications_written=0,
+            mutual_exclusions_written=0,
+            equivalents_written=0,
+            collectively_exhaustive_written=0,
+            complements_written=0,
+            failed_batches=0,
+        )
+        with patch("poly_strategy.cli.OpenAIRuleDiscoveryClient") as client_cls:
+            with patch("poly_strategy.cli.discover_rules", return_value=result) as discover:
+                with patch.dict("os.environ", {"OPENAI_MODEL": "glm-5.1", "OPENAI_API_KEY": "test-key"}, clear=True):
+                    code = main(
+                        [
+                            "discover-rules",
+                            "--raw",
+                            "data/gamma.ndjson",
+                            "--out",
+                            "rules/candidate-implications.json",
+                            "--max-new-markets",
+                            "12",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        client_cls.assert_called_once()
+        self.assertEqual(discover.call_args.kwargs["max_new_markets"], 12)
+
+    def test_success_status_command_writes_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            monitor = Path(tmp) / "monitor.jsonl"
+            out = Path(tmp) / "success.json"
+            monitor.write_text(
+                json.dumps(
+                    {
+                        "type": "realtime_monitor_iteration",
+                        "stable_paper_trade_count": 1,
+                        "stable_paper_edge": 0.25,
+                        "stable_paper_roi": 0.02,
+                    }
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["success-status", "--monitor-report", str(monitor), "--out", str(out)])
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["status"], "stable_paper_opportunity")
+        self.assertIn("status=stable_paper_opportunity", stdout.getvalue())
+
     def test_external_signal_commands_ingest_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "signals.ndjson"

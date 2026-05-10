@@ -360,6 +360,45 @@ class RuleDiscoveryTests(unittest.TestCase):
         self.assertEqual({(row["antecedent"], row["consequent"]) for row in written["implications"]}, {("a", "b"), ("c", "d")})
         self.assertEqual(written["processed_market_ids"], ["a", "b", "c", "d"])
 
+    def test_discover_rules_can_limit_new_markets_per_run(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                self.calls.append([market.market_id for market in markets])
+                return []
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"]},
+            }
+            for market_id in ["a", "b", "c", "d", "e"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            client = FakeClient()
+
+            discover_rules(
+                raw,
+                out,
+                client,
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                max_new_markets=3,
+                generated_at="2026-05-08T00:00:00Z",
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(client.calls, [["a", "b"], ["c"]])
+        self.assertEqual(written["processed_market_ids"], ["a", "b", "c"])
+
     def test_discover_rules_writes_checkpoint_after_each_completed_batch(self):
         class FakeClient:
             def __init__(self):

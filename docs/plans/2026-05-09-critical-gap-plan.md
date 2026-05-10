@@ -146,6 +146,17 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
   - Compares near-ask offsets of 1/2/3/5/10 ticks plus bid-improvement quotes.
   - Ranks each quote config by conservative risk-adjusted EV: completed edge minus a configurable haircut for partial-fill capital.
   - Current short-window result with a $100 cap: no positive-EV quote config; near-ask offsets showed partial fills without complete basket fills, which is a strong live-trading rejection signal.
+- [x] Made LLM discovery plan-aware and bounded.
+  - Provider order is chat `glm-5.1` primary, chat `glm-5.1` backup, then Responses `gpt-5.4` fallback.
+  - Chat providers use shorter timeouts so a broken/blocked chat route does not stall the full monitor loop.
+  - Each refresh can cap uncached markets sent to LLM; the remaining markets stay pending for later incremental discovery.
+  - Latest smoke test: both chat routes timed out, then Responses fallback completed and added a new implication rule.
+- [x] Added success-status monitoring.
+  - Writes the current state of paper, dry-run execution, live execution, and maker EV into `data/success-status-current.json`.
+  - Background manager runs it continuously and appends only non-empty success states to `data/success-events.ndjson`.
+- [x] Made long LLM discovery non-blocking for the supervisor loop.
+  - Realtime monitor keeps running independently.
+  - Alerts, dry-run execution checks, maker scans, and success-status checks no longer wait for hourly LLM discovery to finish.
 
 ## Current Profitability Status
 
@@ -162,3 +173,4 @@ Build a safe, fully automated dry-run research/trading loop that can discover mo
 - [ ] Improve cross-platform matching beyond token Jaccard by adding event/category filters and rejecting Kalshi multi-leg combo markets before LLM verification.
 - [ ] Add ROI-first opportunity ranking so small-bankroll alerts prioritize executable dollars and not only edge per share.
 - [x] Add a compact latest-snapshot store so wide probes can be run without writing tens of MB per minute.
+- [ ] Keep investigating the chat `glm-5.1` endpoints; they currently time out on strict JSON-schema discovery, so they are tried first but not trusted as the only discovery route.

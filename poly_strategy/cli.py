@@ -68,6 +68,7 @@ from poly_strategy.realtime import (
 from poly_strategy.risk import risk_check_execution_plan, update_risk_state_from_execution_result
 from poly_strategy.rule_discovery import discover_rules
 from poly_strategy.scanner import find_cross_venue_same_binary
+from poly_strategy.success import success_status_report, write_success_status
 from poly_strategy.watchlist import build_polymarket_watchlist, write_watchlist
 
 
@@ -475,6 +476,22 @@ def main(argv=None) -> int:
             if args.out:
                 print(f"wrote={len(rows)} out={args.out}")
             return 0
+        if args.command == "success-status":
+            row = success_status_report(
+                monitor_report_path=Path(args.monitor_report) if args.monitor_report else None,
+                execution_plans_path=Path(args.execution_plans) if args.execution_plans else None,
+                maker_adaptive_path=Path(args.maker_adaptive) if args.maker_adaptive else None,
+            )
+            if args.out:
+                write_success_status(
+                    Path(args.out),
+                    row,
+                    success_log_path=Path(args.success_log) if args.success_log else None,
+                )
+                print(f"status={row['status']} out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
         if args.command == "discover-rules":
             model = args.model or os.environ.get("OPENAI_MODEL")
             if not model and not args.cache:
@@ -521,6 +538,7 @@ def main(argv=None) -> int:
                 fallback_retry_failed_batches=args.fallback_retry_failed_batches,
                 fallback_retry_failed_batch_size=args.fallback_retry_failed_batch_size,
                 topic_cluster=args.topic_cluster,
+                max_new_markets=args.max_new_markets,
             )
             print(
                 f"markets={result.markets_read} candidates={result.candidates_found} "
@@ -1239,6 +1257,16 @@ def _build_parser() -> argparse.ArgumentParser:
     risk_check.add_argument("--out", help="output checked execution_plan NDJSON path; prints JSONL when omitted")
     _add_risk_args(risk_check)
 
+    success_status = subparsers.add_parser(
+        "success-status",
+        help="summarize whether the monitor has found a paper, dry-run, or live success candidate",
+    )
+    success_status.add_argument("--monitor-report", help="realtime/paper monitor JSONL path")
+    success_status.add_argument("--execution-plans", help="latest execution_plan NDJSON path")
+    success_status.add_argument("--maker-adaptive", help="maker adaptive quote report JSON path")
+    success_status.add_argument("--out", help="output status JSON path; prints JSON when omitted")
+    success_status.add_argument("--success-log", help="append non-empty success statuses to this NDJSON log")
+
     discover = subparsers.add_parser("discover-rules", help="discover implication rules with an OpenAI-compatible API")
     discover.add_argument("--raw", required=True, help="input raw Polymarket Gamma NDJSON path")
     discover.add_argument("--out", required=True, help="output JSON rule path")
@@ -1249,6 +1277,11 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--batch-size", type=int, default=10, help="markets per LLM discovery batch")
     discover.add_argument("--min-confidence", type=float, default=0.95, help="minimum candidate confidence")
     discover.add_argument("--max-markets", type=int, help="limit input markets for a small run")
+    discover.add_argument(
+        "--max-new-markets",
+        type=int,
+        help="limit uncached markets sent to the LLM in this run; remaining markets stay pending for later refreshes",
+    )
     discover.add_argument("--cache", help="existing rule JSON to reuse for incremental discovery")
     discover.add_argument("--context-market-limit", type=int, default=40, help="old markets to include with each new-market LLM batch")
     discover.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")

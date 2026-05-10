@@ -37,10 +37,14 @@ LLM_ERROR_RETRY_BATCH_SIZE="${LLM_ERROR_RETRY_BATCH_SIZE:-1}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
 LLM_COMMAND_TIMEOUT="${LLM_COMMAND_TIMEOUT:-600}"
 LLM_RETRIES="${LLM_RETRIES:-2}"
+LLM_CHAT_TIMEOUT="${LLM_CHAT_TIMEOUT:-25}"
+LLM_CHAT_COMMAND_TIMEOUT="${LLM_CHAT_COMMAND_TIMEOUT:-90}"
+LLM_CHAT_RETRIES="${LLM_CHAT_RETRIES:-0}"
 LLM_MAX_OUTPUT_TOKENS="${LLM_MAX_OUTPUT_TOKENS:-4000}"
 LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-high}"
 LLM_VERBOSITY="${LLM_VERBOSITY:-}"
 LLM_TOPIC_CLUSTER="${LLM_TOPIC_CLUSTER:-1}"
+LLM_MAX_NEW_MARKETS_PER_REFRESH="${LLM_MAX_NEW_MARKETS_PER_REFRESH:-120}"
 ALLOW_LLM_FAILURE="${ALLOW_LLM_FAILURE:-1}"
 MIN_CONFIDENCE="${MIN_CONFIDENCE:-0.95}"
 INCLUDE_TOP_MARKETS="${INCLUDE_TOP_MARKETS:-400}"
@@ -131,6 +135,14 @@ run_discovery_provider() {
   local api_key="$5"
   local cache_path="$6"
   local out_path="$7"
+  local request_timeout="$LLM_TIMEOUT"
+  local request_retries="$LLM_RETRIES"
+  case "${api_mode:-}" in
+    chat|chat_completions|chat-completions|chatcompletions)
+      request_timeout="$LLM_CHAT_TIMEOUT"
+      request_retries="$LLM_CHAT_RETRIES"
+      ;;
+  esac
   local args=(
     discover-rules
     --raw "$GAMMA"
@@ -142,8 +154,8 @@ run_discovery_provider() {
     --retry-failed-batches "$LLM_ERROR_RETRIES"
     --retry-failed-batch-size "$LLM_ERROR_RETRY_BATCH_SIZE"
     --min-confidence "$MIN_CONFIDENCE"
-    --timeout "$LLM_TIMEOUT"
-    --retries "$LLM_RETRIES"
+    --timeout "$request_timeout"
+    --retries "$request_retries"
     --max-output-tokens "$LLM_MAX_OUTPUT_TOKENS"
     --reasoning-effort "$LLM_REASONING_EFFORT"
     --continue-on-client-error
@@ -163,12 +175,27 @@ run_discovery_provider() {
   if [[ "$LLM_TOPIC_CLUSTER" == "1" ]]; then
     args+=(--topic-cluster)
   fi
+  if [[ -n "$LLM_MAX_NEW_MARKETS_PER_REFRESH" && "$LLM_MAX_NEW_MARKETS_PER_REFRESH" != "0" ]]; then
+    args+=(--max-new-markets "$LLM_MAX_NEW_MARKETS_PER_REFRESH")
+  fi
   echo "discover_provider label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default} cache=$cache_path out=$out_path"
   if [[ -n "$api_key" ]]; then
     OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   else
     "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   fi
+}
+
+provider_command_timeout() {
+  local api_mode="$1"
+  case "${api_mode:-}" in
+    chat|chat_completions|chat-completions|chatcompletions)
+      echo "$LLM_CHAT_COMMAND_TIMEOUT"
+      ;;
+    *)
+      echo "$LLM_COMMAND_TIMEOUT"
+      ;;
+  esac
 }
 
 if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
@@ -184,8 +211,9 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
     [[ -n "$model" ]] || continue
     stage_out="$(mktemp "${RULES}.tmp.XXXXXX")"
     tmp_paths+=("$stage_out")
+    command_timeout="$(provider_command_timeout "$api_mode")"
     set +e
-    run_with_timeout "$LLM_COMMAND_TIMEOUT" run_discovery_provider "$label" "$model" "$base_url" "$api_mode" "$api_key" "$current_cache" "$stage_out"
+    run_with_timeout "$command_timeout" run_discovery_provider "$label" "$model" "$base_url" "$api_mode" "$api_key" "$current_cache" "$stage_out"
     status=$?
     set -e
     stage_used=0
