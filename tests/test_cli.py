@@ -573,6 +573,7 @@ class CliTests(unittest.TestCase):
                             "current_opportunity_count": 1,
                             "stable_opportunity_count": 1,
                             "stable_paper_trade_count": 1,
+                            "stable_paper_rejection_count": 1,
                             "stable_paper_capital_used": 10,
                             "stable_paper_edge": 0.2,
                             "current_opportunities": [
@@ -594,6 +595,14 @@ class CliTests(unittest.TestCase):
                                 }
                             ],
                             "stable_paper_trades": [{"paper_roi": 0.02}],
+                            "stable_paper_rejections": [
+                                {
+                                    "reason": "below_min_roi",
+                                    "kind": "yes_no_bundle",
+                                    "cost_per_share": 0.99,
+                                    "net_edge_per_share": 0.001,
+                                }
+                            ],
                             "errors": [],
                             "error_count": 0,
                         },
@@ -671,6 +680,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["zero_current_opportunity_iterations"], 0)
         self.assertEqual(row["latest_zero_stable_opportunity_streak"], 0)
         self.assertEqual(row["current_opportunity_by_kind"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(row["stable_paper_rejection_by_reason"][0]["reason"], "below_min_roi")
+        self.assertEqual(row["stable_paper_rejection_by_reason"][0]["count"], 1)
         self.assertEqual(row["near_miss"]["top"][0]["kind"], "yes_no_bundle")
         self.assertEqual(row["near_miss"]["gamma_path"], str(gamma))
         self.assertEqual(row["near_miss_rejection_summary"]["neg_risk_group_count"], 0)
@@ -685,6 +696,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(edge_stage["reason"], "no_actionable_candidate_clears_min_net_edge")
         self.assertEqual(row["strategy_chain_breakdown"][0]["kind"], "yes_no_bundle")
         self.assertEqual(row["strategy_chain_breakdown"][0]["dominant_blocker"], "edge_filter")
+        self.assertEqual(row["optimization_targets"]["type"], "optimization_targets_report")
+        self.assertEqual(row["optimization_targets"]["top_target"], "price_improvement")
+        self.assertEqual(row["optimization_targets"]["targets"][0]["lever"], "price_improvement")
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_maker_scan_command_writes_report(self):

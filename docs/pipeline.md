@@ -41,3 +41,11 @@ Zero actionable opportunities does not mean the system is broken. The usual caus
 6. `paper_filter`: stable opportunities survive ROI, size, bankroll, and liquidity filters.
 
 The report also includes `strategy_chain_breakdown`, which applies the same logic per strategy kind. Use `dominant_blocker` and `next_action` to decide which link to optimize first.
+
+`optimization_targets` ranks the highest-leverage improvements currently visible from the data:
+
+- `maker_fee_avoidance`: taker fees erase the edge, but maker-style execution may restore it.
+- `price_improvement`: the candidate is close and needs a quantified price improvement.
+- `rule_verification`: a diagnostic basket has high apparent edge but must be verified before promotion.
+- `paper_filter_debugging`: stable opportunities exist but fail paper filters; inspect rejection reasons.
+- `feed_coverage`: the watchlist has many tokens without current snapshots.

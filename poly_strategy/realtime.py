@@ -9,7 +9,7 @@ from poly_strategy.backtest import load_rule_set, snapshot_from_row
 from poly_strategy.collectors import fetch_polymarket_books_by_token_id
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.orderbook import Level
-from poly_strategy.paper import opportunity_to_row, select_paper_trades, trade_to_row
+from poly_strategy.paper import opportunity_to_row, rejection_to_row, select_paper_trades, trade_to_row
 
 
 POLYMARKET_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -603,6 +603,10 @@ def _realtime_monitor_iteration_row(
             :max_opportunities_per_iteration
         ]
     ]
+    top_stable_rejections = [
+        rejection_to_row(rejection)
+        for rejection in stable_selection.rejections[:max_opportunities_per_iteration]
+    ]
     return {
         "type": "realtime_monitor_iteration",
         "ts": _utc_now(),
@@ -631,6 +635,7 @@ def _realtime_monitor_iteration_row(
         "current_opportunities": top_current,
         "stable_opportunities": top_stable,
         "stable_paper_trades": top_stable_trades,
+        "stable_paper_rejections": top_stable_rejections,
         "current_runs": [_run_to_row(run) for run in current_runs],
     }
 

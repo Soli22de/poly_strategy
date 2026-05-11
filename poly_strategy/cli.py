@@ -2477,6 +2477,10 @@ def _paper_monitor_iteration_row(
             : args.max_opportunities_per_iteration
         ]
     ]
+    top_stable_rejections = [
+        rejection_to_row(rejection)
+        for rejection in stable_selection.rejections[: args.max_opportunities_per_iteration]
+    ]
     return {
         "type": "paper_monitor_iteration",
         "ts": _utc_now(),
@@ -2500,6 +2504,7 @@ def _paper_monitor_iteration_row(
         "current_opportunities": top_current,
         "stable_opportunities": top_stable,
         "stable_paper_trades": top_stable_trades,
+        "stable_paper_rejections": top_stable_rejections,
         "current_runs": [_run_to_row(run) for run in current_runs],
         "error_count": len(errors),
         "errors": errors[: args.max_errors_per_iteration],

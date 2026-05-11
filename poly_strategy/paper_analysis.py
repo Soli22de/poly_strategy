@@ -60,6 +60,9 @@ def analyze_paper_monitor_report(
         "current_opportunity_observations": sum(int(row.get("current_opportunity_count") or 0) for row in iteration_rows),
         "stable_opportunity_observations": sum(int(row.get("stable_opportunity_count") or 0) for row in iteration_rows),
         "stable_paper_trade_observations": sum(int(row.get("stable_paper_trade_count") or 0) for row in iteration_rows),
+        "paper_rejection_observations": sum(int(row.get("paper_rejection_count") or 0) for row in iteration_rows),
+        "stable_paper_rejection_observations": sum(int(row.get("stable_paper_rejection_count") or 0) for row in iteration_rows),
+        "stable_paper_rejection_by_reason": _rejection_reason_summary(iteration_rows, "stable_paper_rejections"),
         "zero_current_opportunity_iterations": _zero_count(iteration_rows, "current_opportunity_count"),
         "zero_stable_opportunity_iterations": _zero_count(iteration_rows, "stable_opportunity_count"),
         "latest_zero_current_opportunity_streak": _latest_zero_streak(iteration_rows, "current_opportunity_count"),
@@ -94,8 +97,10 @@ def analyze_paper_monitor_report(
         report["zero_opportunity_diagnosis"] = _zero_opportunity_diagnosis(report, near_miss)
         report["opportunity_chain"] = _opportunity_chain_report(report, near_miss)
         report["strategy_chain_breakdown"] = _strategy_chain_breakdown(near_miss)
+        report["optimization_targets"] = _optimization_targets_report(report, near_miss)
     else:
         report["opportunity_chain"] = _opportunity_chain_report(report)
+        report["optimization_targets"] = _optimization_targets_report(report)
     return report
 
 
@@ -273,6 +278,30 @@ def _opportunity_kind_summary(rows: list, field: str) -> list:
             "max_total_edge": max_total_edge_by_kind.get(kind, 0.0),
         }
         for kind, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _rejection_reason_summary(rows: list, field: str) -> list:
+    counts = Counter()
+    max_edge_by_reason = {}
+    max_roi_by_reason = {}
+    for row in rows:
+        for rejection in row.get(field, []):
+            reason = str(rejection.get("reason") or "unknown")
+            counts[reason] += 1
+            edge = float(rejection.get("net_edge_per_share") or 0.0)
+            max_edge_by_reason[reason] = max(max_edge_by_reason.get(reason, 0.0), edge)
+            cost = float(rejection.get("cost_per_share") or 0.0)
+            roi = edge / cost if cost > 0 else 0.0
+            max_roi_by_reason[reason] = max(max_roi_by_reason.get(reason, 0.0), roi)
+    return [
+        {
+            "reason": reason,
+            "count": count,
+            "max_edge_per_share": max_edge_by_reason.get(reason, 0.0),
+            "max_roi": max_roi_by_reason.get(reason, 0.0),
+        }
+        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
 
 
@@ -504,6 +533,148 @@ def _strategy_chain_breakdown(near_miss: dict) -> list:
             row["kind"] or "",
         ),
     )
+
+
+def _optimization_targets_report(report: dict, near_miss: Optional[dict] = None) -> dict:
+    targets = []
+    if near_miss:
+        maker_rows = near_miss.get("maker_fee_avoidance_top", [])
+        price_rows = near_miss.get("price_improvement_top", [])
+        verification_rows = near_miss.get("verification_review_top", [])
+        if maker_rows:
+            best = maker_rows[0]
+            targets.append(
+                _optimization_target(
+                    "maker_fee_avoidance",
+                    priority_score=100.0 + float(best.get("maker_edge_per_share") or 0.0),
+                    impact="high",
+                    evidence={
+                        "candidate_count": len(maker_rows),
+                        "best_kind": best.get("kind"),
+                        "best_net_edge_per_share": best.get("net_edge_per_share"),
+                        "best_gross_edge_per_share": best.get("gross_edge_per_share"),
+                        "maker_edge_per_share": best.get("maker_edge_per_share"),
+                        "maker_fee_saved_per_share": best.get("maker_fee_saved_per_share"),
+                        "maker_total_edge_at_top": best.get("maker_total_edge_at_top"),
+                        "market_ids": _candidate_market_ids(best),
+                    },
+                    action="run maker/hybrid/tape validation on these market ids; prioritize configs that avoid taker fees without assuming instant fills",
+                    caveat="maker edge is theoretical until public trade-tape fill probability and hedge safety are validated",
+                )
+            )
+        if price_rows:
+            best = price_rows[0]
+            required = float(best.get("required_total_price_improvement_per_share") or 0.0)
+            targets.append(
+                _optimization_target(
+                    "price_improvement",
+                    priority_score=max(0.0, 80.0 - required * 10000.0),
+                    impact="medium" if required <= 0.005 else "low",
+                    evidence={
+                        "candidate_count": len(price_rows),
+                        "best_kind": best.get("kind"),
+                        "required_total_price_improvement_per_share": required,
+                        "required_per_leg_price_improvement": best.get("required_per_leg_price_improvement"),
+                        "top_quantity": best.get("top_quantity"),
+                        "market_ids": _candidate_market_ids(best),
+                    },
+                    action="focus scanners on these near-threshold markets and test whether maker quotes or tighter spreads can close the required improvement",
+                    caveat="do not lower the threshold to force a trade; use this as a routing signal for better execution",
+                )
+            )
+        if verification_rows:
+            best = verification_rows[0]
+            targets.append(
+                _optimization_target(
+                    "rule_verification",
+                    priority_score=60.0 + min(40.0, float(best.get("review_value") or 0.0) * 10.0),
+                    impact="research",
+                    evidence={
+                        "candidate_count": len(verification_rows),
+                        "best_kind": best.get("kind"),
+                        "best_net_edge_per_share": best.get("net_edge_per_share"),
+                        "best_gross_edge_per_share": best.get("gross_edge_per_share"),
+                        "trade_status": best.get("trade_status"),
+                        "rejection_reason": best.get("rejection_reason"),
+                        "market_ids": _candidate_market_ids(best),
+                    },
+                    action="review top diagnostic baskets with stricter deterministic checks and LLM verification; only promote complete resolution-equivalent groups",
+                    caveat="high diagnostic edge often comes from incomplete or invalid baskets, so treat this as rule-quality work, not tradable edge",
+                )
+            )
+    stable_count = int(report.get("stable_opportunity_observations") or 0)
+    stable_paper_count = int(report.get("stable_paper_trade_observations") or 0)
+    stable_rejections = int(report.get("stable_paper_rejection_observations") or 0)
+    if stable_count > 0 and stable_paper_count == 0:
+        targets.append(
+            _optimization_target(
+                "paper_filter_debugging",
+                priority_score=85.0,
+                impact="high",
+                evidence={
+                    "stable_opportunity_observations": stable_count,
+                    "stable_paper_trade_observations": stable_paper_count,
+                    "stable_paper_rejection_observations": stable_rejections,
+                    "stable_paper_rejection_by_reason": report.get("stable_paper_rejection_by_reason", []),
+                    "stable_paper_roi": report.get("stable_paper_roi"),
+                },
+                action="record top stable paper rejections with reasons, then tune ROI, min quantity, bankroll, and per-trade capital caps against real available size",
+                caveat="relaxing filters can convert reports into trades only if the underlying edge is still positive after size and fees",
+            )
+        )
+    feed_stage = _stage_by_name(report.get("opportunity_chain", {}).get("stages", []), "feed")
+    if feed_stage and int(feed_stage.get("input_count") or 0) > 0 and feed_stage.get("conversion_rate", 1.0) < 0.75:
+        targets.append(
+            _optimization_target(
+                "feed_coverage",
+                priority_score=55.0 + (0.75 - float(feed_stage.get("conversion_rate") or 0.0)) * 20.0,
+                impact="medium",
+                evidence={
+                    "known_token_count": feed_stage.get("input_count"),
+                    "latest_snapshot_count": feed_stage.get("output_count"),
+                    "conversion_rate": feed_stage.get("conversion_rate"),
+                },
+                action="identify missing token snapshots by watchlist bucket, then reduce dead subscriptions and seed high-priority books",
+                caveat="more coverage helps only if it is concentrated in liquid, related, or externally signaled markets",
+            )
+        )
+    targets = sorted(targets, key=lambda row: (-row["priority_score"], row["lever"]))
+    for index, target in enumerate(targets, start=1):
+        target["priority"] = index
+    return {
+        "type": "optimization_targets_report",
+        "top_target": targets[0]["lever"] if targets else None,
+        "targets": targets,
+    }
+
+
+def _optimization_target(
+    lever: str,
+    priority_score: float,
+    impact: str,
+    evidence: dict,
+    action: str,
+    caveat: str,
+) -> dict:
+    return {
+        "lever": lever,
+        "priority_score": priority_score,
+        "impact": impact,
+        "evidence": evidence,
+        "action": action,
+        "caveat": caveat,
+    }
+
+
+def _candidate_market_ids(candidate: dict) -> list:
+    return sorted({str(leg.get("market_id")) for leg in candidate.get("legs", []) if leg.get("market_id")})
+
+
+def _stage_by_name(stages: list, name: str) -> Optional[dict]:
+    for stage in stages:
+        if stage.get("stage") == name:
+            return stage
+    return None
 
 
 def _chain_stage(
