@@ -92,6 +92,10 @@ def analyze_paper_monitor_report(
         report["near_miss"] = near_miss
         report["near_miss_rejection_summary"] = _near_miss_rejection_summary(near_miss)
         report["zero_opportunity_diagnosis"] = _zero_opportunity_diagnosis(report, near_miss)
+        report["opportunity_chain"] = _opportunity_chain_report(report, near_miss)
+        report["strategy_chain_breakdown"] = _strategy_chain_breakdown(near_miss)
+    else:
+        report["opportunity_chain"] = _opportunity_chain_report(report)
     return report
 
 
@@ -381,6 +385,282 @@ def _zero_opportunity_diagnosis(report: dict, near_miss: dict) -> dict:
         "blocked_candidate_count": near_miss.get("blocked_candidate_count", 0),
         "closest_by_kind": by_kind[:10],
     }
+
+
+def _opportunity_chain_report(report: dict, near_miss: Optional[dict] = None) -> dict:
+    latest_snapshot_count = int((near_miss or {}).get("latest_snapshot_count") or report.get("final_snapshot_count") or 0)
+    known_token_count = int(report.get("final_known_token_count") or 0)
+    candidate_count = int((near_miss or {}).get("candidate_count") or 0)
+    actionable_count = int((near_miss or {}).get("actionable_candidate_count") or 0)
+    by_kind = (near_miss or {}).get("by_kind", [])
+    actionable_positive_net_count = sum(int(row.get("actionable_positive_net_count") or 0) for row in by_kind)
+    diagnostic_count = int((near_miss or {}).get("diagnostic_candidate_count") or 0)
+    blocked_count = int((near_miss or {}).get("blocked_candidate_count") or 0)
+    current_count = int(report.get("current_opportunity_observations") or 0)
+    stable_count = int(report.get("stable_opportunity_observations") or 0)
+    paper_count = int(report.get("stable_paper_trade_observations") or 0)
+
+    stages = [
+        _chain_stage(
+            "feed",
+            input_count=known_token_count,
+            output_count=latest_snapshot_count,
+            status="block" if latest_snapshot_count == 0 else "pass",
+            reason="no_latest_snapshots" if latest_snapshot_count == 0 else "latest_snapshots_available",
+            next_action="rebuild watchlist, verify collector/WebSocket connectivity, and seed orderbooks",
+        ),
+        _chain_stage(
+            "candidate_generation",
+            input_count=latest_snapshot_count,
+            output_count=candidate_count,
+            status="block" if latest_snapshot_count > 0 and candidate_count == 0 else ("not_evaluated" if not near_miss else "pass"),
+            reason="no_evaluable_candidates" if latest_snapshot_count > 0 and candidate_count == 0 else "candidate_scan_completed",
+            next_action="verify snapshots have paired YES/NO books and include rules/gamma metadata",
+        ),
+        _chain_stage(
+            "actionability_filter",
+            input_count=candidate_count,
+            output_count=actionable_count,
+            status=_actionability_stage_status(candidate_count, actionable_count, diagnostic_count, blocked_count),
+            reason=_actionability_stage_reason(candidate_count, actionable_count, diagnostic_count, blocked_count),
+            next_action="promote verified exhaustive groups, fix rejected rule wording, or expand missing market metadata",
+            diagnostics={"diagnostic_candidate_count": diagnostic_count, "blocked_candidate_count": blocked_count},
+        ),
+        _chain_stage(
+            "edge_filter",
+            input_count=actionable_count,
+            output_count=actionable_positive_net_count,
+            status="block" if actionable_count > 0 and actionable_positive_net_count == 0 else ("not_evaluated" if not near_miss else "pass"),
+            reason="no_actionable_candidate_clears_min_net_edge" if actionable_count > 0 and actionable_positive_net_count == 0 else "edge_filter_passed",
+            next_action="rank near misses by distance_to_min_net_edge, then improve coverage, fee drag, or spread constraints",
+            diagnostics=_edge_diagnostics(near_miss),
+        ),
+        _chain_stage(
+            "stability_filter",
+            input_count=current_count,
+            output_count=stable_count,
+            status=_stability_stage_status(current_count, stable_count, actionable_positive_net_count),
+            reason=_stability_stage_reason(current_count, stable_count, actionable_positive_net_count),
+            next_action="increase scan cadence, reduce reconnects/staleness, or run diagnostic-only lower stability thresholds",
+        ),
+        _chain_stage(
+            "paper_filter",
+            input_count=stable_count,
+            output_count=paper_count,
+            status=_paper_stage_status(stable_count, paper_count),
+            reason=_paper_stage_reason(stable_count, paper_count),
+            next_action="inspect paper rejection filters: ROI, quantity, bankroll, capital cap, and liquidity",
+            diagnostics={
+                "stable_paper_capital_used": report.get("stable_paper_capital_used", 0.0),
+                "stable_paper_edge": report.get("stable_paper_edge", 0.0),
+                "stable_paper_roi": report.get("stable_paper_roi", 0.0),
+            },
+        ),
+    ]
+    blocking = _first_stage_with_status(stages, "block")
+    warning = _first_stage_with_status(stages, "warn")
+    return {
+        "type": "opportunity_chain_report",
+        "blocking_stage": blocking.get("stage") if blocking else None,
+        "first_warning_stage": warning.get("stage") if warning else None,
+        "status": "blocked" if blocking else ("warning" if warning else "pass"),
+        "stages": stages,
+        "recommended_actions": _chain_recommended_actions(stages),
+    }
+
+
+def _strategy_chain_breakdown(near_miss: dict) -> list:
+    rows = []
+    min_net_edge = float(near_miss.get("min_net_edge") or 0.0)
+    for row in near_miss.get("by_kind", []):
+        candidate_count = int(row.get("candidate_count") or 0)
+        actionable_count = int(row.get("actionable_candidate_count") or 0)
+        actionable_positive_net_count = int(row.get("actionable_positive_net_count") or 0)
+        fee_blocked_count = int(row.get("fee_blocked_count") or 0)
+        dominant_blocker = _strategy_dominant_blocker(row)
+        rows.append(
+            {
+                "kind": row.get("kind"),
+                "candidate_count": candidate_count,
+                "actionable_candidate_count": actionable_count,
+                "actionable_positive_net_count": actionable_positive_net_count,
+                "diagnostic_candidate_count": int(row.get("diagnostic_candidate_count") or 0),
+                "blocked_candidate_count": int(row.get("blocked_candidate_count") or 0),
+                "fee_blocked_count": fee_blocked_count,
+                "best_gross_edge_per_share": row.get("best_gross_edge_per_share"),
+                "best_net_edge_per_share": row.get("best_net_edge_per_share"),
+                "best_actionable_net_edge_per_share": row.get("best_actionable_net_edge_per_share"),
+                "distance_to_min_net_edge": _distance_to_threshold(row.get("best_actionable_net_edge_per_share"), min_net_edge),
+                "dominant_blocker": dominant_blocker,
+                "next_action": _strategy_next_action(dominant_blocker),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["dominant_blocker"] != "pass",
+            row["distance_to_min_net_edge"] if row["distance_to_min_net_edge"] is not None else 999.0,
+            -(row["best_actionable_net_edge_per_share"] if row["best_actionable_net_edge_per_share"] is not None else -999),
+            row["kind"] or "",
+        ),
+    )
+
+
+def _chain_stage(
+    stage: str,
+    input_count: int,
+    output_count: int,
+    status: str,
+    reason: str,
+    next_action: str,
+    diagnostics: Optional[dict] = None,
+) -> dict:
+    row = {
+        "stage": stage,
+        "status": status,
+        "input_count": input_count,
+        "output_count": output_count,
+        "drop_count": max(0, input_count - output_count),
+        "conversion_rate": output_count / input_count if input_count else 0.0,
+        "reason": reason,
+        "next_action": next_action,
+    }
+    if diagnostics:
+        row["diagnostics"] = diagnostics
+    return row
+
+
+def _actionability_stage_status(candidate_count: int, actionable_count: int, diagnostic_count: int, blocked_count: int) -> str:
+    if candidate_count == 0:
+        return "not_evaluated"
+    if actionable_count == 0:
+        return "block"
+    if diagnostic_count or blocked_count:
+        return "warn"
+    return "pass"
+
+
+def _actionability_stage_reason(candidate_count: int, actionable_count: int, diagnostic_count: int, blocked_count: int) -> str:
+    if candidate_count == 0:
+        return "no_candidates_to_filter"
+    if actionable_count == 0:
+        return "all_candidates_are_diagnostic_or_blocked"
+    if diagnostic_count or blocked_count:
+        return "some_candidates_require_verification_or_are_rejected"
+    return "all_candidates_actionable"
+
+
+def _edge_diagnostics(near_miss: Optional[dict]) -> dict:
+    if not near_miss:
+        return {}
+    best = (near_miss.get("top_actionable") or near_miss.get("top") or [None])[0]
+    if not best:
+        return {"best_actionable_net_edge_per_share": None, "distance_to_min_net_edge": None}
+    return {
+        "best_kind": best.get("kind"),
+        "best_actionable_net_edge_per_share": best.get("net_edge_per_share"),
+        "best_gross_edge_per_share": best.get("gross_edge_per_share"),
+        "fee_drag_per_share": best.get("fee_drag_per_share"),
+        "distance_to_min_net_edge": best.get("distance_to_min_net_edge"),
+        "min_net_edge": near_miss.get("min_net_edge"),
+    }
+
+
+def _stability_stage_status(current_count: int, stable_count: int, actionable_positive_net_count: int) -> str:
+    if current_count == 0:
+        return "not_evaluated" if actionable_positive_net_count == 0 else "block"
+    if stable_count == 0:
+        return "block"
+    if stable_count < current_count:
+        return "warn"
+    return "pass"
+
+
+def _stability_stage_reason(current_count: int, stable_count: int, actionable_positive_net_count: int) -> str:
+    if current_count == 0 and actionable_positive_net_count == 0:
+        return "no_positive_edge_candidate_reached_realtime_opportunity_stage"
+    if current_count == 0:
+        return "positive_edge_candidates_not_observed_as_realtime_opportunities"
+    if stable_count == 0:
+        return "current_opportunities_did_not_survive_stability_window"
+    if stable_count < current_count:
+        return "some_current_opportunities_survive_stability_window"
+    return "stable_opportunities_available"
+
+
+def _paper_stage_status(stable_count: int, paper_count: int) -> str:
+    if stable_count == 0:
+        return "not_evaluated"
+    if paper_count == 0:
+        return "block"
+    if paper_count < stable_count:
+        return "warn"
+    return "pass"
+
+
+def _paper_stage_reason(stable_count: int, paper_count: int) -> str:
+    if stable_count == 0:
+        return "no_stable_opportunities_to_paper_trade"
+    if paper_count == 0:
+        return "stable_opportunities_failed_paper_trade_filters"
+    if paper_count < stable_count:
+        return "some_stable_opportunities_failed_paper_trade_filters"
+    return "paper_trades_available"
+
+
+def _first_stage_with_status(stages: list, status: str) -> Optional[dict]:
+    for stage in stages:
+        if stage.get("status") == status:
+            return stage
+    return None
+
+
+def _chain_recommended_actions(stages: list) -> list:
+    ranked = []
+    priority = 1
+    for status in ["block", "warn"]:
+        for stage in stages:
+            if stage.get("status") != status:
+                continue
+            ranked.append(
+                {
+                    "priority": priority,
+                    "stage": stage["stage"],
+                    "reason": stage["reason"],
+                    "action": stage["next_action"],
+                }
+            )
+            priority += 1
+    return ranked[:5]
+
+
+def _strategy_dominant_blocker(row: dict) -> str:
+    if int(row.get("candidate_count") or 0) == 0:
+        return "candidate_generation"
+    if int(row.get("actionable_candidate_count") or 0) == 0:
+        return "actionability_filter"
+    if int(row.get("actionable_positive_net_count") or 0) == 0:
+        if int(row.get("fee_blocked_count") or 0):
+            return "fee_filter"
+        return "edge_filter"
+    return "pass"
+
+
+def _strategy_next_action(blocker: str) -> str:
+    actions = {
+        "candidate_generation": "expand snapshots and verify the strategy has the required rule inputs",
+        "actionability_filter": "review blocked candidates and promote only verified rules",
+        "fee_filter": "target tighter spreads or maker-style execution because taker fees erase the gross edge",
+        "edge_filter": "rank closest near misses and expand coverage around those markets",
+        "pass": "send passing candidates into stability and paper-trade monitoring",
+    }
+    return actions.get(blocker, "inspect this strategy chain manually")
+
+
+def _distance_to_threshold(value: Optional[float], threshold: float) -> Optional[float]:
+    if value is None:
+        return None
+    return max(0.0, threshold - float(value))
 
 
 def _counter_rows(counter: Counter, key: str) -> list:

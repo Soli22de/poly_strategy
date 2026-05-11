@@ -29,3 +29,15 @@ Zero actionable opportunities does not mean the system is broken. The usual caus
 - `paper trade rejected`: the edge exists in theory, but not after fees, size, or stability filters.
 - `execution plan empty`: the system intentionally stayed in dry-run mode.
 
+## Opportunity Chain Analysis
+
+`paper-analyze` and `monitor-analyze` include an `opportunity_chain` object when snapshots are provided. It treats the opportunity flow as a funnel:
+
+1. `feed`: latest snapshots are available.
+2. `candidate_generation`: strategies can generate evaluable candidates.
+3. `actionability_filter`: candidates are not blocked by wording, verification, or diagnostic-only status.
+4. `edge_filter`: actionable candidates clear the configured net-edge threshold.
+5. `stability_filter`: realtime opportunities survive the stability window.
+6. `paper_filter`: stable opportunities survive ROI, size, bankroll, and liquidity filters.
+
+The report also includes `strategy_chain_breakdown`, which applies the same logic per strategy kind. Use `dominant_blocker` and `next_action` to decide which link to optimize first.

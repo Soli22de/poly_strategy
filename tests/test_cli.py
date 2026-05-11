@@ -678,6 +678,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["zero_opportunity_diagnosis"]["actionable_candidate_count"], 1)
         self.assertEqual(row["zero_opportunity_diagnosis"]["diagnostic_candidate_count"], 0)
         self.assertIn("best_actionable_candidate_below_min_edge", row["zero_opportunity_diagnosis"]["reasons"])
+        self.assertEqual(row["opportunity_chain"]["type"], "opportunity_chain_report")
+        self.assertEqual(row["opportunity_chain"]["blocking_stage"], "edge_filter")
+        edge_stage = [stage for stage in row["opportunity_chain"]["stages"] if stage["stage"] == "edge_filter"][0]
+        self.assertEqual(edge_stage["status"], "block")
+        self.assertEqual(edge_stage["reason"], "no_actionable_candidate_clears_min_net_edge")
+        self.assertEqual(row["strategy_chain_breakdown"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(row["strategy_chain_breakdown"][0]["dominant_blocker"], "edge_filter")
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_maker_scan_command_writes_report(self):
