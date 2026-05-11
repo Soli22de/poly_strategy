@@ -56,10 +56,10 @@
 
 ## Q4. T4 人工标注分工
 
-主方案初稿：100 条规则，4 人各 25 条，至少 2 人独立标注同一条，冲突讨论。标签集：`correct / wrong / ambiguous`。
+主方案初稿：100 条规则，每条至少 2 人独立标注，冲突讨论。标签集：`correct / wrong / ambiguous`。这意味着总标注任务量是 200 份；4 人团队默认每人 50 份。
 
 **问题**：
-- 4 × 25 的分配 OK 吗？
+- 4 × 50 的分配 OK 吗？如果每人只能做 25 份，是否把样本量降到 50 条规则？
 - 100 条规则的样本怎么选？（建议：从现有 rule_discovery 输出里分层抽样 —— implication 30 + mutex 30 + equivalent 20 + exhaustive 10 + complement 10）
 - 标签集是否需要加 `confidence`（high / medium / low）字段？这会增加标注时间但提供更细信息。
 - 标注工具：直接编辑一个共享 NDJSON / Google Sheets / 还是搭一个最简单的 web 标注页面？

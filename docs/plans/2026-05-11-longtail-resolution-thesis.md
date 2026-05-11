@@ -30,22 +30,20 @@
 - 公开的"最低效区间"：**距离 resolution 30-14 天**（方向已知但概率未精确定价）。
 - 长尾流动性差，但同时也是 *做市商不覆盖、HFT 不竞争* 的区域。
 
-### 1.3 费用结构已变（必须更新代码）
+### 1.3 费用结构需要按市场保存完整 schedule
 
-Polymarket 2026 年起按 category 收 taker fee，公式 `rate × price × (1-price) × size`：
+Polymarket 当前官方 fee 公式是：
 
-| Category | Taker rate |
-|---|---|
-| Crypto | 1.80% |
-| Mentions | 1.56% |
-| Economics | 1.50% |
-| Culture | 1.25% |
-| Weather | 1.25% |
-| Finance / Politics / Tech | 1.00% |
-| Sports | 0.75% |
-| Geopolitics | 0% |
+```text
+fees = feeRate * shares * price * (1 - price)
+```
 
-Maker 0%，且 maker 拿 100% rebate（pro-rata）。**当前代码 `fees.py` 只有单一 `fee_rate`，是错的。**
+关键实现原则：
+
+- **不要把 category 页面展示的百分比直接当成公式里的 `feeRate` 系数硬编码。**
+- Gamma market payload 已经带 `feeSchedule.rate`、`rebateRate`、`takerOnly` 等字段；当前代码已经把 `feeSchedule.rate` 写入 snapshot 的 `fee_rate`。
+- 真正缺口不是"只有一个常量费率"，而是 snapshot/model/report 没有完整保存 `feeSchedule` 元数据，maker rebate 也没有进入诊断。
+- 后续 fee 改动必须优先使用市场级 `feeSchedule`，category 表只能作为 `feeSchedule` 缺失时的明确 fallback，并且必须标注来源和时间。
 
 ### 1.4 我们要做的事的反例：Théo
 
@@ -74,7 +72,7 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 - T2: Resolution Criteria Reader（结构化文本解析）
 - T3: 站内"同事件多市场"检测
 - T4: Rule discovery 评估管线（LLM-as-judge）
-- 横切：fee 模型 category-aware 升级
+- 横切：fee schedule 元数据升级
 - 横切：所有产出走 dry-run，不接 live execution
 
 ### 2.2 Out of scope（不做，理由见 §1）
@@ -139,7 +137,7 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 - `poly_strategy/resolution_reader.py`（T2）
 - `poly_strategy/same_event_detector.py`（T3）
 - `poly_strategy/rule_eval.py`（T4）
-- `poly_strategy/fees.py`（修改，category-aware）
+- `poly_strategy/fees.py`（保留主公式，增加必要 fallback/metadata 工具）
 - `tests/test_longtail.py`、`tests/test_resolution_reader.py`、`tests/test_same_event_detector.py`、`tests/test_rule_eval.py`
 
 ---
@@ -190,7 +188,8 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 
 **实现要点**：
 - 复用 `watchlist.py` 的 priority_score 思路，但输出是 tier 而非排序。
-- 不修改 `watchlist.py` 主流程；新建 `longtail.py` 调用 watchlist 的工具函数。
+- 不改变 `watchlist.py` 现有默认行为；允许新增 `--tier longtail` 等可选参数接入 `build-watchlist`。
+- 新建 `longtail.py` 负责 tier 计算，`watchlist.py` 只消费其输出或被 CLI 以可选方式调用。
 
 **验收标准**：
 - [ ] 在一个固定日期的 Gamma 快照上跑出四档划分。
@@ -384,7 +383,8 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 2. **判官集成**：单 LLM judge 不可信（arxiv 2512.16041 的 Intra-Pair Instability 数据）。**集成至少 3 个模型** —— Haiku、Sonnet、加一个外部供应商如 gpt-4o-mini —— 取多数票。
 3. **Self-consistency**：每条规则被 judge 3 次（temperature 0.3），看一致率。一致率 <0.8 的规则标 "unstable"。
 4. **Ground truth 怎么来**：
-   - 100 条规则人工标注（团队 4 人，每人 25 条，1-2 天）
+   - 100 条规则人工标注，且每条至少 2 人独立标注；因此总标注任务量是 200 份。
+   - 团队 4 人时，默认每人 50 份；如果只能每人 25 份，则样本量应降到 50 条规则。
    - 标注协议：每条 rule = (market_a, market_b, relation_type)，标 `correct / wrong / ambiguous`
    - 至少有 2 人独立标注同一条；冲突时讨论
 5. **避免污染**：评估时 judge 看不到 rule_discovery 的原 prompt（防止判官重复同样的错）。
@@ -397,30 +397,29 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 
 **人工成本**：
 - 标注协议设计：半天
-- 人工标注 100 条：2 天（4 人 × 半天）
+- 人工标注 100 条双标：2 天（4 人 × 约 50 份）
 - 实现 + judge ensemble：2 天
 - 测试 + 报告：1 天
 
 ---
 
-### 横切 1: Fee 模型 Category-Aware 升级
+### 横切 1: Fee Schedule 元数据升级
 
-**为什么必须做**：Polymarket 2026 起 fee 是 category 阶梯（§1.3）。当前 `fees.py` 只有单一 `fee_rate`，意味着我们的 backtest **系统性高估了 Geopolitics 边缘、低估了 Crypto 边缘**。
+**为什么必须做**：Polymarket fee 已经是 market-level `feeSchedule` 驱动。当前代码会读取 `feeSchedule.rate` 并按 `fee_rate * price * (1-price)` 计 taker fee，但还没有完整保存 `rebateRate`、`takerOnly`、`feeType` 等元数据；maker 路径也没有用 rebate 信息做诊断。这个缺口会影响 maker/taker 路径比较和未来 fee 变更回放。
 
 **改动范围**：
-- `poly_strategy/fees.py`：增加 `category_taker_rate(category: str) -> float`，硬编码当前阶梯。
-- `taker_fee_per_share` 签名增加可选 `category` 参数。
-- `scanner.py` 调用处补传 category。
-- `models.py` 的 `BinaryMarketSnapshot` 增加 `category` 字段。
-- 数据收集 (`collectors.py`) 从 Gamma 抽出 category 字段写入快照。
+- `collectors.py`：在 binary snapshot 中保存 `fee_schedule_rate`、`fee_rebate_rate`、`fee_taker_only`、`fee_type`，并继续保持已有 `fee_rate` 兼容字段。
+- `models.py` / `backtest.py`：让 `BinaryMarketSnapshot` 可读取新增 fee metadata，但不破坏旧 NDJSON。
+- `maker.py`：在 maker diagnostics 中展示 `rebateRate`，并继续把真实成交前的 maker rebate 视为诊断项而非确定收益。
+- `fees.py`：保留 `fee_rate * price * (1-price)` 主公式；只在 `feeSchedule` 缺失且显式配置时使用 category fallback。
 
 **注意**：
-- Maker 0% + 100% rebate。**maker.py 也需要更新**（如果未来用 maker 路径）。
-- 阶梯有可能再变（参考 2026-04 的回退事件）。把阶梯写在 **一个常量字典里**，留 TODO 注释指向文档 URL。
+- maker rebate 不是固定 100%；以 `feeSchedule.rebateRate` 为准，并在报告中保留原始值。
+- category/fallback 阶梯有可能再变；如需 fallback，把表集中放在一个常量字典里，并留 TODO 注释指向官方文档 URL 和复核日期。
 
 **验收**：
-- [ ] 单元测试覆盖每个 category 的 fee 计算。
-- [ ] 现有 backtest 数据重跑，对比新旧 fee 模型下的 opportunity 数量差异，写入 release notes。
+- [ ] 单元测试覆盖 `feeSchedule.rate`、`rebateRate`、`takerOnly` 的采集和旧快照兼容读取。
+- [ ] 现有 backtest 数据重跑，对比保存完整 fee metadata 前后的 opportunity 数量差异，写入 release notes。
 
 **人工成本**：1 天。
 
@@ -518,7 +517,7 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 1. **T1 阈值**：上表初稿的数字（$50k/$5k/$100、1¢/3¢/10¢、14-90 天）是否合理？是否需要先看 1 周 Gamma 实际分布再定？
 2. **T2 模型选择**：Haiku 主跑 + Sonnet 复核，是否同意？还是想试 DeepSeek？
 3. **T3 embedding 模型**：`text-embedding-3-small` 还是开源 sentence-transformers（免费但要本地跑）？
-4. **T4 人工标注分工**：100 条规则 4 人分，每人 25 条？标注协议（correct / wrong / ambiguous）够不够细？是否要加 "confidence" 字段？
+4. **T4 人工标注分工**：100 条规则双标时，4 人每人 50 份是否可接受？如果只能每人 25 份，是否把样本量降到 50 条？标注协议（correct / wrong / ambiguous）够不够细？是否要加 "confidence" 字段？
 5. **代码 review 流程**：每个工作流完工后，PR review by 谁？merge 标准？
 6. **DS 拆解方式**：每个 T 是一个 DS 指令包？还是更细？（建议：T1 一个包，T2/T3/T4 各拆成"实现 + 测试 + 验证"3 个子包，共 10 个 DS 包）
 7. **Cadence**：每周固定时间同步进度？每两周重审 kill criteria？
@@ -548,7 +547,7 @@ Lopez-Lira（SSRN 4412788）：GPT 头条策略 Sharpe 在 3 年内从 6.54 → 
 - **Are We on the Right Way to Assessing LLM-as-a-Judge** — arxiv 2512.16041
 
 ### 行业 / Polymarket 官方
-- **Polymarket fee schedule** — help.polymarket.com/articles/13364478（§1.3）
+- **Polymarket trading fees** — docs.polymarket.com/trading/fees（§1.3）
 - **Polymarket API docs** — docs.polymarket.com（§3 接入）
 - **NegRisk CTF Adapter** — github.com/Polymarket/neg-risk-ctf-adapter
 - **Paradigm: Polymarket Volume Double-Counted (Dec 2025)** — paradigm.xyz/2025/12（§T1 阈值警告）
