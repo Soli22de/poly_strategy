@@ -37,6 +37,33 @@ if [[ -n "${PROXY:-}" ]]; then
   PROXY_ARG=(--proxy "$PROXY")
 fi
 
+run_with_timeout() {
+  local limit_seconds="$1"
+  shift
+  if [[ "$limit_seconds" == "0" ]]; then
+    "$@"
+    return $?
+  fi
+  "$@" &
+  local pid=$!
+  local elapsed=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( elapsed >= limit_seconds )); then
+      echo "command_timeout seconds=$limit_seconds pid=$pid command=$*" >&2
+      pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
+}
+
 "$PYTHON_BIN" -m poly_strategy.cli collect-kalshi-event-markets \
   --candidates "$CANDIDATES" \
   --out "$KALSHI_MARKETS" \
@@ -71,7 +98,8 @@ fi
   --top "${CROSS_PLATFORM_VERIFY_TOP:-60}" \
   --min-net-edge "${CROSS_PLATFORM_PREVERIFY_MIN_EDGE:-0.005}"
 
-"$PYTHON_BIN" -m poly_strategy.cli verify-cross-platform-matches \
+run_with_timeout "${CROSS_PLATFORM_VERIFY_COMMAND_TIMEOUT:-900}" \
+  "$PYTHON_BIN" -m poly_strategy.cli verify-cross-platform-matches \
   --matches "$OPPORTUNITY_CANDIDATES" \
   --out "$VERIFIED_MATCHES" \
   --signals-out "$SIGNALS" \
