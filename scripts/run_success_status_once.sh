@@ -9,6 +9,7 @@ MONITOR_REPORT="${MONITOR_REPORT:-data/realtime-monitor-24h-v1.jsonl}"
 EXECUTION_PLANS="${EXECUTION_PLANS:-data/realtime-alert-execution-plans.ndjson}"
 MAKER_ADAPTIVE="${MAKER_ADAPTIVE:-data/maker-adaptive-sim-current.json}"
 MAKER_HEDGE="${MAKER_HEDGE:-data/maker-hedge-sim-current.json}"
+MAKER_HYBRID="${MAKER_HYBRID:-data/maker-hybrid-sim-current.json}"
 CROSS_PLATFORM_SCAN="${CROSS_PLATFORM_SCAN:-data/cross-platform-verified-scan-cap100.json}"
 MIN_CROSS_PLATFORM_CAPITAL_EDGE="${MIN_CROSS_PLATFORM_CAPITAL_EDGE:-0.5}"
 OUT="${OUT:-data/success-status-current.json}"
@@ -24,6 +25,7 @@ exec "$PYTHON_BIN" -m poly_strategy.cli success-status \
   --execution-plans "$EXECUTION_PLANS" \
   --maker-adaptive "$MAKER_ADAPTIVE" \
   --maker-hedge "$MAKER_HEDGE" \
+  --maker-hybrid "$MAKER_HYBRID" \
   --cross-platform-scan "$CROSS_PLATFORM_SCAN" \
   --min-cross-platform-capital-edge "$MIN_CROSS_PLATFORM_CAPITAL_EDGE" \
   --out "$OUT" \
