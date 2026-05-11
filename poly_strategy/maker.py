@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 import json
 from datetime import datetime, timezone
 from itertools import combinations
@@ -668,6 +668,9 @@ def maker_hybrid_tape_sim_report(
         "diagnostic_only": True,
         "diagnostic_warning": "public trade prints can prove sell-through, but queue position is still uncertain without live order fills",
         "by_kind": _hybrid_fill_summary_by_kind(results),
+        "rejection_by_reason": _hybrid_rejection_summary(results),
+        "maker_fill_progress_distribution": _maker_fill_progress_distribution(results),
+        "top_unfilled_maker_legs": _top_unfilled_maker_legs(results, top_n),
         "top_completed": sorted(completed, key=_hybrid_result_sort_key)[:top_n],
         "top_unique_completed": sorted(unique_completed, key=_hybrid_result_sort_key)[:top_n],
         "top_unsafe": sorted(unsafe, key=_hybrid_result_sort_key)[:top_n],
@@ -2569,6 +2572,184 @@ def _hybrid_fill_summary_by_kind(rows: List[dict]) -> list:
         item["unsafe_fill_rate"] = item["unsafe_fill_count"] / count if count else 0.0
         item["partial_maker_fill_rate"] = item["partial_maker_fill_count"] / count if count else 0.0
     return sorted(summary.values(), key=lambda row: (-row["completed_count"], -row["max_completed_realized_edge_at_cap"], row["kind"]))
+
+
+def _hybrid_rejection_summary(rows: List[dict]) -> list:
+    summary = {}
+    for row in rows:
+        reason = str(row.get("rejection_reason") or ("completed" if row.get("completed") else "unknown"))
+        item = summary.setdefault(
+            reason,
+            {
+                "reason": reason,
+                "candidate_observation_count": 0,
+                "completed_count": 0,
+                "max_expected_edge_at_cap": 0.0,
+                "max_expected_edge_per_share": 0.0,
+                "max_realized_edge_at_cap": 0.0,
+            },
+        )
+        item["candidate_observation_count"] += 1
+        if row.get("completed"):
+            item["completed_count"] += 1
+        item["max_expected_edge_at_cap"] = max(
+            item["max_expected_edge_at_cap"],
+            float(row.get("expected_edge_at_cap") or 0.0),
+        )
+        item["max_expected_edge_per_share"] = max(
+            item["max_expected_edge_per_share"],
+            float(row.get("expected_edge_per_share") or 0.0),
+        )
+        item["max_realized_edge_at_cap"] = max(
+            item["max_realized_edge_at_cap"],
+            float(row.get("realized_edge_at_cap") or 0.0),
+        )
+    return sorted(
+        summary.values(),
+        key=lambda row: (
+            -row["candidate_observation_count"],
+            -row["max_expected_edge_at_cap"],
+            row["reason"],
+        ),
+    )
+
+
+def _maker_fill_progress_distribution(rows: List[dict]) -> list:
+    counts = Counter(
+        (
+            int(row.get("filled_maker_leg_count") or 0),
+            int(row.get("maker_leg_count") or 0),
+        )
+        for row in rows
+    )
+    distribution = []
+    for (filled_count, maker_count), count in counts.items():
+        distribution.append(
+            {
+                "filled_maker_leg_count": filled_count,
+                "maker_leg_count": maker_count,
+                "candidate_observation_count": count,
+                "maker_leg_fill_ratio": filled_count / maker_count if maker_count else 0.0,
+            }
+        )
+    return sorted(
+        distribution,
+        key=lambda row: (
+            row["filled_maker_leg_count"],
+            row["maker_leg_count"],
+            -row["candidate_observation_count"],
+        ),
+    )
+
+
+def _top_unfilled_maker_legs(rows: List[dict], top_n: int) -> list:
+    if top_n <= 0:
+        return []
+    summary = {}
+    for row in rows:
+        unfilled_indices = set(int(index) for index in (row.get("unfilled_maker_indices") or []))
+        for index, leg in enumerate(row.get("maker_legs") or []):
+            source_index = _source_leg_index(leg, index)
+            key = (
+                str(leg.get("venue") or ""),
+                str(leg.get("market_id") or ""),
+                str(leg.get("token") or ""),
+                str(leg.get("token_id") or ""),
+                str(leg.get("side") or ""),
+                float(leg.get("limit_price") or 0.0),
+                str(leg.get("quote_mode") or ""),
+                int(leg.get("quote_offset_ticks") or 0),
+            )
+            item = summary.setdefault(
+                key,
+                {
+                    "venue": key[0],
+                    "market_id": key[1],
+                    "token": key[2],
+                    "token_id": key[3],
+                    "side": key[4],
+                    "limit_price": key[5],
+                    "quote_mode": key[6],
+                    "quote_offset_ticks": key[7],
+                    "best_bid": _float_or_none(leg.get("best_bid")),
+                    "best_ask": _float_or_none(leg.get("best_ask")),
+                    "spread": _float_or_none(leg.get("spread")),
+                    "candidate_observation_count": 0,
+                    "unfilled_count": 0,
+                    "max_expected_edge_at_cap": 0.0,
+                    "max_expected_edge_per_share": 0.0,
+                    "min_distance_to_best_ask": None,
+                    "max_improvement_over_best_bid": 0.0,
+                },
+            )
+            item["candidate_observation_count"] += 1
+            item["max_expected_edge_at_cap"] = max(
+                item["max_expected_edge_at_cap"],
+                float(row.get("expected_edge_at_cap") or 0.0),
+            )
+            item["max_expected_edge_per_share"] = max(
+                item["max_expected_edge_per_share"],
+                float(row.get("expected_edge_per_share") or 0.0),
+            )
+            distance = _leg_distance_to_best_ask(leg)
+            if distance is not None:
+                item["min_distance_to_best_ask"] = (
+                    distance
+                    if item["min_distance_to_best_ask"] is None
+                    else min(item["min_distance_to_best_ask"], distance)
+                )
+            improvement = _leg_improvement_over_best_bid(leg)
+            if improvement is not None:
+                item["max_improvement_over_best_bid"] = max(item["max_improvement_over_best_bid"], improvement)
+            if source_index in unfilled_indices:
+                item["unfilled_count"] += 1
+
+    rows = []
+    for item in summary.values():
+        if item["unfilled_count"] <= 0:
+            continue
+        count = item["candidate_observation_count"]
+        item["unfilled_rate"] = item["unfilled_count"] / count if count else 0.0
+        rows.append(item)
+    return sorted(
+        rows,
+        key=lambda row: (
+            -row["unfilled_count"],
+            -row["unfilled_rate"],
+            -row["max_expected_edge_at_cap"],
+            row["market_id"],
+            row["token"],
+        ),
+    )[:top_n]
+
+
+def _source_leg_index(leg: dict, default: int) -> int:
+    try:
+        return int(leg.get("source_leg_index", default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _leg_distance_to_best_ask(leg: dict) -> Optional[float]:
+    distance = _float_or_none(leg.get("distance_to_best_ask"))
+    if distance is not None:
+        return distance
+    best_ask = _float_or_none(leg.get("best_ask"))
+    limit_price = _float_or_none(leg.get("limit_price"))
+    if best_ask is None or limit_price is None:
+        return None
+    return best_ask - limit_price
+
+
+def _leg_improvement_over_best_bid(leg: dict) -> Optional[float]:
+    improvement = _float_or_none(leg.get("improvement_over_best_bid"))
+    if improvement is not None:
+        return improvement
+    best_bid = _float_or_none(leg.get("best_bid"))
+    limit_price = _float_or_none(leg.get("limit_price"))
+    if best_bid is None or limit_price is None:
+        return None
+    return max(0.0, limit_price - best_bid)
 
 
 def _unique_tape_completed_rows(rows: List[dict]) -> List[dict]:

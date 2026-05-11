@@ -74,7 +74,7 @@ from poly_strategy.maker import (
 )
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.notifications import notify_alerts
-from poly_strategy.paper_analysis import analyze_paper_monitor_report
+from poly_strategy.paper_analysis import analyze_paper_monitor_report, optimization_target_market_ids
 from poly_strategy.paper import opportunity_key, select_paper_trades, trade_to_row, rejection_to_row, opportunity_to_row
 from poly_strategy.realtime import (
     DEFAULT_WS_MAX_SIZE,
@@ -152,15 +152,38 @@ def main(argv=None) -> int:
             print(f"wrote={count} out={args.out}")
             return 0
         if args.command == "collect-polymarket-binaries":
-            count = collect_polymarket_binary_snapshots_loop(
-                Path(args.out),
-                args.limit,
-                args.timeout,
-                args.proxy,
-                args.interval,
-                args.iterations,
-                max_workers=args.book_workers,
-            )
+            market_ids = list(args.market_id or [])
+            if args.market_ids_file:
+                market_ids.extend(_read_lines(Path(args.market_ids_file)))
+            if market_ids:
+                if not args.gamma:
+                    raise ValueError("--gamma is required when collecting specific market IDs")
+                count = 0
+                for index in range(args.iterations):
+                    count += collect_polymarket_binary_snapshots_for_market_ids(
+                        Path(args.out),
+                        Path(args.gamma),
+                        market_ids,
+                        args.timeout,
+                        args.proxy,
+                        max_workers=args.book_workers,
+                        skip_book_errors=args.skip_book_errors,
+                        refresh_missing_gamma=args.refresh_missing_gamma,
+                        expand_neg_risk_groups=not args.no_expand_neg_risk_groups,
+                        max_markets=args.max_markets,
+                    )
+                    if index < args.iterations - 1 and args.interval > 0:
+                        time.sleep(args.interval)
+            else:
+                count = collect_polymarket_binary_snapshots_loop(
+                    Path(args.out),
+                    args.limit,
+                    args.timeout,
+                    args.proxy,
+                    args.interval,
+                    args.iterations,
+                    max_workers=args.book_workers,
+                )
             print(f"wrote={count} out={args.out}")
             return 0
         if args.command == "collect-polymarket-trades":
@@ -344,6 +367,21 @@ def main(argv=None) -> int:
                 print(f"wrote=1 out={args.out}")
             else:
                 print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "optimization-target-markets":
+            report = json.loads(Path(args.analysis).read_text())
+            market_ids = optimization_target_market_ids(
+                report,
+                lever=args.lever,
+                top_targets=args.top_targets,
+                max_markets=args.max_markets,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text("\n".join(market_ids) + ("\n" if market_ids else ""))
+                print(f"market_ids={len(market_ids)} lever={args.lever} out={args.out}")
+            else:
+                print(json.dumps({"market_ids": market_ids, "market_id_count": len(market_ids)}, sort_keys=True))
             return 0
         if args.command == "maker-scan":
             row = maker_scan_report(
@@ -1153,6 +1191,17 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_binaries.add_argument("--iterations", type=int, default=1, help="number of collection iterations")
     collect_binaries.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
     collect_binaries.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
+    collect_binaries.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path when collecting specific market IDs")
+    collect_binaries.add_argument("--market-id", action="append", help="Gamma market ID; can be repeated")
+    collect_binaries.add_argument("--market-ids-file", help="newline-delimited Gamma market IDs")
+    collect_binaries.add_argument("--refresh-missing-gamma", action="store_true", help="fetch missing Gamma metadata by market ID")
+    collect_binaries.add_argument("--max-markets", type=int, help="cap collected markets after optional neg-risk expansion")
+    collect_binaries.add_argument("--skip-book-errors", action="store_true", help="skip CLOB book errors instead of failing")
+    collect_binaries.add_argument(
+        "--no-expand-neg-risk-groups",
+        action="store_true",
+        help="do not expand selected markets to their full known negRiskMarketID group",
+    )
 
     collect_trades = subparsers.add_parser(
         "collect-polymarket-trades",
@@ -1335,6 +1384,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="minimum net edge threshold used to classify near misses",
     )
+
+    optimization_markets = subparsers.add_parser(
+        "optimization-target-markets",
+        help="extract market IDs from monitor-analysis optimization targets",
+    )
+    optimization_markets.add_argument("analysis", help="monitor-analysis JSON path")
+    optimization_markets.add_argument("--out", help="newline-delimited output path; prints JSON when omitted")
+    optimization_markets.add_argument("--lever", default="maker_fee_avoidance", help="target lever, or top/all")
+    optimization_markets.add_argument("--top-targets", type=int, default=1, help="number of matching targets to use")
+    optimization_markets.add_argument("--max-markets", type=int, help="cap returned market IDs")
 
     maker_scan = subparsers.add_parser(
         "maker-scan",
@@ -2477,6 +2536,10 @@ def _paper_monitor_iteration_row(
             : args.max_opportunities_per_iteration
         ]
     ]
+    top_stable_rejections = [
+        rejection_to_row(rejection)
+        for rejection in stable_selection.rejections[: args.max_opportunities_per_iteration]
+    ]
     return {
         "type": "paper_monitor_iteration",
         "ts": _utc_now(),
@@ -2500,6 +2563,7 @@ def _paper_monitor_iteration_row(
         "current_opportunities": top_current,
         "stable_opportunities": top_stable,
         "stable_paper_trades": top_stable_trades,
+        "stable_paper_rejections": top_stable_rejections,
         "current_runs": [_run_to_row(run) for run in current_runs],
         "error_count": len(errors),
         "errors": errors[: args.max_errors_per_iteration],

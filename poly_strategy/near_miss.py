@@ -41,6 +41,9 @@ def near_miss_report(
         for row in candidates
         if row["gross_edge_per_share"] > min_net_edge and row["net_edge_per_share"] <= min_net_edge
     ]
+    maker_fee_avoidance = _maker_fee_avoidance_rows(actionable, min_net_edge)
+    price_improvement = _price_improvement_rows(actionable, min_net_edge)
+    verification_review = _verification_review_rows(diagnostic_only + blocked, min_net_edge)
     return {
         "type": "near_miss_report",
         "snapshots_path": str(snapshots_path),
@@ -58,6 +61,9 @@ def near_miss_report(
         "diagnostic_top": diagnostic_only[:top_n],
         "blocked_top": blocked[:top_n],
         "fee_blocked_top": fee_blocked[:top_n],
+        "maker_fee_avoidance_top": maker_fee_avoidance[:top_n],
+        "price_improvement_top": price_improvement[:top_n],
+        "verification_review_top": verification_review[:top_n],
         "by_kind": by_kind,
         "neg_risk_expanded_groups": neg_risk_expanded_groups[:top_n],
     }
@@ -627,6 +633,86 @@ def _summary_by_kind(candidates: List[dict], min_net_edge: float) -> list:
                 candidate["net_edge_per_share"],
             )
     return sorted(summary.values(), key=lambda row: (-(row["best_net_edge_per_share"] or -999), row["kind"]))
+
+
+def _maker_fee_avoidance_rows(candidates: List[dict], min_net_edge: float) -> list:
+    rows = []
+    for candidate in candidates:
+        if candidate["net_edge_per_share"] > min_net_edge:
+            continue
+        if candidate["gross_edge_per_share"] <= min_net_edge:
+            continue
+        row = dict(candidate)
+        row.update(
+            {
+                "optimization_lever": "maker_fee_avoidance",
+                "maker_edge_per_share": candidate["gross_edge_per_share"],
+                "maker_fee_saved_per_share": candidate["fee_drag_per_share"],
+                "maker_distance_to_min_net_edge": max(0.0, min_net_edge - candidate["gross_edge_per_share"]),
+                "maker_total_edge_at_top": candidate["gross_edge_per_share"] * candidate["top_quantity"],
+            }
+        )
+        rows.append(row)
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["maker_distance_to_min_net_edge"],
+            -row["maker_edge_per_share"],
+            -row["maker_total_edge_at_top"],
+            row["kind"],
+        ),
+    )
+
+
+def _price_improvement_rows(candidates: List[dict], min_net_edge: float) -> list:
+    rows = []
+    for candidate in candidates:
+        if candidate["net_edge_per_share"] > min_net_edge:
+            continue
+        leg_count = max(1, len(candidate.get("legs") or []))
+        required = max(0.0, min_net_edge - candidate["net_edge_per_share"])
+        row = dict(candidate)
+        row.update(
+            {
+                "optimization_lever": "price_improvement",
+                "required_total_price_improvement_per_share": required,
+                "required_per_leg_price_improvement": required / leg_count,
+                "leg_count": leg_count,
+            }
+        )
+        rows.append(row)
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["required_total_price_improvement_per_share"],
+            -row["top_quantity"],
+            row["kind"],
+        ),
+    )
+
+
+def _verification_review_rows(candidates: List[dict], min_net_edge: float) -> list:
+    rows = []
+    for candidate in candidates:
+        if candidate["gross_edge_per_share"] <= min_net_edge and candidate["net_edge_per_share"] <= min_net_edge:
+            continue
+        row = dict(candidate)
+        row.update(
+            {
+                "optimization_lever": "rule_verification",
+                "review_value": max(candidate["gross_edge_per_share"], candidate["net_edge_per_share"]),
+                "verification_note": "diagnostic or rejected candidates must be manually/LLM verified before any execution",
+            }
+        )
+        rows.append(row)
+    return sorted(
+        rows,
+        key=lambda row: (
+            -row["review_value"],
+            row.get("trade_status") or "",
+            row["kind"],
+        ),
+    )
 
 
 def _is_actionable_candidate(candidate: dict) -> bool:

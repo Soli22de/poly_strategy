@@ -37,6 +37,9 @@ class NearMissTests(unittest.TestCase):
         self.assertAlmostEqual(report["top"][0]["gross_edge_per_share"], 0.0)
         self.assertLess(report["top"][0]["net_edge_per_share"], 0.0)
         self.assertEqual(report["by_kind"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(report["maker_fee_avoidance_top"][0]["optimization_lever"], "maker_fee_avoidance")
+        self.assertGreater(report["maker_fee_avoidance_top"][0]["maker_fee_saved_per_share"], 0.0)
+        self.assertEqual(report["price_improvement_top"][0]["optimization_lever"], "price_improvement")
 
     def test_near_miss_report_includes_diagnostic_exhaustive_cliques(self):
         snapshots = [

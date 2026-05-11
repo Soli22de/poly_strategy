@@ -160,6 +160,83 @@ class CliTests(unittest.TestCase):
         self.assertEqual(collect.call_args.kwargs["max_workers"], 4)
         self.assertIn("wrote=3", stdout.getvalue())
 
+    def test_collect_polymarket_binaries_can_target_market_ids_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_ids = Path(tmp) / "market-ids.txt"
+            market_ids.write_text("m1\nm2\n")
+            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_market_ids", return_value=2) as collect:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "collect-polymarket-binaries",
+                            "--out",
+                            "data/focus.ndjson",
+                            "--gamma",
+                            "data/gamma.ndjson",
+                            "--market-ids-file",
+                            str(market_ids),
+                            "--refresh-missing-gamma",
+                            "--skip-book-errors",
+                            "--no-expand-neg-risk-groups",
+                            "--max-markets",
+                            "10",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        args = collect.call_args.args
+        self.assertEqual(str(args[0]), "data/focus.ndjson")
+        self.assertEqual(str(args[1]), "data/gamma.ndjson")
+        self.assertEqual(args[2], ["m1", "m2"])
+        self.assertTrue(collect.call_args.kwargs["refresh_missing_gamma"])
+        self.assertTrue(collect.call_args.kwargs["skip_book_errors"])
+        self.assertFalse(collect.call_args.kwargs["expand_neg_risk_groups"])
+        self.assertEqual(collect.call_args.kwargs["max_markets"], 10)
+        self.assertIn("wrote=2", stdout.getvalue())
+
+    def test_optimization_target_markets_writes_market_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis = Path(tmp) / "analysis.json"
+            out = Path(tmp) / "markets.txt"
+            analysis.write_text(
+                json.dumps(
+                    {
+                        "optimization_targets": {
+                            "top_target": "maker_fee_avoidance",
+                            "targets": [
+                                {
+                                    "lever": "maker_fee_avoidance",
+                                    "evidence": {"market_ids": ["m1", "m2", "m1"]},
+                                },
+                                {
+                                    "lever": "price_improvement",
+                                    "evidence": {"market_ids": ["m3"]},
+                                },
+                            ],
+                        }
+                    }
+                )
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "optimization-target-markets",
+                        str(analysis),
+                        "--out",
+                        str(out),
+                        "--lever",
+                        "maker_fee_avoidance",
+                    ]
+                )
+            written_market_ids = out.read_text().splitlines()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(written_market_ids, ["m1", "m2"])
+        self.assertIn("market_ids=2", stdout.getvalue())
+
     def test_collect_polymarket_can_fetch_gamma_markets_by_id(self):
         with patch("poly_strategy.cli.collect_polymarket_gamma_markets_by_id", return_value=2) as collect:
             stdout = io.StringIO()
@@ -573,6 +650,7 @@ class CliTests(unittest.TestCase):
                             "current_opportunity_count": 1,
                             "stable_opportunity_count": 1,
                             "stable_paper_trade_count": 1,
+                            "stable_paper_rejection_count": 1,
                             "stable_paper_capital_used": 10,
                             "stable_paper_edge": 0.2,
                             "current_opportunities": [
@@ -594,6 +672,14 @@ class CliTests(unittest.TestCase):
                                 }
                             ],
                             "stable_paper_trades": [{"paper_roi": 0.02}],
+                            "stable_paper_rejections": [
+                                {
+                                    "reason": "below_min_roi",
+                                    "kind": "yes_no_bundle",
+                                    "cost_per_share": 0.99,
+                                    "net_edge_per_share": 0.001,
+                                }
+                            ],
                             "errors": [],
                             "error_count": 0,
                         },
@@ -671,6 +757,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["zero_current_opportunity_iterations"], 0)
         self.assertEqual(row["latest_zero_stable_opportunity_streak"], 0)
         self.assertEqual(row["current_opportunity_by_kind"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(row["stable_paper_rejection_by_reason"][0]["reason"], "below_min_roi")
+        self.assertEqual(row["stable_paper_rejection_by_reason"][0]["count"], 1)
         self.assertEqual(row["near_miss"]["top"][0]["kind"], "yes_no_bundle")
         self.assertEqual(row["near_miss"]["gamma_path"], str(gamma))
         self.assertEqual(row["near_miss_rejection_summary"]["neg_risk_group_count"], 0)
@@ -678,6 +766,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["zero_opportunity_diagnosis"]["actionable_candidate_count"], 1)
         self.assertEqual(row["zero_opportunity_diagnosis"]["diagnostic_candidate_count"], 0)
         self.assertIn("best_actionable_candidate_below_min_edge", row["zero_opportunity_diagnosis"]["reasons"])
+        self.assertEqual(row["opportunity_chain"]["type"], "opportunity_chain_report")
+        self.assertEqual(row["opportunity_chain"]["blocking_stage"], "edge_filter")
+        edge_stage = [stage for stage in row["opportunity_chain"]["stages"] if stage["stage"] == "edge_filter"][0]
+        self.assertEqual(edge_stage["status"], "block")
+        self.assertEqual(edge_stage["reason"], "no_actionable_candidate_clears_min_net_edge")
+        self.assertEqual(row["strategy_chain_breakdown"][0]["kind"], "yes_no_bundle")
+        self.assertEqual(row["strategy_chain_breakdown"][0]["dominant_blocker"], "edge_filter")
+        self.assertEqual(row["optimization_targets"]["type"], "optimization_targets_report")
+        self.assertEqual(row["optimization_targets"]["top_target"], "price_improvement")
+        self.assertEqual(row["optimization_targets"]["targets"][0]["lever"], "price_improvement")
         self.assertIn("wrote=1", stdout.getvalue())
 
     def test_maker_scan_command_writes_report(self):

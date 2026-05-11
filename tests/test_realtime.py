@@ -268,6 +268,7 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(report_rows[0]["event"], "connecting")
         self.assertEqual(report_rows[1]["event"], "connected")
         self.assertEqual(report_rows[2]["type"], "realtime_monitor_iteration")
+        self.assertIn("stable_paper_rejections", report_rows[2])
         self.assertEqual(report_rows[3]["type"], "realtime_monitor_summary")
         self.assertEqual(connect_kwargs[0]["max_size"], 4 * 1024 * 1024)
         self.assertEqual(len(update_rows), 2)

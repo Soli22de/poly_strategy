@@ -500,6 +500,30 @@ Run a realtime-specific analysis report explaining why opportunities are absent 
 The `zero_opportunity_diagnosis` section separates actionable near-misses from diagnostic or blocked candidates, so a positive-looking basket that still needs rule promotion will not be treated as executable.
 The same report is refreshed by `scripts/run_realtime_analysis_once.sh`; the LaunchAgent `poly_strategy_realtime_analysis_15m` runs it every 15 minutes.
 
+Extract markets from a specific optimization lever and run a focused maker-fee scan:
+
+```bash
+.venv/bin/python -m poly_strategy.cli optimization-target-markets data/realtime-monitor-24h-v1-analysis.json \
+  --lever maker_fee_avoidance \
+  --top-targets 1 \
+  --max-markets 120 \
+  --out data/optimization-target-market-ids.txt
+
+MAX_TARGET_MARKETS=120 TOP=50 scripts/run_maker_focus_from_analysis_once.sh
+```
+
+Validate the focused maker candidates against public SELL trade prints:
+
+```bash
+HYBRID_SCAN=data/maker-hybrid-scan-focus.json \
+TRADES=data/polymarket-data-trades-focus.ndjson \
+OUT=data/maker-hybrid-tape-sim-focus.json \
+LOCK_DIR=var/locks/maker-hybrid-tape-focus.lock \
+scripts/run_maker_hybrid_tape_once.sh
+```
+
+`maker-hybrid-tape-sim` remains diagnostic-only, but its report explains why fills did not complete with `rejection_by_reason`, `maker_fill_progress_distribution`, and `top_unfilled_maker_legs`.
+
 Promote only usable opportunities from diagnostic basket candidates:
 
 ```bash
