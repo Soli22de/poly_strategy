@@ -882,6 +882,7 @@ def scan_maker_candidates(
         raise ValueError("max_capital must be non-negative")
     quote_mode = _normalize_quote_mode(quote_mode)
     quote_offset_ticks = _normalize_quote_offset_ticks(quote_offset_ticks)
+    snapshots = [snapshot for snapshot in snapshots if _snapshot_has_valid_spreads(snapshot)]
     by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
     rows = []
 
@@ -1439,6 +1440,7 @@ def _hedge_basket_specs(
     max_leg_count: int,
     include_yes_no_pairs: bool,
 ) -> List[dict]:
+    snapshots = [snapshot for snapshot in snapshots if _snapshot_has_valid_spreads(snapshot)]
     by_market_id = {snapshot.market_id: snapshot for snapshot in snapshots}
     specs = []
 
@@ -1756,6 +1758,16 @@ def _token_book(snapshot: BinaryMarketSnapshot, token: str) -> OrderBook:
     if token == "NO":
         return snapshot.no
     raise ValueError(f"unsupported token: {token}")
+
+
+def _snapshot_has_valid_spreads(snapshot: BinaryMarketSnapshot) -> bool:
+    return _book_has_valid_spread(snapshot.yes) and _book_has_valid_spread(snapshot.no)
+
+
+def _book_has_valid_spread(book: OrderBook) -> bool:
+    if not book.asks or not book.bids:
+        return True
+    return book.bids[0].price < book.asks[0].price
 
 
 def _floor_to_tick(price: float, tick_size: float) -> float:

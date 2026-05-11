@@ -18,6 +18,7 @@ TRADE_SIDE="${TRADE_SIDE:-SELL}"
 TOP_MARKETS="${TOP_MARKETS:-40}"
 PER_MARKET="${PER_MARKET:-1}"
 TRADE_WORKERS="${TRADE_WORKERS:-6}"
+TRADE_RETRIES="${TRADE_RETRIES:-2}"
 TICK_SIZE="${TICK_SIZE:-0.001}"
 QUOTE_MODE="${QUOTE_MODE:-near_ask}"
 QUOTE_OFFSET_TICKS="${QUOTE_OFFSET_TICKS:-1}"
@@ -32,6 +33,7 @@ MAX_MAKER_COMBINATIONS="${MAX_MAKER_COMBINATIONS:-25}"
 HORIZON_SECONDS="${HORIZON_SECONDS:-300}"
 MAX_CANDIDATES_PER_BATCH="${MAX_CANDIDATES_PER_BATCH:-50}"
 TOP="${TOP:-50}"
+LOCK_DIR="${LOCK_DIR:-var/locks/maker-hybrid-tape.lock}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -43,11 +45,23 @@ if [[ ! -s "$SNAPSHOTS" || ! -s "$HYBRID_SCAN" || ! -s "$GAMMA" ]]; then
   exit 0
 fi
 
-: > "$TRADES"
+mkdir -p "$(dirname "$LOCK_DIR")"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "maker_hybrid_tape=0 reason=locked out=$OUT"
+  exit 0
+fi
+TRADES_TMP="${TRADES}.tmp.$$"
+cleanup() {
+  rm -f "$TRADES_TMP"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+: > "$TRADES_TMP"
 
 collect_args=(
   -m poly_strategy.cli collect-polymarket-trades
-  --out "$TRADES"
+  --out "$TRADES_TMP"
   --gamma "$GAMMA"
   --hybrid-scan "$HYBRID_SCAN"
   --top-markets "$TOP_MARKETS"
@@ -56,14 +70,17 @@ collect_args=(
   --timeout "$TIMEOUT"
   --proxy "$PROXY"
   --trade-workers "$TRADE_WORKERS"
+  --skip-errors
+  --retries "$TRADE_RETRIES"
 )
 if [[ "$PER_MARKET" == "1" ]]; then
   collect_args+=(--per-market)
 fi
 
 "$PYTHON_BIN" "${collect_args[@]}"
+mv "$TRADES_TMP" "$TRADES"
 
-exec "$PYTHON_BIN" -m poly_strategy.cli maker-hybrid-tape-sim \
+"$PYTHON_BIN" -m poly_strategy.cli maker-hybrid-tape-sim \
   --snapshots "$SNAPSHOTS" \
   --trades "$TRADES" \
   --rules "$RULES" \

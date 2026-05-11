@@ -149,6 +149,7 @@ def scan_snapshot_batch(
     min_net_edge: float = 0.0,
 ) -> List[Opportunity]:
     rules = rule_set or RuleSet()
+    snapshots = [snapshot for snapshot in snapshots if _snapshot_has_valid_spreads(snapshot)]
     opportunities: List[Opportunity] = []
     for snapshot in snapshots:
         opportunities.extend(find_yes_no_bundle_arbs(snapshot, min_net_edge=min_net_edge))
@@ -165,6 +166,16 @@ def scan_snapshot_batch(
     opportunities.extend(find_neg_risk_group_arbs(snapshots, rules.neg_risk_groups, min_net_edge=min_net_edge))
     opportunities.extend(find_complement_arbs(snapshots, rules.complements, min_net_edge=min_net_edge))
     return opportunities
+
+
+def _snapshot_has_valid_spreads(snapshot: BinaryMarketSnapshot) -> bool:
+    return _book_has_valid_spread(snapshot.yes) and _book_has_valid_spread(snapshot.no)
+
+
+def _book_has_valid_spread(book) -> bool:
+    if not book.asks or not book.bids:
+        return True
+    return book.bids[0].price < book.asks[0].price
 
 
 def load_rules(path: Path, min_confidence: float = 0.95) -> List[ImplicationRule]:

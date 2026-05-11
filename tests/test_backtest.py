@@ -39,6 +39,28 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(result.opportunity_count, 1)
         self.assertAlmostEqual(result.total_edge, 0.14)
 
+    def test_replay_ndjson_ignores_crossed_single_token_books(self):
+        rows = [
+            {
+                "ts": "2026-05-08T00:00:00Z",
+                "type": "binary_snapshot",
+                "venue": "polymarket",
+                "market_id": "sample",
+                "fee_rate": 0.0,
+                "yes": {"asks": [[0.45, 10]], "bids": [[0.46, 10]]},
+                "no": {"asks": [[0.53, 7]], "bids": [[0.52, 7]]},
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snapshots.ndjson"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            result = replay_ndjson(path)
+
+        self.assertEqual(result.snapshot_count, 1)
+        self.assertEqual(result.opportunity_count, 0)
+
     def test_replay_ndjson_caps_quantity_by_capital_per_trade(self):
         rows = [
             {

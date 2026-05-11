@@ -223,6 +223,9 @@ def collect_polymarket_data_trades(
     offset: int = 0,
     per_market: bool = False,
     max_workers: int = 1,
+    skip_errors: bool = False,
+    errors: Optional[list] = None,
+    retries: int = 0,
     fetch_json: Optional[Callable[[str, float, Optional[str]], object]] = None,
 ) -> int:
     if limit < 1:
@@ -231,6 +234,8 @@ def collect_polymarket_data_trades(
         raise ValueError("offset must be non-negative")
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
+    if retries < 0:
+        raise ValueError("retries must be non-negative")
 
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     condition_to_market_id = _condition_ids_for_market_ids(markets, market_ids)
@@ -248,14 +253,23 @@ def collect_polymarket_data_trades(
             proxy,
             fetch,
             max_workers,
+            skip_errors,
+            errors,
+            retries,
         )
     else:
-        response = fetch(
-            _polymarket_data_trades_url(list(condition_to_market_id), limit, offset, side),
+        trades = _fetch_polymarket_data_trades_with_retries(
+            list(condition_to_market_id),
+            limit,
+            offset,
+            side,
             timeout,
             proxy,
+            fetch,
+            skip_errors,
+            errors,
+            retries,
         )
-        trades = _polymarket_data_trade_rows_from_response(response)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -296,10 +310,23 @@ def _fetch_polymarket_data_trades_per_market(
     proxy: Optional[str],
     fetch_json: Callable[[str, float, Optional[str]], object],
     max_workers: int,
+    skip_errors: bool,
+    errors: Optional[list],
+    retries: int,
 ) -> List[dict]:
     def fetch_condition(condition_id: str) -> List[dict]:
-        response = fetch_json(_polymarket_data_trades_url([condition_id], limit, offset, side), timeout, proxy)
-        trades = _polymarket_data_trade_rows_from_response(response)
+        trades = _fetch_polymarket_data_trades_with_retries(
+            [condition_id],
+            limit,
+            offset,
+            side,
+            timeout,
+            proxy,
+            fetch_json,
+            skip_errors,
+            errors,
+            retries,
+        )
         for trade in trades:
             if isinstance(trade, dict) and not (trade.get("conditionId") or trade.get("condition_id")):
                 trade["conditionId"] = condition_id
@@ -321,6 +348,40 @@ def _fetch_polymarket_data_trades_per_market(
     for condition_id in condition_ids:
         rows.extend(rows_by_condition.get(condition_id, []))
     return rows
+
+
+def _fetch_polymarket_data_trades_with_retries(
+    condition_ids: List[str],
+    limit: int,
+    offset: int,
+    side: Optional[str],
+    timeout: float,
+    proxy: Optional[str],
+    fetch_json: Callable[[str, float, Optional[str]], object],
+    skip_errors: bool,
+    errors: Optional[list],
+    retries: int,
+) -> List[dict]:
+    url = _polymarket_data_trades_url(condition_ids, limit, offset, side)
+    attempts = retries + 1
+    for attempt in range(attempts):
+        try:
+            response = fetch_json(url, timeout, proxy)
+            return _polymarket_data_trade_rows_from_response(response)
+        except Exception as exc:
+            if attempt < retries:
+                continue
+            if not skip_errors:
+                raise
+            _append_collection_error(
+                errors,
+                "polymarket_data_trade_fetch_error",
+                market_id=",".join(condition_ids),
+                message=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            return []
+    return []
 
 
 def _polymarket_data_trades_url(

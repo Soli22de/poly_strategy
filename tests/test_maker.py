@@ -225,6 +225,25 @@ class MakerTests(unittest.TestCase):
         self.assertGreater(row["maker_edge_per_share"], 0.005)
         self.assertIn("requires_fast_hedge_after_fill", row["risk_flags"])
 
+    def test_maker_hedge_scan_ignores_crossed_single_token_books(self):
+        snapshots = [
+            _snapshot("a", no_bid=0.66, no_ask=0.68),
+            _snapshot("b", no_bid=0.70, no_ask=0.60),
+            _snapshot("c", no_bid=0.62, no_ask=0.64),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            report = maker_hedge_scan_report(snapshot_path, gamma_path=gamma_path, tick_size=0.01)
+
+        self.assertEqual(report["candidate_count"], 0)
+
     def test_maker_hedge_sim_counts_completed_hedge(self):
         rows = [
             _snapshot("a", no_bid=0.66, no_ask=0.68, ts="2026-05-10T00:00:00Z"),

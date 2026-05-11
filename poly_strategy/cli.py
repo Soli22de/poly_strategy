@@ -169,6 +169,7 @@ def main(argv=None) -> int:
                 market_ids.extend(_read_lines(Path(args.market_ids_file)))
             if args.hybrid_scan:
                 market_ids.extend(_market_ids_from_hybrid_scan(Path(args.hybrid_scan), args.top_markets))
+            collection_errors = []
             count = collect_polymarket_data_trades(
                 Path(args.out),
                 Path(args.gamma),
@@ -180,8 +181,11 @@ def main(argv=None) -> int:
                 offset=args.offset,
                 per_market=args.per_market,
                 max_workers=args.trade_workers,
+                skip_errors=args.skip_errors,
+                errors=collection_errors,
+                retries=args.retries,
             )
-            print(f"wrote={count} out={args.out}")
+            print(f"wrote={count} errors={len(collection_errors)} out={args.out}")
             return 0
         if args.command == "collect-kalshi":
             if args.all_pages:
@@ -1169,6 +1173,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="request each condition ID separately so active markets do not crowd out quieter ones",
     )
     collect_trades.add_argument("--trade-workers", type=int, default=1, help="parallel trade requests when --per-market is set")
+    collect_trades.add_argument("--skip-errors", action="store_true", help="skip trade fetch errors instead of failing the run")
+    collect_trades.add_argument("--retries", type=int, default=0, help="retry failed trade fetch requests this many times")
     collect_trades.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     collect_trades.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
 

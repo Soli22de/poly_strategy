@@ -216,6 +216,57 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual([row["market_id"] for row in rows], ["m1", "m2"])
         self.assertEqual([row["asset_id"] for row in rows], ["yes-a", "yes-b"])
 
+    def test_collect_polymarket_data_trades_can_skip_per_market_errors(self):
+        calls = []
+
+        def fetch_json(url, timeout, proxy):
+            calls.append(url)
+            if "market=0xabc" in url:
+                raise TimeoutError("slow")
+            return [
+                {
+                    "conditionId": "0xdef",
+                    "asset": "yes-b",
+                    "side": "SELL",
+                    "price": 0.42,
+                    "size": 4,
+                    "timestamp": 1778371240,
+                }
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "trades.ndjson"
+            gamma.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "raw_polymarket_gamma_market", "raw": {"id": "m1", "conditionId": "0xabc"}}),
+                        json.dumps({"type": "raw_polymarket_gamma_market", "raw": {"id": "m2", "conditionId": "0xdef"}}),
+                    ]
+                )
+                + "\n"
+            )
+            errors = []
+
+            count = collect_polymarket_data_trades(
+                out,
+                gamma,
+                ["m1", "m2"],
+                limit=25,
+                timeout=7,
+                per_market=True,
+                skip_errors=True,
+                errors=errors,
+                retries=1,
+                fetch_json=fetch_json,
+            )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(errors[0]["kind"], "polymarket_data_trade_fetch_error")
+        self.assertEqual(rows[0]["market_id"], "m2")
+
     def test_collect_polymarket_gamma_pages_uses_offsets(self):
         calls = []
 
