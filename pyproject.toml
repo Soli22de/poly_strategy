@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poly-strategy"
+version = "0.1.0"
+description = "Prediction-market research toolkit for collection, replay, and dry-run validation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+live = ["websockets>=16.0"]
+
+[project.scripts]
+poly-strategy = "poly_strategy.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["poly_strategy*"]
+
