@@ -31,6 +31,7 @@ KALSHI_ORDERBOOKS="${CROSS_PLATFORM_KALSHI_ORDERBOOKS:-data/cross-platform-kalsh
 FINAL_KALSHI_ORDERBOOKS="${CROSS_PLATFORM_FINAL_KALSHI_ORDERBOOKS:-data/cross-platform-verified-kalshi-orderbooks.ndjson}"
 SIGNALS="${CROSS_PLATFORM_SIGNALS:-data/cross-platform-signals-expanded.ndjson}"
 CROSS_PLATFORM_CAPITAL="${CROSS_PLATFORM_MAX_CAPITAL_PER_TRADE:-${BANKROLL:-100}}"
+STEP_TIMEOUT="${CROSS_PLATFORM_STEP_TIMEOUT:-300}"
 
 PROXY_ARG=()
 if [[ -n "${PROXY:-}" ]]; then
@@ -64,14 +65,16 @@ run_with_timeout() {
   wait "$pid"
 }
 
-"$PYTHON_BIN" -m poly_strategy.cli collect-kalshi-event-markets \
+run_with_timeout "$STEP_TIMEOUT" \
+  "$PYTHON_BIN" -m poly_strategy.cli collect-kalshi-event-markets \
   --candidates "$CANDIDATES" \
   --out "$KALSHI_MARKETS" \
   --limit "${CROSS_PLATFORM_KALSHI_LIMIT:-1000}" \
   --timeout "${CROSS_PLATFORM_TIMEOUT:-20}" \
   "${PROXY_ARG[@]}"
 
-"$PYTHON_BIN" -m poly_strategy.cli expand-cross-platform-candidates \
+run_with_timeout "$STEP_TIMEOUT" \
+  "$PYTHON_BIN" -m poly_strategy.cli expand-cross-platform-candidates \
   --candidates "$CANDIDATES" \
   --kalshi-markets "$KALSHI_MARKETS" \
   --polymarket-gamma "$GAMMA" \
@@ -79,7 +82,8 @@ run_with_timeout() {
   --top "${CROSS_PLATFORM_EXPANDED_TOP:-500}" \
   --min-score "${CROSS_PLATFORM_EXPANDED_MIN_SCORE:-0}"
 
-"$PYTHON_BIN" -m poly_strategy.cli scan-cross-platform-once \
+run_with_timeout "$STEP_TIMEOUT" \
+  "$PYTHON_BIN" -m poly_strategy.cli scan-cross-platform-once \
   --matches "$EXPANDED_MATCHES" \
   --gamma "$GAMMA" \
   --snapshots-out "$SNAPSHOTS" \
@@ -91,7 +95,8 @@ run_with_timeout() {
   --min-net-edge "${CROSS_PLATFORM_PREVERIFY_MIN_EDGE:-0.005}" \
   --include-unverified
 
-"$PYTHON_BIN" -m poly_strategy.cli filter-cross-platform-opportunities \
+run_with_timeout "$STEP_TIMEOUT" \
+  "$PYTHON_BIN" -m poly_strategy.cli filter-cross-platform-opportunities \
   --scan "$PREVERIFY_SCAN" \
   --matches "$EXPANDED_MATCHES" \
   --out "$OPPORTUNITY_CANDIDATES" \
@@ -115,7 +120,8 @@ run_with_timeout "${CROSS_PLATFORM_VERIFY_COMMAND_TIMEOUT:-900}" \
   --verified-only \
   --continue-on-error
 
-"$PYTHON_BIN" -m poly_strategy.cli scan-cross-platform-once \
+run_with_timeout "$STEP_TIMEOUT" \
+  "$PYTHON_BIN" -m poly_strategy.cli scan-cross-platform-once \
   --matches "$VERIFIED_MATCHES" \
   --gamma "$GAMMA" \
   --snapshots-out "$FINAL_SNAPSHOTS" \
