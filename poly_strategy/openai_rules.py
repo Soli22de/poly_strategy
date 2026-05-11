@@ -11,6 +11,7 @@ from poly_strategy.rule_discovery import MarketText, RelationCandidate, market_t
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODE = "responses"
 DEFAULT_CHAT_RESPONSE_FORMAT = "json_object"
+DEFAULT_CHAT_STREAM = True
 
 
 def _model_supports_reasoning(model: str) -> bool:
@@ -43,6 +44,19 @@ def _optional_float(value: Optional[object]) -> Optional[float]:
     if isinstance(value, str) and value.strip().lower() in {"", "none", "off", "disabled"}:
         return None
     return float(value)
+
+
+def _normalize_bool(value: Optional[object], default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "disabled", "none"}:
+        return False
+    raise OpenAIConfigError(f"unsupported boolean value: {value!r}")
 
 
 def _normalize_proxy_url(proxy: Optional[str]) -> Optional[str]:
@@ -163,6 +177,7 @@ class OpenAIRuleDiscoveryClient:
         verbosity: Optional[str] = None,
         api_mode: Optional[str] = None,
         chat_response_format: Optional[str] = None,
+        chat_stream: Optional[bool] = None,
         temperature: Optional[float] = None,
         proxy: Optional[str] = None,
         transport: Optional[Callable[[dict, float], dict]] = None,
@@ -179,6 +194,8 @@ class OpenAIRuleDiscoveryClient:
         self.verbosity = verbosity
         self.api_mode = _normalize_api_mode(api_mode)
         self.chat_response_format = _normalize_chat_response_format(chat_response_format)
+        stream_value = os.environ.get("OPENAI_CHAT_STREAM") if chat_stream is None else chat_stream
+        self.chat_stream = _normalize_bool(stream_value, DEFAULT_CHAT_STREAM)
         temperature_value = os.environ.get("OPENAI_TEMPERATURE") if temperature is None else temperature
         self.temperature = _optional_float(0.0 if temperature_value is None else temperature_value)
         self.proxy = _normalize_proxy_url(proxy or os.environ.get("OPENAI_PROXY") or os.environ.get("PROXY"))
@@ -300,18 +317,23 @@ class OpenAIRuleDiscoveryClient:
             return json.loads(response.read().decode("utf-8"))
 
     def _post_chat_completions(self, payload: dict, timeout: float) -> dict:
+        request_payload = dict(payload)
+        if self.chat_stream:
+            request_payload["stream"] = True
         request = Request(
             _chat_completions_url(self.base_url),
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(request_payload).encode("utf-8"),
             headers={
                 "authorization": f"Bearer {self.api_key}",
                 "content-type": "application/json",
-                "accept": "application/json",
+                "accept": "text/event-stream" if self.chat_stream else "application/json",
                 "user-agent": "poly-strategy/0.1",
             },
             method="POST",
         )
         with self._open_request(request, timeout) as response:
+            if self.chat_stream:
+                return _parse_chat_stream_response(response)
             return json.loads(response.read().decode("utf-8"))
 
     def _open_request(self, request: Request, timeout: float):
@@ -620,6 +642,87 @@ def _chat_completions_url(base_url: str) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/chat/completions"
     return f"{normalized}/v1/chat/completions"
+
+
+def _parse_chat_stream_response(response) -> dict:
+    content_parts = []
+    for data in _iter_sse_data(response):
+        if data == "[DONE]":
+            break
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise OpenAIResponseError("OpenAI chat stream emitted invalid JSON") from exc
+        content = _extract_chat_stream_content(event)
+        if content:
+            content_parts.append(content)
+    return {"choices": [{"message": {"content": "".join(content_parts)}}]}
+
+
+def _iter_sse_data(response):
+    data_lines = []
+    for raw_chunk in response:
+        if isinstance(raw_chunk, bytes):
+            chunk = raw_chunk.decode("utf-8", errors="replace")
+        else:
+            chunk = str(raw_chunk)
+        for line in chunk.splitlines():
+            line = line.rstrip("\r\n")
+            if not line:
+                if data_lines:
+                    yield "\n".join(data_lines)
+                    data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data_lines.append(line[5:].lstrip())
+    if data_lines:
+        yield "\n".join(data_lines)
+
+
+def _extract_chat_stream_content(event: dict) -> str:
+    choices = event.get("choices")
+    if not isinstance(choices, list):
+        return ""
+    parts = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            content = _content_value_to_text(delta.get("content"))
+            if content:
+                parts.append(content)
+            text = _content_value_to_text(delta.get("text"))
+            if text:
+                parts.append(text)
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = _content_value_to_text(message.get("content"))
+            if content:
+                parts.append(content)
+        text = _content_value_to_text(choice.get("text"))
+        if text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _content_value_to_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
 
 
 def _extract_output_text(response: dict) -> str:

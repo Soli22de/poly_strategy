@@ -100,7 +100,13 @@ class OpenAIRulesTests(unittest.TestCase):
                 self.calls.append((request, timeout))
                 return FakeResponse()
 
-        client = OpenAIRuleDiscoveryClient(model="test-model", api_key="test-key", api_mode="chat", proxy="127.0.0.1:10808")
+        client = OpenAIRuleDiscoveryClient(
+            model="test-model",
+            api_key="test-key",
+            api_mode="chat",
+            proxy="127.0.0.1:10808",
+            chat_stream=False,
+        )
         fake_opener = FakeOpener()
         client._opener = fake_opener
 
@@ -109,6 +115,66 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(response["choices"][0]["message"]["content"], "{\"relations\":[]}")
         self.assertEqual(len(fake_opener.calls), 1)
         self.assertEqual(fake_opener.calls[0][1], 12)
+
+    def test_chat_post_defaults_to_streaming(self):
+        class FakeStreamResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def __iter__(self):
+                events = [
+                    {"choices": [{"delta": {"content": "{\"relations\":["}}]},
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": (
+                                        "{\"relation_type\":\"implies\","
+                                        "\"market_a_id\":\"a\","
+                                        "\"market_b_id\":\"b\","
+                                        "\"direction\":\"a_implies_b\","
+                                        "\"confidence\":0.99,"
+                                        "\"trade_allowed\":true,"
+                                        "\"risk_flags\":[],"
+                                        "\"reason\":\"a implies b\"}"
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                    {"choices": [{"delta": {"content": "]}"}}]},
+                ]
+                lines = [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in events]
+                lines.append(b"data: [DONE]\n\n")
+                return iter(lines)
+
+        class FakeOpener:
+            def __init__(self):
+                self.calls = []
+
+            def open(self, request, timeout):
+                self.calls.append((request, timeout))
+                return FakeStreamResponse()
+
+        client = OpenAIRuleDiscoveryClient(model="test-model", api_key="test-key", api_mode="chat")
+        fake_opener = FakeOpener()
+        client._opener = fake_opener
+
+        response = client._post_chat_completions({"model": "test-model", "messages": []}, timeout=12)
+
+        payload = json.loads(fake_opener.calls[0][0].data.decode("utf-8"))
+        self.assertTrue(payload["stream"])
+        self.assertEqual(fake_opener.calls[0][0].get_header("Accept"), "text/event-stream")
+        self.assertEqual(json.loads(response["choices"][0]["message"]["content"])["relations"][0]["market_a_id"], "a")
+
+    def test_chat_stream_can_be_disabled_from_environment(self):
+        with patch.dict(os.environ, {"OPENAI_CHAT_STREAM": "0"}, clear=True):
+            client = OpenAIRuleDiscoveryClient(model="test-model", api_key="test-key", api_mode="chat")
+
+        self.assertFalse(client.chat_stream)
 
     def test_verify_group_can_use_chat_completions_format(self):
         client = OpenAIExhaustiveGroupVerifierClient(model="test-model", api_key="test-key", api_mode="chat")
