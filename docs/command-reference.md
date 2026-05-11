@@ -51,7 +51,7 @@ Discover conservative implication rules from raw Gamma market metadata with an O
 ```bash
 export OPENAI_API_KEY=...
 export OPENAI_MODEL=...
-export OPENAI_BASE_URL=https://api.wwcloud.app
+export OPENAI_BASE_URL=https://api.openai.com/v1
 
 python3 -m poly_strategy.cli discover-rules \
   --raw data/polymarket-gamma.ndjson \
@@ -70,7 +70,7 @@ python3 -m poly_strategy.cli discover-rules \
   --raw data/polymarket-gamma.ndjson \
   --out rules/candidate-implications.json \
   --model MODEL_NAME \
-  --base-url https://api.wwcloud.app
+  --base-url https://api.openai.com/v1
 ```
 
 The LLM stage only proposes semantic relations. It does not place trades and does not receive orderbook prices.
@@ -110,7 +110,7 @@ python3 -m poly_strategy.cli verify-exhaustive-groups \
   --rules-out rules/candidate-implications-with-groups.json \
   --snapshots data/paper-monitor-snapshots.ndjson \
   --model gpt-5.5 \
-  --base-url https://api.wwcloud.app \
+  --base-url https://api.openai.com/v1 \
   --min-net-edge 0.002 \
   --top 5 \
   --report-out data/exhaustive-group-verification.json
@@ -126,7 +126,7 @@ python3 -m poly_strategy.cli discover-rules \
   --out rules/candidate-implications.json \
   --cache rules/candidate-implications.json \
   --model gpt-5.5 \
-  --base-url https://api.wwcloud.app
+  --base-url https://api.openai.com/v1
 ```
 
 New rule files include `processed_market_ids`, so a later incremental run skips markets that were already reviewed even if the LLM found no relation for them. If the cache fully covers the raw input, `discover-rules --cache ...` can refresh the normalized rule file without an API call or model.

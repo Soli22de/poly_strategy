@@ -228,7 +228,7 @@ Environment:
 
 - `OPENAI_API_KEY` is required for real API calls.
 - `OPENAI_MODEL` may provide a default model if `--model` is omitted.
-- `OPENAI_BASE_URL` may point to an OpenAI-compatible endpoint, such as `https://api.wwcloud.app`.
+- `OPENAI_BASE_URL` may point to an OpenAI-compatible endpoint, such as `https://api.openai.com/v1`.
 - `HTTPS_PROXY` or existing CLI proxy support can be added later if needed.
 
 The first implementation should also support a no-network path for tests by injecting a fake client, not by calling the OpenAI API in unit tests.

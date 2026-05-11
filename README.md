@@ -1,5 +1,8 @@
 # poly_strategy
 
+[![CI](https://github.com/WW-shan/poly_strategy/actions/workflows/ci.yml/badge.svg)](https://github.com/WW-shan/poly_strategy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Prediction-market research toolkit for collecting market data, replaying snapshots, and validating dry-run opportunities.
 
 The repository is organized for research, paper trading, and guarded execution planning. Live execution stays behind explicit keys and risk checks.
@@ -38,9 +41,11 @@ python -m poly_strategy.cli collect-polymarket --out data/polymarket-gamma.ndjso
 - [Repository layout](docs/repository-layout.md)
 - [Security](docs/security.md)
 - [Command reference](docs/command-reference.md)
+- [Changelog](CHANGELOG.md)
 
 ## Notes
 
 - Keep `.env.local`, generated snapshots, logs, and other runtime artifacts out of git.
 - The repo ships with dry-run workflows and optional live integrations, but no secrets.
 - Licensed under MIT. See [LICENSE](LICENSE).
+- Current release: `v0.1.0`.
