@@ -11,6 +11,7 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 POLYMARKET_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 POLYMARKET_CLOB_BOOKS_URL = "https://clob.polymarket.com/books"
+POLYMARKET_DATA_TRADES_URL = "https://data-api.polymarket.com/trades"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
 KALSHI_DEFAULT_TAKER_FEE_RATE = 0.07
 
@@ -207,6 +208,64 @@ def collect_polymarket_books(path: Path, token_ids: Iterable[str], timeout: floa
                 )
                 + "\n"
             )
+            count += 1
+    return count
+
+
+def collect_polymarket_data_trades(
+    path: Path,
+    gamma_path: Path,
+    market_ids: Iterable[str],
+    limit: int,
+    timeout: float,
+    proxy: Optional[str] = None,
+    side: Optional[str] = None,
+    offset: int = 0,
+    fetch_json: Optional[Callable[[str, float, Optional[str]], object]] = None,
+) -> int:
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+
+    markets = raw_gamma_markets_from_ndjson(gamma_path)
+    condition_to_market_id = _condition_ids_for_market_ids(markets, market_ids)
+    if not condition_to_market_id:
+        return 0
+
+    params = {
+        "market": ",".join(condition_to_market_id),
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    if side:
+        params["side"] = str(side).upper()
+    fetch = fetch_json or _fetch_json
+    response = fetch(f"{POLYMARKET_DATA_TRADES_URL}?{urlencode(params)}", timeout, proxy)
+    trades = response if isinstance(response, list) else (response or {}).get("trades")
+    if not isinstance(trades, list):
+        raise RuntimeError("unexpected Polymarket data trades response")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with path.open("a") as handle:
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            condition_id = str(trade.get("conditionId") or trade.get("condition_id") or "").strip()
+            row = {
+                "ts": _utc_now(),
+                "type": "raw_polymarket_data_trade",
+                "market_id": condition_to_market_id.get(condition_id, condition_id),
+                "condition_id": condition_id,
+                "asset_id": str(trade.get("asset") or trade.get("asset_id") or "").strip(),
+                "side": str(trade.get("side") or "").upper(),
+                "price": _maybe_float(trade.get("price")),
+                "size": _maybe_float(trade.get("size")),
+                "trade_ts": _trade_timestamp_to_iso(trade.get("timestamp")),
+                "raw": trade,
+            }
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
             count += 1
     return count
 
@@ -1026,6 +1085,28 @@ def market_id_alias_map(markets: Iterable[dict]) -> dict:
     return alias_map
 
 
+def _condition_ids_for_market_ids(markets: Iterable[dict], market_ids: Iterable[str]) -> dict:
+    markets = list(markets)
+    selected = {str(market_id).strip() for market_id in market_ids if str(market_id).strip()}
+    if not selected:
+        return {}
+    alias_map = market_id_alias_map(markets)
+    canonical_selected = {alias_map.get(market_id, market_id) for market_id in selected}
+    condition_to_market_id = {}
+    for market in markets:
+        market_id = canonical_market_id(market)
+        condition_id = str(market.get("conditionId") or "").strip()
+        if not market_id or not condition_id:
+            continue
+        aliases = market_id_aliases(market)
+        if market_id in canonical_selected or aliases & selected:
+            condition_to_market_id[condition_id] = market_id
+    for market_id in selected:
+        if market_id.lower().startswith("0x") and market_id not in condition_to_market_id:
+            condition_to_market_id[market_id] = market_id
+    return condition_to_market_id
+
+
 def _add_if_present(target: set, row: dict, key: str) -> None:
     value = row.get(key)
     if value:
@@ -1091,6 +1172,24 @@ def _post_json(url: str, payload, timeout: float, proxy: Optional[str] = None):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _trade_timestamp_to_iso(value) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OSError):
+        return str(value)
+
+
+def _maybe_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_proxy(proxy: str) -> str:

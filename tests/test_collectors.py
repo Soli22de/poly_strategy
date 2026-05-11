@@ -11,6 +11,7 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_market_ids,
     collect_polymarket_binary_snapshots_for_markets,
     collect_polymarket_binary_snapshots_loop,
+    collect_polymarket_data_trades,
     collect_polymarket_gamma_pages,
     collect_polymarket_gamma_markets_by_id,
     fetch_polymarket_books_by_token_id,
@@ -89,6 +90,59 @@ class CollectorTests(unittest.TestCase):
 
         self.assertEqual(count, 0)
         self.assertEqual(errors[0]["kind"], "gamma_market_fetch_error")
+
+    def test_collect_polymarket_data_trades_maps_condition_ids(self):
+        calls = []
+
+        def fetch_json(url, timeout, proxy):
+            calls.append((url, timeout, proxy))
+            return [
+                {
+                    "conditionId": "0xabc",
+                    "asset": "no-token",
+                    "side": "SELL",
+                    "price": 0.65,
+                    "size": 4,
+                    "timestamp": 1778371230,
+                    "transactionHash": "0xtrade",
+                }
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "trades.ndjson"
+            gamma.write_text(
+                json.dumps(
+                    {
+                        "type": "raw_polymarket_gamma_market",
+                        "market_id": "m1",
+                        "raw": {"id": "m1", "conditionId": "0xabc"},
+                    }
+                )
+                + "\n"
+            )
+
+            count = collect_polymarket_data_trades(
+                out,
+                gamma,
+                ["m1"],
+                limit=25,
+                timeout=7,
+                proxy="127.0.0.1:10808",
+                side="SELL",
+                fetch_json=fetch_json,
+            )
+            row = json.loads(out.read_text().splitlines()[0])
+
+        self.assertEqual(count, 1)
+        self.assertIn("market=0xabc", calls[0][0])
+        self.assertIn("side=SELL", calls[0][0])
+        self.assertEqual(calls[0][1], 7)
+        self.assertEqual(calls[0][2], "127.0.0.1:10808")
+        self.assertEqual(row["type"], "raw_polymarket_data_trade")
+        self.assertEqual(row["market_id"], "m1")
+        self.assertEqual(row["asset_id"], "no-token")
+        self.assertEqual(row["price"], 0.65)
 
     def test_collect_polymarket_gamma_pages_uses_offsets(self):
         calls = []

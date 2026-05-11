@@ -219,6 +219,7 @@ case "$COMMAND" in
     MAKER_HEDGE_SIM_INTERVAL="${MAKER_HEDGE_SIM_INTERVAL:-900}"
     MAKER_HYBRID_SCAN_INTERVAL="${MAKER_HYBRID_SCAN_INTERVAL:-300}"
     MAKER_HYBRID_SIM_INTERVAL="${MAKER_HYBRID_SIM_INTERVAL:-900}"
+    MAKER_HYBRID_TAPE_INTERVAL="${MAKER_HYBRID_TAPE_INTERVAL:-900}"
     CROSS_PLATFORM_SCAN_INTERVAL="${CROSS_PLATFORM_SCAN_INTERVAL:-1800}"
     SUCCESS_STATUS_INTERVAL="${SUCCESS_STATUS_INTERVAL:-60}"
     LOOP_SLEEP="${LOOP_SLEEP:-5}"
@@ -238,6 +239,7 @@ case "$COMMAND" in
     ENABLE_MAKER_HEDGE_SIM="${ENABLE_MAKER_HEDGE_SIM:-1}"
     ENABLE_MAKER_HYBRID_SCAN="${ENABLE_MAKER_HYBRID_SCAN:-1}"
     ENABLE_MAKER_HYBRID_SIM="${ENABLE_MAKER_HYBRID_SIM:-1}"
+    ENABLE_MAKER_HYBRID_TAPE="${ENABLE_MAKER_HYBRID_TAPE:-1}"
     ENABLE_CROSS_PLATFORM_SCAN="${ENABLE_CROSS_PLATFORM_SCAN:-1}"
     ENABLE_SUCCESS_STATUS="${ENABLE_SUCCESS_STATUS:-1}"
 
@@ -258,6 +260,7 @@ case "$COMMAND" in
     next_maker_hedge_sim=0
     next_maker_hybrid_scan=0
     next_maker_hybrid_sim=0
+    next_maker_hybrid_tape=0
     next_cross_platform_scan=0
     next_success_status=0
     discovery_pid=""
@@ -350,6 +353,11 @@ case "$COMMAND" in
       if [[ "$ENABLE_MAKER_HYBRID_SIM" == "1" && "$now" -ge "$next_maker_hybrid_sim" ]]; then
         run_logged maker-hybrid-sim scripts/run_maker_hybrid_sim_once.sh
         next_maker_hybrid_sim=$((now + MAKER_HYBRID_SIM_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_MAKER_HYBRID_TAPE" == "1" && "$now" -ge "$next_maker_hybrid_tape" ]]; then
+        run_logged maker-hybrid-tape scripts/run_maker_hybrid_tape_once.sh
+        next_maker_hybrid_tape=$((now + MAKER_HYBRID_TAPE_INTERVAL))
       fi
 
       if [[ "$ENABLE_CROSS_PLATFORM_SCAN" == "1" && "$now" -ge "$next_cross_platform_scan" ]]; then

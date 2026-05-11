@@ -16,6 +16,7 @@ from poly_strategy.collectors import (
     collect_polymarket_binary_snapshots_for_rules,
     collect_polymarket_binary_snapshots_for_rules_loop,
     collect_polymarket_books,
+    collect_polymarket_data_trades,
     collect_kalshi_markets,
     collect_kalshi_markets_by_event_tickers,
     collect_kalshi_markets_pages,
@@ -68,6 +69,7 @@ from poly_strategy.maker import (
     maker_hedge_sim_report,
     maker_hybrid_scan_report,
     maker_hybrid_sim_report,
+    maker_hybrid_tape_sim_report,
     maker_scan_report,
 )
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
@@ -158,6 +160,24 @@ def main(argv=None) -> int:
                 args.interval,
                 args.iterations,
                 max_workers=args.book_workers,
+            )
+            print(f"wrote={count} out={args.out}")
+            return 0
+        if args.command == "collect-polymarket-trades":
+            market_ids = list(args.market_id or [])
+            if args.market_ids_file:
+                market_ids.extend(_read_lines(Path(args.market_ids_file)))
+            if args.hybrid_scan:
+                market_ids.extend(_market_ids_from_hybrid_scan(Path(args.hybrid_scan), args.top_markets))
+            count = collect_polymarket_data_trades(
+                Path(args.out),
+                Path(args.gamma),
+                market_ids,
+                limit=args.limit,
+                timeout=args.timeout,
+                proxy=args.proxy,
+                side=args.side,
+                offset=args.offset,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -502,6 +522,38 @@ def main(argv=None) -> int:
                 print(
                     f"observations={row['candidate_observation_count']} completed={row['completed_count']} "
                     f"partial={row['partial_maker_fill_count']} unsafe={row['unsafe_fill_count']} out={args.out}"
+                )
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "maker-hybrid-tape-sim":
+            row = maker_hybrid_tape_sim_report(
+                Path(args.snapshots),
+                Path(args.trades),
+                rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
+                tick_size=args.tick_size,
+                min_edge=args.min_edge,
+                min_roi=args.min_roi,
+                max_capital=args.max_capital,
+                max_leg_count=args.max_leg_count,
+                min_maker_legs=args.min_maker_legs,
+                max_maker_legs=args.max_maker_legs,
+                maker_selection_pool_size=args.maker_selection_pool_size,
+                max_maker_combinations=args.max_maker_combinations,
+                quote_mode=args.quote_mode,
+                quote_offset_ticks=args.quote_offset_ticks,
+                horizon_seconds=args.horizon_seconds,
+                max_candidates_per_batch=args.max_candidates_per_batch,
+                top_n=args.top,
+                include_yes_no_pairs=args.include_yes_no_pairs,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(
+                    f"trades={row['trade_count']} observations={row['candidate_observation_count']} "
+                    f"completed={row['completed_count']} out={args.out}"
                 )
             else:
                 print(json.dumps(row, sort_keys=True))
@@ -1094,6 +1146,22 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_binaries.add_argument("--interval", type=float, default=0.0, help="seconds between iterations")
     collect_binaries.add_argument("--book-workers", type=int, default=1, help="parallel CLOB book fetch workers")
 
+    collect_trades = subparsers.add_parser(
+        "collect-polymarket-trades",
+        help="collect Polymarket public trade prints from the Data API for selected Gamma markets",
+    )
+    collect_trades.add_argument("--out", required=True, help="output raw Polymarket trade NDJSON path")
+    collect_trades.add_argument("--gamma", required=True, help="raw Polymarket Gamma NDJSON path")
+    collect_trades.add_argument("--market-id", action="append", help="Gamma market ID or condition ID; can be repeated")
+    collect_trades.add_argument("--market-ids-file", help="newline-delimited Gamma market IDs")
+    collect_trades.add_argument("--hybrid-scan", help="maker-hybrid-scan JSON path; collects markets from top candidates")
+    collect_trades.add_argument("--top-markets", type=int, default=10, help="top hybrid candidates to use for market IDs")
+    collect_trades.add_argument("--limit", type=int, default=500, help="maximum trade rows per request")
+    collect_trades.add_argument("--offset", type=int, default=0, help="Data API pagination offset")
+    collect_trades.add_argument("--side", choices=["BUY", "SELL"], help="optional Data API side filter")
+    collect_trades.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    collect_trades.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
+
     collect_kalshi = subparsers.add_parser("collect-kalshi", help="collect Kalshi market metadata")
     collect_kalshi.add_argument("--out", required=True, help="output raw Kalshi market NDJSON path")
     collect_kalshi.add_argument("--limit", type=int, default=100, help="markets per request")
@@ -1453,6 +1521,36 @@ def _build_parser() -> argparse.ArgumentParser:
     maker_hybrid_sim.add_argument("--max-candidates-per-batch", type=int, default=25, help="top maker hybrid candidates per timestamp")
     maker_hybrid_sim.add_argument("--top", type=int, default=25, help="top simulation results to include")
     maker_hybrid_sim.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired hedges")
+
+    maker_hybrid_tape = subparsers.add_parser(
+        "maker-hybrid-tape-sim",
+        help="validate maker-hybrid candidates against public SELL trade prints before taker hedge",
+    )
+    maker_hybrid_tape.add_argument("--snapshots", required=True, help="historical binary snapshot NDJSON path")
+    maker_hybrid_tape.add_argument("--trades", required=True, help="raw Polymarket data trade NDJSON path")
+    maker_hybrid_tape.add_argument("--rules", help="JSON file with discovered rules")
+    maker_hybrid_tape.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk groups")
+    maker_hybrid_tape.add_argument("--out", help="output maker hybrid tape simulation JSON path; prints JSON when omitted")
+    maker_hybrid_tape.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
+    maker_hybrid_tape.add_argument("--quote-mode", choices=["near_ask", "improve_bid"], default="near_ask")
+    maker_hybrid_tape.add_argument(
+        "--quote-offset-ticks",
+        type=int,
+        default=1,
+        help="for near_ask, quote this many ticks below best ask",
+    )
+    maker_hybrid_tape.add_argument("--min-edge", type=float, default=0.0, help="minimum realized edge after hedge")
+    maker_hybrid_tape.add_argument("--min-roi", type=float, help="minimum expected ROI before simulation")
+    maker_hybrid_tape.add_argument("--max-capital", type=float, help="capital cap used for suggested quantity and expected edge")
+    maker_hybrid_tape.add_argument("--max-leg-count", type=int, default=80, help="maximum basket leg count")
+    maker_hybrid_tape.add_argument("--min-maker-legs", type=int, default=2, help="minimum maker legs that must fill before hedging")
+    maker_hybrid_tape.add_argument("--max-maker-legs", type=int, default=3, help="maximum maker legs that must fill before hedging")
+    maker_hybrid_tape.add_argument("--maker-selection-pool-size", type=int, default=8, help="top maker-saving legs to search")
+    maker_hybrid_tape.add_argument("--max-maker-combinations", type=int, default=25, help="maximum maker leg combinations per basket and k")
+    maker_hybrid_tape.add_argument("--horizon-seconds", type=float, default=300.0, help="seconds after quote time to look for trade prints")
+    maker_hybrid_tape.add_argument("--max-candidates-per-batch", type=int, default=25, help="top maker hybrid candidates per timestamp")
+    maker_hybrid_tape.add_argument("--top", type=int, default=25, help="top simulation results to include")
+    maker_hybrid_tape.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired hedges")
 
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")
@@ -2619,6 +2717,22 @@ def _headers_from_args(values: list) -> dict:
 
 def _read_lines(path: Path) -> list:
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+
+def _market_ids_from_hybrid_scan(path: Path, top_n: int) -> list:
+    if top_n < 1:
+        raise ValueError("--top-markets must be at least 1")
+    row = json.loads(path.read_text())
+    market_ids = []
+    seen = set()
+    for candidate in list(row.get("top") or [])[:top_n]:
+        for market_id in candidate.get("market_ids") or []:
+            normalized = str(market_id).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            market_ids.append(normalized)
+    return market_ids
 
 
 def _chunks(rows: list, size: int) -> list:

@@ -1,5 +1,6 @@
 from collections import defaultdict
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -564,6 +565,118 @@ def maker_hybrid_sim_report(
     }
 
 
+def maker_hybrid_tape_sim_report(
+    snapshots_path: Path,
+    trades_path: Path,
+    rules_path: Optional[Path] = None,
+    gamma_path: Optional[Path] = None,
+    tick_size: float = 0.001,
+    min_edge: float = 0.0,
+    min_roi: Optional[float] = None,
+    max_capital: Optional[float] = None,
+    max_leg_count: int = 80,
+    min_maker_legs: int = 2,
+    max_maker_legs: int = 3,
+    maker_selection_pool_size: int = 8,
+    max_maker_combinations: int = 25,
+    quote_mode: str = "near_ask",
+    horizon_seconds: float = 300.0,
+    max_candidates_per_batch: int = 25,
+    top_n: int = 25,
+    include_yes_no_pairs: bool = False,
+    quote_offset_ticks: int = 1,
+) -> dict:
+    if tick_size <= 0:
+        raise ValueError("tick_size must be positive")
+    if max_leg_count < 2:
+        raise ValueError("max_leg_count must be at least 2")
+    if min_roi is not None and min_roi < 0:
+        raise ValueError("min_roi must be non-negative")
+    if max_capital is not None and max_capital < 0:
+        raise ValueError("max_capital must be non-negative")
+    if horizon_seconds < 0:
+        raise ValueError("horizon_seconds must be non-negative")
+    if max_candidates_per_batch < 1:
+        raise ValueError("max_candidates_per_batch must be at least 1")
+    if top_n < 0:
+        raise ValueError("top_n must be non-negative")
+    min_maker_legs, max_maker_legs = _normalize_maker_leg_bounds(min_maker_legs, max_maker_legs)
+    maker_selection_pool_size = _normalize_positive_int(maker_selection_pool_size, "maker_selection_pool_size")
+    max_maker_combinations = _normalize_positive_int(max_maker_combinations, "max_maker_combinations")
+    quote_offset_ticks = _normalize_quote_offset_ticks(quote_offset_ticks)
+
+    rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
+    batches = list(snapshot_batches_from_path(snapshots_path))
+    trades = _trade_tape_rows_from_path(trades_path)
+    results = simulate_maker_hybrid_tape_fills(
+        batches,
+        trades,
+        rule_set,
+        tick_size=tick_size,
+        min_edge=min_edge,
+        min_roi=min_roi,
+        max_capital=max_capital,
+        max_leg_count=max_leg_count,
+        min_maker_legs=min_maker_legs,
+        max_maker_legs=max_maker_legs,
+        maker_selection_pool_size=maker_selection_pool_size,
+        max_maker_combinations=max_maker_combinations,
+        quote_mode=quote_mode,
+        quote_offset_ticks=quote_offset_ticks,
+        horizon_seconds=horizon_seconds,
+        max_candidates_per_batch=max_candidates_per_batch,
+        include_yes_no_pairs=include_yes_no_pairs,
+    )
+
+    completed = [row for row in results if row["completed"]]
+    unsafe = [row for row in results if row["maker_filled"] and not row["completed"]]
+    partial = [row for row in results if row["partial_maker_fill"] and not row["maker_filled"]]
+    no_fill = [row for row in results if not row["maker_filled"] and not row["partial_maker_fill"]]
+    completed_edge_at_cap = sum(float(row.get("realized_edge_at_cap") or 0.0) for row in completed)
+    unique_completed = _unique_tape_completed_rows(completed)
+    unique_completed_edge_at_cap = sum(float(row.get("realized_edge_at_cap") or 0.0) for row in unique_completed)
+    return {
+        "type": "maker_hybrid_tape_sim_report",
+        "snapshots_path": str(snapshots_path),
+        "trades_path": str(trades_path),
+        "rules_path": str(rules_path) if rules_path else None,
+        "gamma_path": str(gamma_path) if gamma_path else None,
+        "batch_count": len(batches),
+        "trade_count": len(trades),
+        "candidate_observation_count": len(results),
+        "completed_count": len(completed),
+        "unique_completed_count": len(unique_completed),
+        "unsafe_fill_count": len(unsafe),
+        "partial_maker_fill_count": len(partial),
+        "no_fill_count": len(no_fill),
+        "completion_rate": len(completed) / len(results) if results else 0.0,
+        "unsafe_fill_rate": len(unsafe) / len(results) if results else 0.0,
+        "partial_maker_fill_rate": len(partial) / len(results) if results else 0.0,
+        "completed_realized_edge_at_cap": completed_edge_at_cap,
+        "unique_completed_realized_edge_at_cap": unique_completed_edge_at_cap,
+        "max_completed_realized_edge_at_cap": max(
+            (float(row.get("realized_edge_at_cap") or 0.0) for row in completed),
+            default=0.0,
+        ),
+        "min_maker_legs": min_maker_legs,
+        "max_maker_legs": max_maker_legs,
+        "maker_selection_pool_size": maker_selection_pool_size,
+        "max_maker_combinations": max_maker_combinations,
+        "quote_mode": _normalize_quote_mode(quote_mode),
+        "quote_offset_ticks": quote_offset_ticks,
+        "fill_model": "trade_tape_sell_through",
+        "diagnostic_only": True,
+        "diagnostic_warning": "public trade prints can prove sell-through, but queue position is still uncertain without live order fills",
+        "by_kind": _hybrid_fill_summary_by_kind(results),
+        "top_completed": sorted(completed, key=_hybrid_result_sort_key)[:top_n],
+        "top_unique_completed": sorted(unique_completed, key=_hybrid_result_sort_key)[:top_n],
+        "top_unsafe": sorted(unsafe, key=_hybrid_result_sort_key)[:top_n],
+        "top_partial": sorted(partial, key=_hybrid_result_sort_key)[:top_n],
+        "top_unfilled": sorted(no_fill, key=_hybrid_result_sort_key)[:top_n],
+        "status": "tape_positive_ev_candidate_found" if unique_completed_edge_at_cap > 0 and unique_completed else "no_tape_positive_ev_candidate",
+    }
+
+
 def simulate_maker_fills(
     batches: List[List[BinaryMarketSnapshot]],
     rule_set: RuleSet,
@@ -685,6 +798,65 @@ def simulate_maker_hybrids(
         future_batches = _future_batches_within_horizon(batches, index, horizon_seconds)
         for candidate in candidates:
             results.append(_simulate_hybrid_candidate(candidate, future_batches, min_edge=min_edge, fill_model=fill_model))
+    return results
+
+
+def simulate_maker_hybrid_tape_fills(
+    batches: List[List[BinaryMarketSnapshot]],
+    trades: List[dict],
+    rule_set: RuleSet,
+    tick_size: float = 0.001,
+    min_edge: float = 0.0,
+    min_roi: Optional[float] = None,
+    max_capital: Optional[float] = None,
+    max_leg_count: int = 80,
+    min_maker_legs: int = 2,
+    max_maker_legs: int = 3,
+    maker_selection_pool_size: int = 8,
+    max_maker_combinations: int = 25,
+    quote_mode: str = "near_ask",
+    quote_offset_ticks: int = 1,
+    horizon_seconds: float = 300.0,
+    max_candidates_per_batch: int = 25,
+    include_yes_no_pairs: bool = False,
+) -> List[dict]:
+    min_maker_legs, max_maker_legs = _normalize_maker_leg_bounds(min_maker_legs, max_maker_legs)
+    maker_selection_pool_size = _normalize_positive_int(maker_selection_pool_size, "maker_selection_pool_size")
+    max_maker_combinations = _normalize_positive_int(max_maker_combinations, "max_maker_combinations")
+    min_dt = datetime.min.replace(tzinfo=timezone.utc)
+    ordered_trades = sorted(trades, key=lambda row: (_parse_ts(row.get("trade_ts")) or min_dt, row.get("asset_id") or ""))
+    results = []
+    for index, batch in enumerate(batches[:-1]):
+        candidates = scan_maker_hybrid_candidates(
+            batch,
+            rule_set,
+            tick_size=tick_size,
+            min_edge=min_edge,
+            min_roi=min_roi,
+            max_capital=max_capital,
+            max_leg_count=max_leg_count,
+            min_maker_legs=min_maker_legs,
+            max_maker_legs=max_maker_legs,
+            maker_selection_pool_size=maker_selection_pool_size,
+            max_maker_combinations=max_maker_combinations,
+            include_yes_no_pairs=include_yes_no_pairs,
+            quote_mode=quote_mode,
+            quote_offset_ticks=quote_offset_ticks,
+        )
+        candidates = _dedupe_hybrid_candidates(candidates)[:max_candidates_per_batch]
+        if not candidates:
+            continue
+        future_batches = _future_batches_within_horizon(batches, index, horizon_seconds)
+        for candidate in candidates:
+            results.append(
+                _simulate_hybrid_candidate_with_trade_tape(
+                    candidate,
+                    ordered_trades,
+                    future_batches,
+                    horizon_seconds=horizon_seconds,
+                    min_edge=min_edge,
+                )
+            )
     return results
 
 
@@ -2038,6 +2210,98 @@ def _simulate_hybrid_candidate(
     return row
 
 
+def _simulate_hybrid_candidate_with_trade_tape(
+    candidate: dict,
+    trades: List[dict],
+    future_batches: List[List[BinaryMarketSnapshot]],
+    horizon_seconds: float,
+    min_edge: float,
+) -> dict:
+    start_dt = _parse_ts(candidate.get("ts"))
+    deadline_dt = None
+    if start_dt is not None and horizon_seconds > 0:
+        deadline_dt = start_dt.timestamp() + horizon_seconds
+
+    maker_fills = []
+    for index, maker_leg in enumerate(candidate.get("maker_legs") or []):
+        fill = _trade_tape_fill_for_leg(maker_leg, trades, start_dt, deadline_dt)
+        if fill is not None:
+            maker_fills.append({"leg_index": int(maker_leg.get("source_leg_index", index)), **fill})
+
+    maker_leg_count = int(candidate.get("maker_leg_count") or len(candidate.get("maker_legs") or []))
+    filled_maker_count = len(maker_fills)
+    maker_filled = filled_maker_count == maker_leg_count and maker_leg_count > 0
+    partial_maker_fill = 0 < filled_maker_count < maker_leg_count
+    hedge_rows = []
+    realized_cost = None
+    realized_edge = None
+    rejection_reason = "maker_not_filled"
+    quantity = float(candidate.get("suggested_quantity") or 0.0)
+    maker_fill_ts = None
+
+    if maker_filled:
+        maker_fills.sort(key=lambda row: row.get("fill_ts") or "")
+        maker_fill_ts = maker_fills[-1].get("fill_ts")
+        trade_quantity = min((float(fill.get("trade_size") or 0.0) for fill in maker_fills), default=0.0)
+        if trade_quantity > 0 and quantity > 0:
+            quantity = min(quantity, trade_quantity)
+        hedge_batch = _first_batch_at_or_after(future_batches, maker_fill_ts)
+        if hedge_batch is None:
+            rejection_reason = "missing_hedge_snapshot_after_tape_fill"
+        else:
+            hedge_rows = _hedge_rows_at_fill(candidate, hedge_batch, quantity)
+            if not hedge_rows:
+                rejection_reason = "missing_or_insufficient_hedge_liquidity"
+            else:
+                hedge_cost = sum(float(row.get("cost_per_share") or 0.0) for row in hedge_rows)
+                maker_cost = sum(float(leg.get("limit_price") or 0.0) for leg in candidate.get("maker_legs") or [])
+                realized_cost = maker_cost + hedge_cost
+                realized_edge = float(candidate.get("payout_per_share") or 0.0) - realized_cost
+                rejection_reason = "hedge_edge_below_min_edge" if realized_edge <= min_edge else None
+
+    completed = bool(maker_filled and realized_edge is not None and realized_edge > min_edge and quantity > 0)
+    realized_edge_at_cap = realized_edge * quantity if completed else 0.0
+    unfilled_indices = set(candidate.get("maker_leg_indices") or [])
+    unfilled_indices.difference_update(int(fill.get("leg_index") or 0) for fill in maker_fills)
+    row = {
+        "candidate_key": _hybrid_candidate_identity(candidate),
+        "kind": candidate.get("kind"),
+        "start_ts": candidate.get("ts"),
+        "maker_fill_ts": maker_fill_ts,
+        "completed": completed,
+        "maker_filled": maker_filled,
+        "partial_maker_fill": partial_maker_fill,
+        "rejection_reason": rejection_reason,
+        "maker_leg_indices": candidate.get("maker_leg_indices"),
+        "maker_leg_count": maker_leg_count,
+        "filled_maker_leg_count": filled_maker_count,
+        "hedge_leg_count": candidate.get("hedge_leg_count"),
+        "leg_count": candidate.get("leg_count"),
+        "payout_per_share": candidate.get("payout_per_share"),
+        "expected_edge_per_share": candidate.get("maker_edge_per_share"),
+        "expected_edge_at_cap": candidate.get("expected_edge_at_cap"),
+        "realized_cost_per_share": realized_cost,
+        "realized_edge_per_share": realized_edge,
+        "realized_edge_at_cap": realized_edge_at_cap,
+        "suggested_quantity": candidate.get("suggested_quantity"),
+        "simulated_quantity": quantity,
+        "capital_used_at_cap": (realized_cost * quantity) if completed and realized_cost is not None else 0.0,
+        "maker_capital_at_cap": (sum(float(leg.get("limit_price") or 0.0) for leg in candidate.get("maker_legs") or []) * quantity)
+        if maker_filled
+        else 0.0,
+        "market_ids": candidate.get("market_ids"),
+        "maker_legs": candidate.get("maker_legs"),
+        "hedge_legs": candidate.get("hedge_legs"),
+        "realized_hedge_legs": hedge_rows,
+        "maker_fills": maker_fills,
+        "unfilled_maker_indices": sorted(unfilled_indices),
+        "risk_flags": list(candidate.get("risk_flags") or []) + ["trade_tape_queue_position_uncertain"],
+        "fill_model": "trade_tape_sell_through",
+        "diagnostic_only": True,
+    }
+    return row
+
+
 def _hedge_rows_at_fill(candidate: dict, batch: List[BinaryMarketSnapshot], quantity: float) -> List[dict]:
     by_market_id = {snapshot.market_id: snapshot for snapshot in batch}
     rows = []
@@ -2050,6 +2314,56 @@ def _hedge_rows_at_fill(candidate: dict, batch: List[BinaryMarketSnapshot], quan
             return []
         rows.append(row)
     return rows
+
+
+def _first_batch_at_or_after(batches: List[List[BinaryMarketSnapshot]], ts: Optional[str]) -> Optional[List[BinaryMarketSnapshot]]:
+    if not batches:
+        return None
+    target_dt = _parse_ts(ts)
+    if target_dt is None:
+        return batches[0]
+    for batch in batches:
+        batch_dt = _parse_ts(_batch_ts(batch))
+        if batch_dt is None or batch_dt >= target_dt:
+            return batch
+    return None
+
+
+def _trade_tape_fill_for_leg(
+    maker_leg: dict,
+    trades: List[dict],
+    start_dt,
+    deadline_ts: Optional[float],
+) -> Optional[dict]:
+    token_id = str(maker_leg.get("token_id") or "").strip()
+    limit_price = float(maker_leg.get("limit_price") or 0.0)
+    for trade in trades:
+        if str(trade.get("asset_id") or "").strip() != token_id:
+            continue
+        if str(trade.get("side") or "").upper() != "SELL":
+            continue
+        trade_dt = _parse_ts(trade.get("trade_ts"))
+        if start_dt is not None and trade_dt is not None and trade_dt <= start_dt:
+            continue
+        if deadline_ts is not None and trade_dt is not None and trade_dt.timestamp() > deadline_ts:
+            continue
+        price = float(trade.get("price") or 0.0)
+        if price > limit_price:
+            continue
+        return {
+            "fill_ts": trade.get("trade_ts"),
+            "market_id": maker_leg.get("market_id"),
+            "token": maker_leg.get("token"),
+            "token_id": token_id,
+            "limit_price": limit_price,
+            "trade_price": price,
+            "trade_size": float(trade.get("size") or 0.0),
+            "trade_side": trade.get("side"),
+            "transaction_hash": trade.get("transaction_hash"),
+            "fill_model": "trade_tape_sell_through",
+            "diagnostic_only": True,
+        }
+    return None
 
 
 def _leg_fill_observation(snapshot: BinaryMarketSnapshot, leg: dict) -> Optional[dict]:
@@ -2094,6 +2408,65 @@ def _maker_leg_fill_observation(snapshot: BinaryMarketSnapshot, leg: dict, fill_
         "fill_model": "touch_bid",
         "diagnostic_only": True,
     }
+
+
+def _trade_tape_rows_from_path(path: Path) -> List[dict]:
+    rows = []
+    if not path.exists():
+        return rows
+    with path.open() as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            normalized = _normalize_trade_tape_row(row)
+            if normalized is not None:
+                rows.append(normalized)
+    return rows
+
+
+def _normalize_trade_tape_row(row: dict) -> Optional[dict]:
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else row
+    asset_id = str(row.get("asset_id") or raw.get("asset") or raw.get("asset_id") or "").strip()
+    if not asset_id:
+        return None
+    price = _float_or_none(row.get("price") if row.get("price") is not None else raw.get("price"))
+    if price is None:
+        return None
+    size = _float_or_none(row.get("size") if row.get("size") is not None else raw.get("size")) or 0.0
+    trade_ts = row.get("trade_ts") or _trade_timestamp_to_iso(raw.get("timestamp")) or row.get("ts")
+    return {
+        "market_id": row.get("market_id") or raw.get("market") or raw.get("conditionId"),
+        "condition_id": row.get("condition_id") or raw.get("conditionId"),
+        "asset_id": asset_id,
+        "side": str(row.get("side") or raw.get("side") or "").upper(),
+        "price": price,
+        "size": size,
+        "trade_ts": trade_ts,
+        "transaction_hash": row.get("transaction_hash") or raw.get("transactionHash"),
+    }
+
+
+def _float_or_none(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trade_timestamp_to_iso(value) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OSError):
+        return str(value)
 
 
 def _dedupe_sim_candidates(candidates: List[dict]) -> List[dict]:
@@ -2184,6 +2557,36 @@ def _hybrid_fill_summary_by_kind(rows: List[dict]) -> list:
         item["unsafe_fill_rate"] = item["unsafe_fill_count"] / count if count else 0.0
         item["partial_maker_fill_rate"] = item["partial_maker_fill_count"] / count if count else 0.0
     return sorted(summary.values(), key=lambda row: (-row["completed_count"], -row["max_completed_realized_edge_at_cap"], row["kind"]))
+
+
+def _unique_tape_completed_rows(rows: List[dict]) -> List[dict]:
+    deduped = {}
+    for row in rows:
+        key = _tape_completed_identity(row)
+        previous = deduped.get(key)
+        if previous is None or _hybrid_result_sort_key(row) < _hybrid_result_sort_key(previous):
+            deduped[key] = row
+    return list(deduped.values())
+
+
+def _tape_completed_identity(row: dict) -> tuple:
+    fill_keys = []
+    for fill in row.get("maker_fills") or []:
+        fill_keys.append(
+            (
+                str(fill.get("token_id") or ""),
+                str(fill.get("transaction_hash") or ""),
+                str(fill.get("fill_ts") or ""),
+                float(fill.get("trade_price") or 0.0),
+                float(fill.get("trade_size") or 0.0),
+            )
+        )
+    return (
+        row.get("kind"),
+        tuple(row.get("maker_leg_indices") or []),
+        tuple(sorted(fill_keys)),
+        round(float(row.get("realized_edge_per_share") or 0.0), 9),
+    )
 
 
 def _fill_summary_by_kind(rows: List[dict]) -> list:

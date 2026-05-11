@@ -10,6 +10,7 @@ from poly_strategy.maker import (
     maker_hedge_sim_report,
     maker_hybrid_scan_report,
     maker_hybrid_sim_report,
+    maker_hybrid_tape_sim_report,
     maker_scan_report,
 )
 
@@ -443,6 +444,55 @@ class MakerTests(unittest.TestCase):
         self.assertEqual(touch["completed_count"], 1)
         self.assertTrue(touch["top_completed"][0]["maker_fills"][0]["diagnostic_only"])
 
+    def test_maker_hybrid_tape_sim_requires_sell_trade_prints(self):
+        rows = [
+            _snapshot("a", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.66, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", no_bid=0.63, no_ask=0.66, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", no_bid=0.63, no_ask=0.66, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.65, ts="2026-05-10T00:01:00Z"),
+        ]
+        trades = [
+            _trade("a-no", "SELL", 0.66, 10, "2026-05-10T00:00:30Z"),
+            _trade("c-no", "SELL", 0.65, 10, "2026-05-10T00:00:35Z"),
+            _trade("b-no", "BUY", 0.66, 10, "2026-05-10T00:00:40Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            trades_path = Path(tmp) / "trades.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+            trades_path.write_text("\n".join(json.dumps(row) for row in trades) + "\n")
+
+            report = maker_hybrid_tape_sim_report(
+                snapshot_path,
+                trades_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                min_maker_legs=2,
+                max_maker_legs=2,
+                max_maker_combinations=1,
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(report["status"], "tape_positive_ev_candidate_found")
+        self.assertEqual(report["trade_count"], 3)
+        self.assertEqual(report["completed_count"], 1)
+        self.assertEqual(report["unique_completed_count"], 1)
+        self.assertEqual(len(report["top_unique_completed"]), 1)
+        completed = report["top_completed"][0]
+        self.assertEqual(completed["fill_model"], "trade_tape_sell_through")
+        self.assertEqual(completed["simulated_quantity"], 10)
+        self.assertTrue(completed["diagnostic_only"])
+
 
 def _snapshot(market_id: str, no_bid: float, no_ask: float, ts: str = "2026-05-10T00:00:00Z"):
     yes_bid = max(0.0, 1.0 - no_ask - 0.02)
@@ -455,6 +505,26 @@ def _snapshot(market_id: str, no_bid: float, no_ask: float, ts: str = "2026-05-1
         "fee_rate": 0.05,
         "yes": {"token_id": f"{market_id}-yes", "asks": [[yes_ask, 100]], "bids": [[yes_bid, 100]]},
         "no": {"token_id": f"{market_id}-no", "asks": [[no_ask, 100]], "bids": [[no_bid, 100]]},
+    }
+
+
+def _trade(asset_id: str, side: str, price: float, size: float, ts: str):
+    return {
+        "type": "raw_polymarket_data_trade",
+        "market_id": "m",
+        "condition_id": "0xcondition",
+        "asset_id": asset_id,
+        "side": side,
+        "price": price,
+        "size": size,
+        "trade_ts": ts,
+        "raw": {
+            "asset": asset_id,
+            "side": side,
+            "price": price,
+            "size": size,
+            "timestamp": ts,
+        },
     }
 
 
