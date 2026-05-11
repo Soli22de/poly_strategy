@@ -221,22 +221,25 @@ def fetch_polymarket_books_by_token_id(
     fetch_json: Optional[Callable[[str, float, Optional[str]], dict]] = None,
     post_json: Optional[Callable[[str, object, float, Optional[str]], object]] = None,
     batch_size: int = 500,
+    retry_missing: bool = True,
 ) -> dict:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     fetch = fetch_json or _fetch_json
     post = post_json or _post_json
     ordered_token_ids = list(dict.fromkeys(str(token_id) for token_id in token_ids if token_id))
-    if fetch_json is None and batch_size > 1:
+    if batch_size > 1 and (fetch_json is None or post_json is not None):
         return _fetch_polymarket_books_by_batch(
             ordered_token_ids,
             timeout,
             proxy,
+            fetch,
             post,
             batch_size,
             max_workers,
             skip_errors,
             errors,
+            retry_missing,
         )
 
     def fetch_book(token_id: str) -> dict:
@@ -256,11 +259,13 @@ def _fetch_polymarket_books_by_batch(
     token_ids: list,
     timeout: float,
     proxy: Optional[str],
+    fetch_json: Callable[[str, float, Optional[str]], dict],
     post_json: Callable[[str, object, float, Optional[str]], object],
     batch_size: int,
     max_workers: int,
     skip_errors: bool,
     errors: Optional[list],
+    retry_missing: bool,
 ) -> dict:
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
@@ -282,11 +287,32 @@ def _fetch_polymarket_books_by_batch(
                 books[token_id] = book
         return books
 
+    def fetch_single(token_id: str) -> dict:
+        params = urlencode({"token_id": token_id})
+        return fetch_json(f"{POLYMARKET_CLOB_BOOK_URL}?{params}", timeout, proxy)
+
+    def fill_missing(chunk: list, books: dict) -> dict:
+        if not retry_missing:
+            return books
+        missing_token_ids = [token_id for token_id in chunk if token_id not in books]
+        if not missing_token_ids:
+            return books
+        books.update(
+            _fetch_books_by_token_id(
+                missing_token_ids,
+                fetch_single,
+                max_workers,
+                skip_errors=skip_errors,
+                errors=errors,
+            )
+        )
+        return books
+
     if max_workers == 1 or len(chunks) == 1:
         books = {}
         for chunk in chunks:
             try:
-                books.update(fetch_chunk(chunk))
+                books.update(fill_missing(chunk, fetch_chunk(chunk)))
             except Exception as exc:
                 if not skip_errors:
                     raise
@@ -307,7 +333,7 @@ def _fetch_polymarket_books_by_batch(
         for future in as_completed(futures):
             chunk = futures[future]
             try:
-                books.update(future.result())
+                books.update(fill_missing(chunk, future.result()))
             except Exception as exc:
                 if not skip_errors:
                     raise

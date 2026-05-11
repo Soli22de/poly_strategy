@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from poly_strategy.backtest import RuleSet, load_rule_set, snapshots_from_ndjson_lines
-from poly_strategy.near_miss import near_miss_candidates
+from poly_strategy.near_miss import deterministic_group_exhaustiveness_rejection, near_miss_candidates
 from poly_strategy.recent_lines import read_recent_lines
 from poly_strategy.rule_discovery import MarketText, read_market_texts
 
@@ -98,6 +98,15 @@ def promote_exhaustive_groups(
             report_rows.append(report_row)
             continue
 
+        group_rejection = _candidate_group_wording_rejection(market_ids, market_texts)
+        if group_rejection:
+            rejected_count += 1
+            report_row["status"] = "known_neg_risk_group_not_exhaustive_by_wording"
+            report_row["rejection_reason"] = group_rejection
+            _record_state(state_row, market_ids, "known_neg_risk_group_not_exhaustive_by_wording", report_row, now)
+            report_rows.append(report_row)
+            continue
+
         verification = client.verify_group(markets)
         report_row["verification"] = verification
         if _verification_is_tradeable(verification, min_confidence):
@@ -143,6 +152,7 @@ def potential_exhaustive_group_candidates(
 
     snapshots = _latest_snapshot_batch(snapshots_path)
     rule_set = load_rule_set(rules_path, gamma_path=gamma_path) if rules_path else RuleSet()
+    market_texts = {market.market_id: market for market in read_market_texts(gamma_path)} if gamma_path else {}
     rows = near_miss_candidates(snapshots, rule_set, min_net_edge=min_net_edge)
     rows = [
         row
@@ -158,6 +168,8 @@ def potential_exhaustive_group_candidates(
         group_key = frozenset(market_ids)
         if len(group_key) != len(market_ids) or group_key in seen:
             continue
+        if market_texts and _candidate_group_wording_rejection(market_ids, market_texts):
+            continue
         seen.add(group_key)
         candidates.append(
             {
@@ -170,6 +182,19 @@ def potential_exhaustive_group_candidates(
         if len(candidates) >= top_n:
             break
     return candidates
+
+
+def _candidate_group_wording_rejection(market_ids: List[str], market_texts: dict) -> Optional[str]:
+    markets, missing_market_ids = _markets_for_group(market_texts, market_ids)
+    if missing_market_ids:
+        return None
+    group_ids = [market.neg_risk_market_id for market in markets]
+    if group_ids and all(group_ids) and len(set(group_ids)) == 1:
+        group_id = group_ids[0]
+        known_markets = [market for market in market_texts.values() if market.neg_risk_market_id == group_id]
+        if known_markets:
+            return deterministic_group_exhaustiveness_rejection(known_markets)
+    return deterministic_group_exhaustiveness_rejection(markets)
 
 
 def result_to_row(result: ExhaustiveGroupPromotionResult) -> dict:

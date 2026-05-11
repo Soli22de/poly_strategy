@@ -347,6 +347,34 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(calls[0][2], 7.0)
         self.assertEqual(calls[0][3], "127.0.0.1:10808")
 
+    def test_fetch_polymarket_books_by_token_id_retries_missing_batch_books(self):
+        post_calls = []
+        fetch_calls = []
+
+        def post_json(url, payload, timeout, proxy):
+            post_calls.append((url, payload, timeout, proxy))
+            return [
+                {"asset_id": "token-a", "asks": [{"price": "0.5", "size": "10"}], "bids": []},
+            ]
+
+        def fetch_json(url, timeout, proxy):
+            fetch_calls.append((url, timeout, proxy))
+            return {"asset_id": "token-b", "asks": [{"price": "0.6", "size": "3"}], "bids": []}
+
+        books = fetch_polymarket_books_by_token_id(
+            ["token-a", "token-b"],
+            timeout=7.0,
+            proxy="127.0.0.1:10808",
+            fetch_json=fetch_json,
+            post_json=post_json,
+            batch_size=500,
+        )
+
+        self.assertEqual(set(books), {"token-a", "token-b"})
+        self.assertEqual(len(post_calls), 1)
+        self.assertEqual(len(fetch_calls), 1)
+        self.assertIn("token_id=token-b", fetch_calls[0][0])
+
     def test_binary_snapshot_rows_can_skip_failed_book_fetches(self):
         markets = [
             {

@@ -109,6 +109,44 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(row["yes"]["asks"], [[0.45, 10.0]])
         self.assertEqual(row["no"]["bids"], [[0.52, 5.0]])
 
+    def test_binary_snapshot_rows_keeps_one_sided_buyable_market(self):
+        store = RealtimeOrderBookStore()
+        store.apply_polymarket_message(
+            [
+                {
+                    "event_type": "book",
+                    "asset_id": "yes-token",
+                    "market": "market-1",
+                    "timestamp": "1710000000000",
+                    "bids": [],
+                    "asks": [{"price": "0.99", "size": "10"}],
+                },
+                {
+                    "event_type": "book",
+                    "asset_id": "no-token",
+                    "market": "market-1",
+                    "timestamp": "1710000000000",
+                    "bids": [{"price": "0.01", "size": "10"}],
+                    "asks": [],
+                },
+            ]
+        )
+
+        rows = store.binary_snapshot_rows(
+            [
+                {
+                    "market_id": "market-1",
+                    "question": "Sample?",
+                    "yes_token_id": "yes-token",
+                    "no_token_id": "no-token",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["yes"]["asks"], [[0.99, 10.0]])
+        self.assertEqual(rows[0]["no"]["asks"], [])
+
     def test_store_can_seed_polymarket_book_before_websocket_updates(self):
         store = RealtimeOrderBookStore()
 

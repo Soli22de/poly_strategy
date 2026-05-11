@@ -427,6 +427,10 @@ def _deterministic_group_exhaustiveness_rejection(markets: List[MarketText]) -> 
     return None
 
 
+def deterministic_group_exhaustiveness_rejection(markets: List[MarketText]) -> Optional[str]:
+    return _deterministic_group_exhaustiveness_rejection(markets)
+
+
 def _range_group_exhaustiveness_rejection(markets: List[MarketText]) -> Optional[str]:
     titles = [str(market.group_item_title or market.question or "").strip().lower() for market in markets]
     if len(titles) < 2 or not _looks_like_ordered_numeric_range_group(titles):

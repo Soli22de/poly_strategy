@@ -235,6 +235,62 @@ class ExhaustiveGroupTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
 
+    def test_promotion_candidate_count_skips_ordered_range_group_missing_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots_path = root / "snapshots.ndjson"
+            rules_path = root / "rules.json"
+            gamma_path = root / "gamma.ndjson"
+            out_path = root / "rules-with-groups.json"
+            snapshots_path.write_text(
+                "\n".join(json.dumps(row) for row in [_snapshot("a", 0.01), _snapshot("b", 0.01), _snapshot("c", 0.01)])
+                + "\n"
+            )
+            rules_path.write_text(
+                json.dumps(
+                    {
+                        "mutually_exclusive": [
+                            {"first": "a", "second": "b", "confidence": 0.99},
+                            {"first": "a", "second": "c", "confidence": 0.99},
+                            {"first": "b", "second": "c", "confidence": 0.99},
+                        ]
+                    }
+                )
+            )
+            gamma_path.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in [
+                        _range_gamma_row("a", "65°F or below", "0"),
+                        _range_gamma_row("b", "66-67°F", "1"),
+                        _range_gamma_row("c", "68-69°F", "2"),
+                    ]
+                )
+                + "\n"
+            )
+            client = FakeVerifier({"trade_allowed": True})
+
+            count = promotion_candidate_count(
+                snapshots_path,
+                rules_path,
+                min_net_edge=0.0,
+                top_n=5,
+                gamma_path=gamma_path,
+            )
+            result = promote_exhaustive_groups(
+                gamma_path,
+                rules_path,
+                out_path,
+                snapshots_path,
+                client,
+                min_net_edge=0.0,
+                top_n=5,
+            )
+
+        self.assertEqual(count, 0)
+        self.assertEqual(result.candidates_found, 0)
+        self.assertEqual(client.market_ids_seen, [])
+
 
 class FakeVerifier:
     def __init__(self, response):
@@ -299,6 +355,17 @@ def _gamma_row(market_id: str):
             "groupItemThreshold": "",
         },
     }
+
+
+def _range_gamma_row(market_id: str, group_item_title: str, group_item_threshold: str):
+    row = _gamma_row(market_id)
+    raw = row["raw"]
+    raw["question"] = f"Will the highest temperature be {group_item_title}?"
+    raw["description"] = "Resolves based on the daily high temperature."
+    raw["groupItemTitle"] = group_item_title
+    raw["groupItemThreshold"] = group_item_threshold
+    raw["slug"] = f"temperature-{market_id}"
+    return row
 
 
 if __name__ == "__main__":

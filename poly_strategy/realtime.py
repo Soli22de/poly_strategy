@@ -99,7 +99,7 @@ class RealtimeOrderBookStore:
             return None
         yes_book = self.book(yes_token_id)
         no_book = self.book(no_token_id)
-        if not yes_book["asks"] or not no_book["asks"]:
+        if not yes_book["asks"] and not no_book["asks"]:
             return None
         return {
             "ts": ts or self.last_update_ts or _utc_now(),
