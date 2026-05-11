@@ -49,3 +49,34 @@ The report also includes `strategy_chain_breakdown`, which applies the same logi
 - `rule_verification`: a diagnostic basket has high apparent edge but must be verified before promotion.
 - `paper_filter_debugging`: stable opportunities exist but fail paper filters; inspect rejection reasons.
 - `feed_coverage`: the watchlist has many tokens without current snapshots.
+
+## Focused Maker Fee-Avoidance Loop
+
+When the top blocker is `maker_fee_avoidance`, the next loop is deliberately narrow:
+
+1. Extract the market IDs from `optimization_targets`.
+2. Refresh only those books, optionally expanding the full `negRiskMarketID` group.
+3. Run `maker-hybrid-scan` on the focused snapshot file.
+4. Validate passive fill assumptions with `maker-hybrid-tape-sim`.
+5. Read the no-fill diagnostics before making quotes more aggressive.
+
+Useful one-shot commands:
+
+```bash
+python3 -m poly_strategy.cli optimization-target-markets \
+  data/realtime-monitor-24h-v1-analysis.json \
+  --lever maker_fee_avoidance \
+  --top-targets 1 \
+  --max-markets 120 \
+  --out data/optimization-target-market-ids.txt
+
+MAX_TARGET_MARKETS=120 TOP=50 scripts/run_maker_focus_from_analysis_once.sh
+```
+
+The tape report is diagnostic-only. It now includes:
+
+- `rejection_by_reason`: whether candidates fail because maker legs do not fill or because the hedge is no longer profitable.
+- `maker_fill_progress_distribution`: how many maker legs filled before rejection.
+- `top_unfilled_maker_legs`: repeated unfilled markets, quote levels, spread, distance to ask, and expected edge.
+
+This is the guardrail that prevents treating theoretical maker savings as a tradeable opportunity.

@@ -108,6 +108,38 @@ def analyze_monitor_report(*args, **kwargs) -> dict:
     return analyze_paper_monitor_report(*args, **kwargs)
 
 
+def optimization_target_market_ids(
+    report: dict,
+    lever: Optional[str] = "maker_fee_avoidance",
+    top_targets: int = 1,
+    max_markets: Optional[int] = None,
+) -> list:
+    if top_targets < 1:
+        raise ValueError("top_targets must be at least 1")
+    if max_markets is not None and max_markets < 1:
+        raise ValueError("max_markets must be at least 1")
+    targets = list(((report.get("optimization_targets") or {}).get("targets") or []))
+    normalized_lever = str(lever or "").strip()
+    if normalized_lever and normalized_lever not in {"all", "top"}:
+        targets = [target for target in targets if target.get("lever") == normalized_lever]
+    elif normalized_lever == "top":
+        top_lever = (report.get("optimization_targets") or {}).get("top_target")
+        targets = [target for target in targets if target.get("lever") == top_lever]
+    selected = targets[:top_targets]
+    market_ids = []
+    seen = set()
+    for target in selected:
+        for market_id in ((target.get("evidence") or {}).get("market_ids") or []):
+            normalized = str(market_id).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            market_ids.append(normalized)
+            if max_markets is not None and len(market_ids) >= max_markets:
+                return market_ids
+    return market_ids
+
+
 def _read_jsonl(path: Path) -> Iterable[dict]:
     with path.open() as handle:
         for raw_line in handle:

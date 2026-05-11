@@ -507,10 +507,57 @@ class MakerTests(unittest.TestCase):
         self.assertEqual(report["completed_count"], 1)
         self.assertEqual(report["unique_completed_count"], 1)
         self.assertEqual(len(report["top_unique_completed"]), 1)
+        self.assertEqual(report["rejection_by_reason"][0]["reason"], "completed")
+        self.assertEqual(report["maker_fill_progress_distribution"][0]["filled_maker_leg_count"], 2)
         completed = report["top_completed"][0]
         self.assertEqual(completed["fill_model"], "trade_tape_sell_through")
         self.assertEqual(completed["simulated_quantity"], 10)
         self.assertTrue(completed["diagnostic_only"])
+
+    def test_maker_hybrid_tape_sim_reports_unfilled_maker_legs(self):
+        rows = [
+            _snapshot("a", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.66, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", no_bid=0.63, no_ask=0.66, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", no_bid=0.63, no_ask=0.66, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.65, ts="2026-05-10T00:01:00Z"),
+        ]
+        trades = [
+            _trade("a-no", "BUY", 0.66, 10, "2026-05-10T00:00:30Z"),
+            _trade("b-no", "SELL", 0.67, 10, "2026-05-10T00:00:35Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            trades_path = Path(tmp) / "trades.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+            trades_path.write_text("\n".join(json.dumps(row) for row in trades) + "\n")
+
+            report = maker_hybrid_tape_sim_report(
+                snapshot_path,
+                trades_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                min_maker_legs=2,
+                max_maker_legs=2,
+                max_maker_combinations=1,
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(report["completed_count"], 0)
+        self.assertGreater(report["no_fill_count"], 0)
+        self.assertEqual(report["rejection_by_reason"][0]["reason"], "maker_not_filled")
+        self.assertEqual(report["maker_fill_progress_distribution"][0]["filled_maker_leg_count"], 0)
+        self.assertGreater(report["top_unfilled_maker_legs"][0]["unfilled_count"], 0)
+        self.assertIn("min_distance_to_best_ask", report["top_unfilled_maker_legs"][0])
 
 
 def _snapshot(market_id: str, no_bid: float, no_ask: float, ts: str = "2026-05-10T00:00:00Z"):

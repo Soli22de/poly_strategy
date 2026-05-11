@@ -160,6 +160,83 @@ class CliTests(unittest.TestCase):
         self.assertEqual(collect.call_args.kwargs["max_workers"], 4)
         self.assertIn("wrote=3", stdout.getvalue())
 
+    def test_collect_polymarket_binaries_can_target_market_ids_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_ids = Path(tmp) / "market-ids.txt"
+            market_ids.write_text("m1\nm2\n")
+            with patch("poly_strategy.cli.collect_polymarket_binary_snapshots_for_market_ids", return_value=2) as collect:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "collect-polymarket-binaries",
+                            "--out",
+                            "data/focus.ndjson",
+                            "--gamma",
+                            "data/gamma.ndjson",
+                            "--market-ids-file",
+                            str(market_ids),
+                            "--refresh-missing-gamma",
+                            "--skip-book-errors",
+                            "--no-expand-neg-risk-groups",
+                            "--max-markets",
+                            "10",
+                        ]
+                    )
+
+        self.assertEqual(code, 0)
+        collect.assert_called_once()
+        args = collect.call_args.args
+        self.assertEqual(str(args[0]), "data/focus.ndjson")
+        self.assertEqual(str(args[1]), "data/gamma.ndjson")
+        self.assertEqual(args[2], ["m1", "m2"])
+        self.assertTrue(collect.call_args.kwargs["refresh_missing_gamma"])
+        self.assertTrue(collect.call_args.kwargs["skip_book_errors"])
+        self.assertFalse(collect.call_args.kwargs["expand_neg_risk_groups"])
+        self.assertEqual(collect.call_args.kwargs["max_markets"], 10)
+        self.assertIn("wrote=2", stdout.getvalue())
+
+    def test_optimization_target_markets_writes_market_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis = Path(tmp) / "analysis.json"
+            out = Path(tmp) / "markets.txt"
+            analysis.write_text(
+                json.dumps(
+                    {
+                        "optimization_targets": {
+                            "top_target": "maker_fee_avoidance",
+                            "targets": [
+                                {
+                                    "lever": "maker_fee_avoidance",
+                                    "evidence": {"market_ids": ["m1", "m2", "m1"]},
+                                },
+                                {
+                                    "lever": "price_improvement",
+                                    "evidence": {"market_ids": ["m3"]},
+                                },
+                            ],
+                        }
+                    }
+                )
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "optimization-target-markets",
+                        str(analysis),
+                        "--out",
+                        str(out),
+                        "--lever",
+                        "maker_fee_avoidance",
+                    ]
+                )
+            written_market_ids = out.read_text().splitlines()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(written_market_ids, ["m1", "m2"])
+        self.assertIn("market_ids=2", stdout.getvalue())
+
     def test_collect_polymarket_can_fetch_gamma_markets_by_id(self):
         with patch("poly_strategy.cli.collect_polymarket_gamma_markets_by_id", return_value=2) as collect:
             stdout = io.StringIO()
