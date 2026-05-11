@@ -61,7 +61,13 @@ from poly_strategy.external_signals import (
     polymarket_market_ids_from_external_signals,
 )
 from poly_strategy.exhaustive_groups import promotion_candidate_count, promote_exhaustive_groups, result_to_row
-from poly_strategy.maker import maker_adaptive_quote_report, maker_fill_sim_report, maker_scan_report
+from poly_strategy.maker import (
+    maker_adaptive_quote_report,
+    maker_fill_sim_report,
+    maker_hedge_scan_report,
+    maker_hedge_sim_report,
+    maker_scan_report,
+)
 from poly_strategy.monitoring import IncrementalReplayState, stable_current_opportunities
 from poly_strategy.notifications import notify_alerts
 from poly_strategy.paper_analysis import analyze_paper_monitor_report
@@ -391,6 +397,55 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(row, sort_keys=True))
             return 0
+        if args.command == "maker-hedge-scan":
+            row = maker_hedge_scan_report(
+                Path(args.snapshots),
+                rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
+                tick_size=args.tick_size,
+                min_edge=args.min_edge,
+                min_roi=args.min_roi,
+                max_capital=args.max_capital,
+                max_leg_count=args.max_leg_count,
+                top_n=args.top,
+                include_yes_no_pairs=args.include_yes_no_pairs,
+                quote_mode=args.quote_mode,
+                quote_offset_ticks=args.quote_offset_ticks,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(f"candidates={row['candidate_count']} out={args.out}")
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
+        if args.command == "maker-hedge-sim":
+            row = maker_hedge_sim_report(
+                Path(args.snapshots),
+                rules_path=Path(args.rules) if args.rules else None,
+                gamma_path=Path(args.gamma) if args.gamma else None,
+                tick_size=args.tick_size,
+                min_edge=args.min_edge,
+                min_roi=args.min_roi,
+                max_capital=args.max_capital,
+                max_leg_count=args.max_leg_count,
+                quote_mode=args.quote_mode,
+                quote_offset_ticks=args.quote_offset_ticks,
+                horizon_seconds=args.horizon_seconds,
+                max_candidates_per_batch=args.max_candidates_per_batch,
+                top_n=args.top,
+                include_yes_no_pairs=args.include_yes_no_pairs,
+            )
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+                print(
+                    f"observations={row['candidate_observation_count']} completed={row['completed_count']} "
+                    f"unsafe={row['unsafe_fill_count']} out={args.out}"
+                )
+            else:
+                print(json.dumps(row, sort_keys=True))
+            return 0
         if args.command == "execute-latest":
             result = replay_ndjson(
                 Path(args.path),
@@ -504,6 +559,7 @@ def main(argv=None) -> int:
                 monitor_report_path=Path(args.monitor_report) if args.monitor_report else None,
                 execution_plans_path=Path(args.execution_plans) if args.execution_plans else None,
                 maker_adaptive_path=Path(args.maker_adaptive) if args.maker_adaptive else None,
+                maker_hedge_path=Path(args.maker_hedge) if args.maker_hedge else None,
                 cross_platform_scan_path=Path(args.cross_platform_scan) if args.cross_platform_scan else None,
                 min_cross_platform_capital_edge=args.min_cross_platform_capital_edge,
             )
@@ -1227,6 +1283,54 @@ def _build_parser() -> argparse.ArgumentParser:
     maker_adaptive.add_argument("--top", type=int, default=25, help="top quote configs to include")
     maker_adaptive.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired maker quotes")
 
+    maker_hedge_scan = subparsers.add_parser(
+        "maker-hedge-scan",
+        help="scan latest snapshots for one-maker-leg plus immediate-taker-hedge candidates",
+    )
+    maker_hedge_scan.add_argument("--snapshots", required=True, help="binary snapshot NDJSON path")
+    maker_hedge_scan.add_argument("--rules", help="JSON file with discovered rules")
+    maker_hedge_scan.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk groups")
+    maker_hedge_scan.add_argument("--out", help="output maker hedge scan JSON path; prints JSON when omitted")
+    maker_hedge_scan.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
+    maker_hedge_scan.add_argument(
+        "--quote-offset-ticks",
+        type=int,
+        default=1,
+        help="for near_ask, quote this many ticks below best ask",
+    )
+    maker_hedge_scan.add_argument("--min-edge", type=float, default=0.0, help="minimum edge after maker fill and taker hedge")
+    maker_hedge_scan.add_argument("--min-roi", type=float, help="minimum ROI after maker fill and taker hedge")
+    maker_hedge_scan.add_argument("--max-capital", type=float, help="capital cap used for suggested quantity and expected edge")
+    maker_hedge_scan.add_argument("--max-leg-count", type=int, default=30, help="maximum basket leg count")
+    maker_hedge_scan.add_argument("--top", type=int, default=25, help="top candidates to include")
+    maker_hedge_scan.add_argument("--quote-mode", choices=["near_ask", "improve_bid"], default="near_ask")
+    maker_hedge_scan.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired hedges")
+
+    maker_hedge_sim = subparsers.add_parser(
+        "maker-hedge-sim",
+        help="simulate one-maker-leg candidates and immediate taker hedge using later snapshots",
+    )
+    maker_hedge_sim.add_argument("--snapshots", required=True, help="historical binary snapshot NDJSON path")
+    maker_hedge_sim.add_argument("--rules", help="JSON file with discovered rules")
+    maker_hedge_sim.add_argument("--gamma", help="raw Polymarket Gamma NDJSON path for neg-risk groups")
+    maker_hedge_sim.add_argument("--out", help="output maker hedge simulation JSON path; prints JSON when omitted")
+    maker_hedge_sim.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
+    maker_hedge_sim.add_argument("--quote-mode", choices=["near_ask", "improve_bid"], default="near_ask")
+    maker_hedge_sim.add_argument(
+        "--quote-offset-ticks",
+        type=int,
+        default=1,
+        help="for near_ask, quote this many ticks below best ask",
+    )
+    maker_hedge_sim.add_argument("--min-edge", type=float, default=0.0, help="minimum realized edge after hedge")
+    maker_hedge_sim.add_argument("--min-roi", type=float, help="minimum expected ROI before simulation")
+    maker_hedge_sim.add_argument("--max-capital", type=float, help="capital cap used for suggested quantity and expected edge")
+    maker_hedge_sim.add_argument("--max-leg-count", type=int, default=30, help="maximum basket leg count")
+    maker_hedge_sim.add_argument("--horizon-seconds", type=float, default=300.0, help="seconds after quote time to look for maker fill")
+    maker_hedge_sim.add_argument("--max-candidates-per-batch", type=int, default=25, help="top maker hedge candidates per timestamp")
+    maker_hedge_sim.add_argument("--top", type=int, default=25, help="top simulation results to include")
+    maker_hedge_sim.add_argument("--include-yes-no-pairs", action="store_true", help="include single-market paired hedges")
+
     execute = subparsers.add_parser("execute-latest", help="build or submit execution plans for latest opportunities")
     execute.add_argument("path", help="input NDJSON snapshot path")
     execute.add_argument("--rules", help="JSON file with discovered rules")
@@ -1336,6 +1440,7 @@ def _build_parser() -> argparse.ArgumentParser:
     success_status.add_argument("--monitor-report", help="realtime/paper monitor JSONL path")
     success_status.add_argument("--execution-plans", help="latest execution_plan NDJSON path")
     success_status.add_argument("--maker-adaptive", help="maker adaptive quote report JSON path")
+    success_status.add_argument("--maker-hedge", help="maker hedge simulation report JSON path")
     success_status.add_argument("--cross-platform-scan", help="latest cross_platform_scan_report JSON path")
     success_status.add_argument(
         "--min-cross-platform-capital-edge",

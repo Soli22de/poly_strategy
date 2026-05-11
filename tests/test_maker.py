@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from poly_strategy.maker import maker_adaptive_quote_report, maker_fill_sim_report, maker_scan_report
+from poly_strategy.maker import (
+    maker_adaptive_quote_report,
+    maker_fill_sim_report,
+    maker_hedge_scan_report,
+    maker_hedge_sim_report,
+    maker_scan_report,
+)
 
 
 class MakerTests(unittest.TestCase):
@@ -185,6 +191,103 @@ class MakerTests(unittest.TestCase):
         self.assertEqual(report["recommended_config"]["quote_mode"], "near_ask")
         self.assertEqual(report["recommended_config"]["quote_offset_ticks"], 1)
         self.assertGreater(report["recommended_config"]["risk_adjusted_total_ev_at_cap"], 0)
+
+    def test_maker_hedge_scan_finds_single_maker_leg_candidate(self):
+        snapshots = [
+            _snapshot("a", no_bid=0.66, no_ask=0.68),
+            _snapshot("b", no_bid=0.64, no_ask=0.66),
+            _snapshot("c", no_bid=0.62, no_ask=0.64),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in snapshots) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            report = maker_hedge_scan_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+            )
+
+        self.assertGreaterEqual(report["candidate_count"], 3)
+        row = report["top"][0]
+        self.assertEqual(row["kind"], "maker_hedge_neg_risk_no_basket")
+        self.assertGreater(row["maker_edge_per_share"], 0.005)
+        self.assertIn("requires_fast_hedge_after_fill", row["risk_flags"])
+
+    def test_maker_hedge_sim_counts_completed_hedge(self):
+        rows = [
+            _snapshot("a", no_bid=0.66, no_ask=0.68, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", no_bid=0.64, no_ask=0.66, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.64, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", no_bid=0.65, no_ask=0.67, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", no_bid=0.64, no_ask=0.66, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.64, ts="2026-05-10T00:01:00Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            report = maker_hedge_sim_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(report["candidate_observation_count"], 3)
+        self.assertEqual(report["completed_count"], 1)
+        self.assertEqual(report["unsafe_fill_count"], 0)
+        self.assertEqual(report["status"], "positive_ev_hedge_found")
+        self.assertEqual(report["top_completed"][0]["maker_fill_ts"], "2026-05-10T00:01:00Z")
+
+    def test_maker_hedge_sim_counts_unsafe_fill_when_hedge_turns_negative(self):
+        rows = [
+            _snapshot("a", no_bid=0.66, no_ask=0.68, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", no_bid=0.64, no_ask=0.66, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.64, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", no_bid=0.65, no_ask=0.67, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", no_bid=0.80, no_ask=0.82, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", no_bid=0.80, no_ask=0.82, ts="2026-05-10T00:01:00Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            report = maker_hedge_sim_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(report["candidate_observation_count"], 3)
+        self.assertEqual(report["completed_count"], 0)
+        self.assertEqual(report["unsafe_fill_count"], 1)
+        self.assertEqual(report["top_unsafe"][0]["rejection_reason"], "hedge_edge_below_min_edge")
 
 
 def _snapshot(market_id: str, no_bid: float, no_ask: float, ts: str = "2026-05-10T00:00:00Z"):

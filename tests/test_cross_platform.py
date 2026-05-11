@@ -90,6 +90,8 @@ class CrossPlatformTests(unittest.TestCase):
                     "polymarket_market_id": "verified-poly",
                     "kalshi_ticker": "KXVERIFIED",
                     "trade_allowed": True,
+                    "status": "verified_same_binary_event",
+                    "llm_verification": {"trade_allowed": True, "risk_flags": []},
                 },
                 {
                     "polymarket_market_id": "unverified-poly",
@@ -142,6 +144,43 @@ class CrossPlatformTests(unittest.TestCase):
         self.assertEqual(updated["top"][1]["status"], "candidate_needs_llm_or_manual_verification")
         self.assertEqual(updated["llm_verified_count"], 1)
         self.assertEqual(updated["llm_rejected_count"], 0)
+
+    def test_apply_cross_platform_verifications_rejects_polymarket_other_cutoff_mismatch(self):
+        report = {
+            "top": [
+                {
+                    "polymarket_market_id": "pm1",
+                    "kalshi_ticker": "KX1",
+                    "trade_allowed": False,
+                    "status": "candidate_needs_llm_or_manual_verification",
+                    "polymarket_description": (
+                        "If, for any reason, the results of the election are not known by "
+                        "December 31, 2027, 11:59 PM ET, this market will resolve to \"Other\"."
+                    ),
+                    "kalshi_close_time": "2028-05-30T14:00:00Z",
+                }
+            ]
+        }
+
+        updated = apply_cross_platform_verifications(
+            report,
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "kalshi_ticker": "KX1",
+                    "trade_allowed": True,
+                    "confidence": 0.99,
+                    "risk_flags": [],
+                    "reason": "same candidate",
+                }
+            ],
+        )
+
+        self.assertFalse(updated["top"][0]["trade_allowed"])
+        self.assertEqual(updated["top"][0]["status"], "candidate_rejected_by_deterministic_check")
+        self.assertIn("polymarket_other_cutoff_before_kalshi_close", updated["top"][0]["llm_verification"]["risk_flags"])
+        self.assertEqual(updated["llm_verified_count"], 0)
+        self.assertEqual(updated["llm_rejected_count"], 1)
 
     def test_normalize_candidate_file_keeps_event_candidate_unexecutable(self):
         report = normalize_cross_platform_match_report(

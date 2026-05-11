@@ -52,6 +52,31 @@ class SuccessStatusTests(unittest.TestCase):
         self.assertEqual(report["status"], "no_success")
         self.assertFalse(report["paper_success_candidate"])
 
+    def test_success_status_reports_maker_hedge_positive_ev(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hedge = Path(tmp) / "maker-hedge.json"
+            hedge.write_text(
+                json.dumps(
+                    {
+                        "status": "positive_ev_hedge_found",
+                        "batch_count": 10,
+                        "candidate_observation_count": 5,
+                        "completed_count": 1,
+                        "unsafe_fill_count": 0,
+                        "completed_realized_edge_at_cap": 0.25,
+                        "max_completed_realized_edge_at_cap": 0.25,
+                        "top_completed": [{"realized_edge_at_cap": 0.25}],
+                    }
+                )
+                + "\n"
+            )
+
+            report = success_status_report(maker_hedge_path=hedge)
+
+        self.assertEqual(report["status"], "maker_hedge_positive_ev")
+        self.assertTrue(report["paper_success_candidate"])
+        self.assertEqual(report["maker_hedge"]["completed_count"], 1)
+
     def test_success_status_reports_cross_platform_paper_opportunity(self):
         with tempfile.TemporaryDirectory() as tmp:
             scan = Path(tmp) / "cross.json"
@@ -66,7 +91,11 @@ class SuccessStatusTests(unittest.TestCase):
                                 "net_edge_per_share": 0.001,
                                 "total_edge": 6.0,
                                 "capital_capped": {"edge": 0.1},
-                                "pair": {"trade_allowed": True},
+                                "pair": {
+                                    "trade_allowed": True,
+                                    "status": "verified_same_binary_event",
+                                    "llm_verification": {"trade_allowed": True, "risk_flags": []},
+                                },
                             }
                         ],
                     }
@@ -96,7 +125,11 @@ class SuccessStatusTests(unittest.TestCase):
                                 "net_edge_per_share": 0.001,
                                 "total_edge": 6.0,
                                 "capital_capped": {"edge": 0.1},
-                                "pair": {"trade_allowed": True},
+                                "pair": {
+                                    "trade_allowed": True,
+                                    "status": "verified_same_binary_event",
+                                    "llm_verification": {"trade_allowed": True, "risk_flags": []},
+                                },
                             }
                         ],
                     }
@@ -109,6 +142,33 @@ class SuccessStatusTests(unittest.TestCase):
         self.assertEqual(report["status"], "no_success")
         self.assertEqual(report["cross_platform"]["verified_positive_count"], 1)
         self.assertEqual(report["cross_platform"]["actionable_verified_positive_count"], 0)
+
+    def test_success_status_ignores_unverified_cross_platform_positive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scan = Path(tmp) / "cross.json"
+            scan.write_text(
+                json.dumps(
+                    {
+                        "type": "cross_platform_scan_report",
+                        "pair_count": 1,
+                        "opportunity_count": 1,
+                        "opportunities": [
+                            {
+                                "net_edge_per_share": 0.001,
+                                "total_edge": 6.0,
+                                "capital_capped": {"edge": 0.1},
+                                "pair": {"trade_allowed": True},
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            report = success_status_report(cross_platform_scan_path=scan)
+
+        self.assertEqual(report["status"], "no_success")
+        self.assertEqual(report["cross_platform"]["verified_positive_count"], 0)
 
     def test_write_success_status_only_appends_non_empty_statuses(self):
         with tempfile.TemporaryDirectory() as tmp:

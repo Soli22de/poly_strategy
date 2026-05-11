@@ -215,6 +215,8 @@ case "$COMMAND" in
     MAKER_SCAN_INTERVAL="${MAKER_SCAN_INTERVAL:-300}"
     MAKER_FILL_SIM_INTERVAL="${MAKER_FILL_SIM_INTERVAL:-900}"
     MAKER_ADAPTIVE_SIM_INTERVAL="${MAKER_ADAPTIVE_SIM_INTERVAL:-1800}"
+    MAKER_HEDGE_SCAN_INTERVAL="${MAKER_HEDGE_SCAN_INTERVAL:-300}"
+    MAKER_HEDGE_SIM_INTERVAL="${MAKER_HEDGE_SIM_INTERVAL:-900}"
     CROSS_PLATFORM_SCAN_INTERVAL="${CROSS_PLATFORM_SCAN_INTERVAL:-1800}"
     SUCCESS_STATUS_INTERVAL="${SUCCESS_STATUS_INTERVAL:-60}"
     LOOP_SLEEP="${LOOP_SLEEP:-5}"
@@ -230,6 +232,8 @@ case "$COMMAND" in
     ENABLE_MAKER_SCAN="${ENABLE_MAKER_SCAN:-1}"
     ENABLE_MAKER_FILL_SIM="${ENABLE_MAKER_FILL_SIM:-1}"
     ENABLE_MAKER_ADAPTIVE_SIM="${ENABLE_MAKER_ADAPTIVE_SIM:-1}"
+    ENABLE_MAKER_HEDGE_SCAN="${ENABLE_MAKER_HEDGE_SCAN:-1}"
+    ENABLE_MAKER_HEDGE_SIM="${ENABLE_MAKER_HEDGE_SIM:-1}"
     ENABLE_CROSS_PLATFORM_SCAN="${ENABLE_CROSS_PLATFORM_SCAN:-1}"
     ENABLE_SUCCESS_STATUS="${ENABLE_SUCCESS_STATUS:-1}"
 
@@ -246,6 +250,8 @@ case "$COMMAND" in
     next_maker_scan=0
     next_maker_fill_sim=0
     next_maker_adaptive_sim=0
+    next_maker_hedge_scan=0
+    next_maker_hedge_sim=0
     next_cross_platform_scan=0
     next_success_status=0
     discovery_pid=""
@@ -318,6 +324,16 @@ case "$COMMAND" in
       if [[ "$ENABLE_MAKER_ADAPTIVE_SIM" == "1" && "$now" -ge "$next_maker_adaptive_sim" ]]; then
         run_logged maker-adaptive-sim scripts/run_maker_adaptive_sim_once.sh
         next_maker_adaptive_sim=$((now + MAKER_ADAPTIVE_SIM_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_MAKER_HEDGE_SCAN" == "1" && "$now" -ge "$next_maker_hedge_scan" ]]; then
+        run_logged maker-hedge-scan scripts/run_maker_hedge_scan_once.sh
+        next_maker_hedge_scan=$((now + MAKER_HEDGE_SCAN_INTERVAL))
+      fi
+
+      if [[ "$ENABLE_MAKER_HEDGE_SIM" == "1" && "$now" -ge "$next_maker_hedge_sim" ]]; then
+        run_logged maker-hedge-sim scripts/run_maker_hedge_sim_once.sh
+        next_maker_hedge_sim=$((now + MAKER_HEDGE_SIM_INTERVAL))
       fi
 
       if [[ "$ENABLE_CROSS_PLATFORM_SCAN" == "1" && "$now" -ge "$next_cross_platform_scan" ]]; then

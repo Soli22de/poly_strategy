@@ -223,7 +223,7 @@ def opportunity_match_report_from_scan(
 def cross_platform_signal_rows(match_report: dict, source: str = "kalshi_matcher", verified_only: bool = False) -> list:
     rows = []
     for match in match_report.get("top", []):
-        trade_allowed = bool(match.get("trade_allowed"))
+        trade_allowed = _match_is_verified(match)
         if verified_only and not trade_allowed:
             continue
         kind = "cross_platform_same_binary_verified" if trade_allowed else "cross_platform_candidate_unverified"
@@ -249,7 +249,8 @@ def cross_platform_signal_rows(match_report: dict, source: str = "kalshi_matcher
 def cross_platform_pairs(match_report: dict, verified_only: bool = True) -> list:
     pairs = []
     for match in match_report.get("top", []):
-        if verified_only and not match.get("trade_allowed"):
+        verified = _match_is_verified(match)
+        if verified_only and not verified:
             continue
         poly_market_id = str(match.get("polymarket_market_id") or "").strip()
         kalshi_ticker = str(match.get("kalshi_ticker") or "").strip()
@@ -260,14 +261,36 @@ def cross_platform_pairs(match_report: dict, verified_only: bool = True) -> list
                 "polymarket_market_id": poly_market_id,
                 "kalshi_ticker": kalshi_ticker,
                 "status": match.get("status"),
-                "trade_allowed": bool(match.get("trade_allowed")),
+                "trade_allowed": verified,
                 "score": match.get("score"),
                 "polymarket_title": match.get("polymarket_title"),
                 "polymarket_question": match.get("polymarket_question"),
+                "polymarket_description": match.get("polymarket_description"),
+                "polymarket_end_date": match.get("polymarket_end_date"),
                 "kalshi_title": match.get("kalshi_title"),
+                "kalshi_close_time": match.get("kalshi_close_time"),
+                "kalshi_rules_primary": match.get("kalshi_rules_primary"),
+                "kalshi_early_close_condition": match.get("kalshi_early_close_condition"),
+                "llm_verification": match.get("llm_verification"),
+                "semantic_verification": match.get("semantic_verification"),
+                "cross_platform_risk_flags": _deterministic_cross_platform_risk_flags(match),
             }
         )
     return pairs
+
+
+def _match_is_verified(match: dict) -> bool:
+    if not match.get("trade_allowed"):
+        return False
+    if _deterministic_cross_platform_risk_flags(match):
+        return False
+    llm = match.get("llm_verification")
+    if isinstance(llm, dict) and llm.get("trade_allowed") and not llm.get("risk_flags"):
+        return True
+    semantic = match.get("semantic_verification")
+    if isinstance(semantic, dict) and semantic.get("status") == "verified_same_binary_event":
+        return True
+    return False
 
 
 def apply_cross_platform_verifications(match_report: dict, verifications: Iterable[dict]) -> dict:
@@ -284,13 +307,24 @@ def apply_cross_platform_verifications(match_report: dict, verifications: Iterab
         if not verification:
             continue
         match["llm_verification"] = verification
-        match["trade_allowed"] = bool(verification.get("trade_allowed"))
-        if verification.get("trade_allowed"):
+        allowed = bool(verification.get("trade_allowed"))
+        match["trade_allowed"] = allowed
+        match["status"] = "verified_same_binary_event" if allowed else "candidate_rejected_by_llm"
+        deterministic_flags = _deterministic_cross_platform_risk_flags(match)
+        if deterministic_flags:
+            allowed = False
+            match["trade_allowed"] = False
+            match["status"] = "candidate_rejected_by_deterministic_check"
+            llm = match.get("llm_verification")
+            if isinstance(llm, dict):
+                existing_flags = list(llm.get("risk_flags") or [])
+                llm["risk_flags"] = sorted(set(existing_flags + deterministic_flags))
+                llm["trade_allowed"] = False
+                llm["verified_same_binary_event"] = False
+        if allowed:
             verified_count += 1
-            match["status"] = "verified_same_binary_event"
         else:
             rejected_count += 1
-            match["status"] = "candidate_rejected_by_llm"
     updated["llm_verified_count"] = verified_count
     updated["llm_rejected_count"] = rejected_count
     return updated
@@ -382,6 +416,109 @@ def _semantic_verification(poly_title: str, kalshi_title: str, score: float) -> 
         "numeric_tokens_match": "numeric_mismatch" not in risk_flags,
         "risk_flags": risk_flags,
     }
+
+
+def _deterministic_cross_platform_risk_flags(match: dict) -> list:
+    flags = []
+    poly_description = str(match.get("polymarket_description") or "")
+    poly_text = " ".join(
+        [
+            str(match.get("polymarket_question") or ""),
+            str(match.get("polymarket_title") or ""),
+            poly_description,
+        ]
+    )
+    kalshi_text = " ".join(
+        [
+            str(match.get("kalshi_title") or ""),
+            str(match.get("kalshi_rules_primary") or ""),
+            str(match.get("kalshi_rules_secondary") or ""),
+            str(match.get("kalshi_early_close_condition") or ""),
+        ]
+    )
+
+    poly_other_cutoff = _polymarket_other_cutoff_date(poly_description)
+    kalshi_close = _parse_dateish(match.get("kalshi_close_time")) or _latest_text_date(kalshi_text)
+    if poly_other_cutoff and kalshi_close and kalshi_close > poly_other_cutoff:
+        flags.append("polymarket_other_cutoff_before_kalshi_close")
+
+    poly_deadline = _deadline_from_before_year(poly_text)
+    kalshi_latest = _latest_text_date(kalshi_text)
+    if poly_deadline and kalshi_latest and kalshi_latest > poly_deadline:
+        flags.append("different_event_deadlines")
+
+    return sorted(set(flags))
+
+
+def _polymarket_other_cutoff_date(text: str):
+    lowered = text.lower()
+    if "other" not in lowered or "not known by" not in lowered:
+        return None
+    start = lowered.find("not known by")
+    return _first_text_date(text[start:])
+
+
+def _deadline_from_before_year(text: str):
+    match = re.search(r"\bbefore\s+(\d{4})\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    year = int(match.group(1))
+    return datetime(year, 1, 1, tzinfo=timezone.utc)
+
+
+def _first_text_date(text: str):
+    matches = _text_dates(text)
+    return matches[0] if matches else None
+
+
+def _latest_text_date(text: str):
+    matches = _text_dates(text)
+    return max(matches) if matches else None
+
+
+def _text_dates(text: str) -> list:
+    rows = []
+    for match in re.finditer(
+        r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        month_name, day, year = match.groups()
+        rows.append(datetime(int(year), _month_number(month_name), int(day), tzinfo=timezone.utc))
+    for match in re.finditer(r"\b(\d{4})-(\d{2})-(\d{2})(?:T[0-9:.]+Z?)?\b", text):
+        year, month, day = match.groups()
+        rows.append(datetime(int(year), int(month), int(day), tzinfo=timezone.utc))
+    return rows
+
+
+def _parse_dateish(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return _first_text_date(text)
+
+
+def _month_number(month_name: str) -> int:
+    names = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ]
+    return names.index(month_name.lower()) + 1
 
 
 def _candidate_row_to_match_row(candidate: dict) -> dict:
