@@ -313,7 +313,7 @@ def _is_tradeable_binary_market(market: dict) -> bool:
     if market.get("acceptingOrders") is False:
         return False
     outcomes = _loads_json_list(market.get("outcomes"))
-    if outcomes and [str(outcome).lower() for outcome in outcomes] != ["yes", "no"]:
+    if outcomes and len(outcomes) != 2:
         return False
     return len(_loads_json_list(market.get("clobTokenIds"))) == 2
 

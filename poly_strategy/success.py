@@ -15,7 +15,9 @@ def success_status_report(
     maker_adaptive_path: Optional[Path] = None,
     maker_hedge_path: Optional[Path] = None,
     maker_hybrid_path: Optional[Path] = None,
+    maker_hybrid_tape_path: Optional[Path] = None,
     cross_platform_scan_path: Optional[Path] = None,
+    min_maker_hybrid_tape_edge_at_cap: float = 0.0,
     min_cross_platform_capital_edge: float = 0.0,
     generated_at: Optional[str] = None,
 ) -> dict:
@@ -24,8 +26,9 @@ def success_status_report(
     maker = _maker_adaptive_summary(maker_adaptive_path)
     maker_hedge = _maker_hedge_summary(maker_hedge_path)
     maker_hybrid = _maker_hybrid_summary(maker_hybrid_path)
+    maker_hybrid_tape = _maker_hybrid_tape_summary(maker_hybrid_tape_path, min_maker_hybrid_tape_edge_at_cap)
     cross_platform = _cross_platform_summary(cross_platform_scan_path, min_cross_platform_capital_edge)
-    status = _success_status(monitor, plans, maker, maker_hedge, maker_hybrid, cross_platform)
+    status = _success_status(monitor, plans, maker, maker_hedge, maker_hybrid, maker_hybrid_tape, cross_platform)
     return {
         "type": "success_status_report",
         "generated_at": generated_at or _utc_now(),
@@ -40,12 +43,14 @@ def success_status_report(
             "cross_platform_paper_opportunity",
             "maker_hedge_positive_ev",
             "maker_hybrid_positive_ev",
+            "maker_hybrid_tape_positive_ev_candidate",
         },
         "monitor": monitor,
         "execution_plans": plans,
         "maker_adaptive": maker,
         "maker_hedge": maker_hedge,
         "maker_hybrid": maker_hybrid,
+        "maker_hybrid_tape": maker_hybrid_tape,
         "cross_platform": cross_platform,
     }
 
@@ -159,6 +164,35 @@ def _maker_hybrid_summary(path: Optional[Path]) -> dict:
     }
 
 
+def _maker_hybrid_tape_summary(path: Optional[Path], min_capital_edge: float = 0.0) -> dict:
+    row = _read_json(path)
+    if not row:
+        return {"path": str(path) if path else None, "found": False}
+    top_completed = list(row.get("top_unique_completed") or row.get("top_completed") or [])
+    actionable = [item for item in top_completed if float(item.get("realized_edge_at_cap") or 0.0) >= min_capital_edge]
+    return {
+        "path": str(path),
+        "found": True,
+        "min_capital_edge": min_capital_edge,
+        "status": row.get("status"),
+        "fill_model": row.get("fill_model") or "trade_tape_sell_through",
+        "diagnostic_only": bool(row.get("diagnostic_only", True)),
+        "batch_count": int(row.get("batch_count") or 0),
+        "trade_count": int(row.get("trade_count") or 0),
+        "candidate_observation_count": int(row.get("candidate_observation_count") or 0),
+        "completed_count": int(row.get("completed_count") or 0),
+        "unique_completed_count": int(row.get("unique_completed_count") or 0),
+        "actionable_unique_completed_count": len(actionable),
+        "unsafe_fill_count": int(row.get("unsafe_fill_count") or 0),
+        "partial_maker_fill_count": int(row.get("partial_maker_fill_count") or 0),
+        "unique_completed_realized_edge_at_cap": float(row.get("unique_completed_realized_edge_at_cap") or 0.0),
+        "completed_realized_edge_at_cap": float(row.get("completed_realized_edge_at_cap") or 0.0),
+        "max_completed_realized_edge_at_cap": float(row.get("max_completed_realized_edge_at_cap") or 0.0),
+        "top_unique_completed": top_completed[0] if top_completed else None,
+        "top_actionable_unique_completed": actionable[0] if actionable else None,
+    }
+
+
 def _cross_platform_summary(path: Optional[Path], min_capital_edge: float = 0.0) -> dict:
     row = _read_json(path)
     if not row:
@@ -217,6 +251,7 @@ def _success_status(
     maker: dict,
     maker_hedge: dict,
     maker_hybrid: dict,
+    maker_hybrid_tape: dict,
     cross_platform: dict,
 ) -> str:
     if plans.get("live_success_count", 0) > 0:
@@ -233,6 +268,11 @@ def _success_status(
         and maker_hybrid.get("completed_realized_edge_at_cap", 0.0) > 0
     ):
         return "maker_hybrid_positive_ev"
+    if (
+        maker_hybrid_tape.get("actionable_unique_completed_count", 0) > 0
+        and maker_hybrid_tape.get("unique_completed_realized_edge_at_cap", 0.0) > 0
+    ):
+        return "maker_hybrid_tape_positive_ev_candidate"
     if maker_hedge.get("completed_count", 0) > 0 and maker_hedge.get("completed_realized_edge_at_cap", 0.0) > 0:
         return "maker_hedge_positive_ev"
     if maker.get("status") == "positive_ev_config_found":

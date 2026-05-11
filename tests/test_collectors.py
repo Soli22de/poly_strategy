@@ -144,6 +144,78 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(row["asset_id"], "no-token")
         self.assertEqual(row["price"], 0.65)
 
+    def test_collect_polymarket_data_trades_can_fetch_per_market(self):
+        calls = []
+
+        def fetch_json(url, timeout, proxy):
+            calls.append(url)
+            if "market=0xabc" in url:
+                return [
+                    {
+                        "conditionId": "0xabc",
+                        "asset": "yes-a",
+                        "side": "SELL",
+                        "price": 0.41,
+                        "size": 3,
+                        "timestamp": 1778371230,
+                        "transactionHash": "0xa",
+                    }
+                ]
+            return [
+                {
+                    "conditionId": "0xdef",
+                    "asset": "yes-b",
+                    "side": "SELL",
+                    "price": 0.42,
+                    "size": 4,
+                    "timestamp": 1778371240,
+                    "transactionHash": "0xb",
+                }
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "trades.ndjson"
+            gamma.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "raw_polymarket_gamma_market",
+                                "market_id": "m1",
+                                "raw": {"id": "m1", "conditionId": "0xabc"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "raw_polymarket_gamma_market",
+                                "market_id": "m2",
+                                "raw": {"id": "m2", "conditionId": "0xdef"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+
+            count = collect_polymarket_data_trades(
+                out,
+                gamma,
+                ["m1", "m2"],
+                limit=25,
+                timeout=7,
+                side="SELL",
+                per_market=True,
+                fetch_json=fetch_json,
+            )
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all("%2C" not in url and "," not in url for url in calls))
+        self.assertEqual([row["market_id"] for row in rows], ["m1", "m2"])
+        self.assertEqual([row["asset_id"] for row in rows], ["yes-a", "yes-b"])
+
     def test_collect_polymarket_gamma_pages_uses_offsets(self):
         calls = []
 
@@ -289,6 +361,27 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(row["yes"]["asks"][0], [0.45, 10.0])
         self.assertEqual(row["yes"]["bids"][0], [0.44, 10.0])
         self.assertEqual(row["no"]["asks"][0], [0.53, 7.0])
+
+    def test_binary_snapshot_rows_from_gamma_markets_accepts_two_non_yes_no_outcomes(self):
+        market = {
+            "id": "up-down",
+            "closed": False,
+            "enableOrderBook": True,
+            "acceptingOrders": True,
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        books = {
+            "up-token": {"asks": [{"price": "0.51", "size": "10"}], "bids": [{"price": "0.50", "size": "10"}]},
+            "down-token": {"asks": [{"price": "0.48", "size": "10"}], "bids": [{"price": "0.47", "size": "10"}]},
+        }
+
+        rows = binary_snapshot_rows_from_gamma_markets([market], lambda token_id: books[token_id])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["market_id"], "up-down")
+        self.assertEqual(rows[0]["yes"]["token_id"], "up-token")
+        self.assertEqual(rows[0]["no"]["token_id"], "down-token")
 
     def test_collect_polymarket_binary_snapshots_loop_runs_requested_iterations(self):
         calls = []

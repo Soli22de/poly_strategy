@@ -64,6 +64,25 @@ class WatchlistTests(unittest.TestCase):
         top = next(row for row in rows if row["market_id"] == "top")
         self.assertIn("top_liquidity", top["priority_reasons"])
 
+    def test_build_polymarket_watchlist_accepts_two_non_yes_no_outcomes(self):
+        gamma_rows = [
+            _gamma_row("up-down", "", ["up-token", "down-token"], "", liquidity=100, volume24hr=50, outcomes=["Up", "Down"])
+        ]
+        rules = {"mutually_exclusive": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            rules_path = Path(tmp) / "rules.json"
+            gamma_path.write_text("\n".join(json.dumps(row) for row in gamma_rows) + "\n")
+            rules_path.write_text(json.dumps(rules))
+
+            rows = build_polymarket_watchlist(gamma_path, rules_path, include_top_markets=1)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["market_id"], "up-down")
+        self.assertEqual(rows[0]["yes_token_id"], "up-token")
+        self.assertEqual(rows[0]["no_token_id"], "down-token")
+
     def test_build_polymarket_watchlist_keeps_neg_risk_groups_atomic_under_cap(self):
         gamma_rows = [
             _gamma_row("group-a", "group", ["ga-yes", "ga-no"], "1", liquidity=1, volume24hr=1),
@@ -229,6 +248,7 @@ def _gamma_row(
     liquidity: float = 0.0,
     volume24hr: float = 0.0,
     condition_id: str = "",
+    outcomes: list = None,
 ):
     return {
         "type": "raw_polymarket_gamma_market",
@@ -241,7 +261,7 @@ def _gamma_row(
             "closed": False,
             "acceptingOrders": True,
             "enableOrderBook": True,
-            "outcomes": json.dumps(["Yes", "No"]),
+            "outcomes": json.dumps(outcomes or ["Yes", "No"]),
             "negRisk": bool(group_id),
             "negRiskMarketID": group_id or None,
             "groupItemTitle": market_id.upper(),

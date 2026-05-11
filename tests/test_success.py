@@ -125,6 +125,58 @@ class SuccessStatusTests(unittest.TestCase):
         self.assertFalse(report["paper_success_candidate"])
         self.assertEqual(report["maker_hybrid"]["fill_model"], "touch_bid")
 
+    def test_success_status_reports_maker_hybrid_tape_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "maker-hybrid-tape.json"
+            tape.write_text(
+                json.dumps(
+                    {
+                        "status": "tape_positive_ev_candidate_found",
+                        "fill_model": "trade_tape_sell_through",
+                        "diagnostic_only": True,
+                        "batch_count": 10,
+                        "trade_count": 100,
+                        "candidate_observation_count": 5,
+                        "completed_count": 3,
+                        "unique_completed_count": 1,
+                        "unique_completed_realized_edge_at_cap": 0.21,
+                        "top_unique_completed": [{"realized_edge_at_cap": 0.21}],
+                    }
+                )
+                + "\n"
+            )
+
+            report = success_status_report(maker_hybrid_tape_path=tape)
+
+        self.assertEqual(report["status"], "maker_hybrid_tape_positive_ev_candidate")
+        self.assertTrue(report["paper_success_candidate"])
+        self.assertTrue(report["maker_hybrid_tape"]["diagnostic_only"])
+        self.assertEqual(report["maker_hybrid_tape"]["unique_completed_count"], 1)
+
+    def test_success_status_requires_min_tape_edge_for_actionable_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "maker-hybrid-tape.json"
+            tape.write_text(
+                json.dumps(
+                    {
+                        "status": "tape_positive_ev_candidate_found",
+                        "unique_completed_count": 1,
+                        "unique_completed_realized_edge_at_cap": 0.02,
+                        "top_unique_completed": [{"realized_edge_at_cap": 0.02}],
+                    }
+                )
+                + "\n"
+            )
+
+            report = success_status_report(
+                maker_hybrid_tape_path=tape,
+                min_maker_hybrid_tape_edge_at_cap=0.25,
+            )
+
+        self.assertEqual(report["status"], "no_success")
+        self.assertFalse(report["paper_success_candidate"])
+        self.assertEqual(report["maker_hybrid_tape"]["actionable_unique_completed_count"], 0)
+
     def test_success_status_reports_cross_platform_paper_opportunity(self):
         with tempfile.TemporaryDirectory() as tmp:
             scan = Path(tmp) / "cross.json"

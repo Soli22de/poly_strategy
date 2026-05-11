@@ -13,9 +13,11 @@ TRADES="${TRADES:-data/polymarket-data-trades-current.ndjson}"
 OUT="${OUT:-data/maker-hybrid-tape-sim-current.json}"
 PROXY="${PROXY:-127.0.0.1:10808}"
 TIMEOUT="${TIMEOUT:-15}"
-TRADE_LIMIT="${TRADE_LIMIT:-1000}"
+TRADE_LIMIT="${TRADE_LIMIT:-250}"
 TRADE_SIDE="${TRADE_SIDE:-SELL}"
-TOP_MARKETS="${TOP_MARKETS:-20}"
+TOP_MARKETS="${TOP_MARKETS:-40}"
+PER_MARKET="${PER_MARKET:-1}"
+TRADE_WORKERS="${TRADE_WORKERS:-6}"
 TICK_SIZE="${TICK_SIZE:-0.001}"
 QUOTE_MODE="${QUOTE_MODE:-near_ask}"
 QUOTE_OFFSET_TICKS="${QUOTE_OFFSET_TICKS:-1}"
@@ -43,15 +45,23 @@ fi
 
 : > "$TRADES"
 
-"$PYTHON_BIN" -m poly_strategy.cli collect-polymarket-trades \
-  --out "$TRADES" \
-  --gamma "$GAMMA" \
-  --hybrid-scan "$HYBRID_SCAN" \
-  --top-markets "$TOP_MARKETS" \
-  --limit "$TRADE_LIMIT" \
-  --side "$TRADE_SIDE" \
-  --timeout "$TIMEOUT" \
+collect_args=(
+  -m poly_strategy.cli collect-polymarket-trades
+  --out "$TRADES"
+  --gamma "$GAMMA"
+  --hybrid-scan "$HYBRID_SCAN"
+  --top-markets "$TOP_MARKETS"
+  --limit "$TRADE_LIMIT"
+  --side "$TRADE_SIDE"
+  --timeout "$TIMEOUT"
   --proxy "$PROXY"
+  --trade-workers "$TRADE_WORKERS"
+)
+if [[ "$PER_MARKET" == "1" ]]; then
+  collect_args+=(--per-market)
+fi
+
+"$PYTHON_BIN" "${collect_args[@]}"
 
 exec "$PYTHON_BIN" -m poly_strategy.cli maker-hybrid-tape-sim \
   --snapshots "$SNAPSHOTS" \

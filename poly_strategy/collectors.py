@@ -221,42 +221,59 @@ def collect_polymarket_data_trades(
     proxy: Optional[str] = None,
     side: Optional[str] = None,
     offset: int = 0,
+    per_market: bool = False,
+    max_workers: int = 1,
     fetch_json: Optional[Callable[[str, float, Optional[str]], object]] = None,
 ) -> int:
     if limit < 1:
         raise ValueError("limit must be at least 1")
     if offset < 0:
         raise ValueError("offset must be non-negative")
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
 
     markets = raw_gamma_markets_from_ndjson(gamma_path)
     condition_to_market_id = _condition_ids_for_market_ids(markets, market_ids)
     if not condition_to_market_id:
         return 0
 
-    params = {
-        "market": ",".join(condition_to_market_id),
-        "limit": str(limit),
-        "offset": str(offset),
-    }
-    if side:
-        params["side"] = str(side).upper()
     fetch = fetch_json or _fetch_json
-    response = fetch(f"{POLYMARKET_DATA_TRADES_URL}?{urlencode(params)}", timeout, proxy)
-    trades = response if isinstance(response, list) else (response or {}).get("trades")
-    if not isinstance(trades, list):
-        raise RuntimeError("unexpected Polymarket data trades response")
+    if per_market:
+        trades = _fetch_polymarket_data_trades_per_market(
+            list(condition_to_market_id),
+            limit,
+            offset,
+            side,
+            timeout,
+            proxy,
+            fetch,
+            max_workers,
+        )
+    else:
+        response = fetch(
+            _polymarket_data_trades_url(list(condition_to_market_id), limit, offset, side),
+            timeout,
+            proxy,
+        )
+        trades = _polymarket_data_trade_rows_from_response(response)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    seen_trade_keys = set()
+    condition_lookup = {condition_id.lower(): market_id for condition_id, market_id in condition_to_market_id.items()}
     with path.open("a") as handle:
         for trade in trades:
             if not isinstance(trade, dict):
                 continue
             condition_id = str(trade.get("conditionId") or trade.get("condition_id") or "").strip()
+            trade_key = _polymarket_data_trade_key(trade)
+            if trade_key in seen_trade_keys:
+                continue
+            seen_trade_keys.add(trade_key)
             row = {
                 "ts": _utc_now(),
                 "type": "raw_polymarket_data_trade",
-                "market_id": condition_to_market_id.get(condition_id, condition_id),
+                "market_id": condition_lookup.get(condition_id.lower(), condition_id),
                 "condition_id": condition_id,
                 "asset_id": str(trade.get("asset") or trade.get("asset_id") or "").strip(),
                 "side": str(trade.get("side") or "").upper(),
@@ -268,6 +285,82 @@ def collect_polymarket_data_trades(
             handle.write(json.dumps(row, sort_keys=True) + "\n")
             count += 1
     return count
+
+
+def _fetch_polymarket_data_trades_per_market(
+    condition_ids: List[str],
+    limit: int,
+    offset: int,
+    side: Optional[str],
+    timeout: float,
+    proxy: Optional[str],
+    fetch_json: Callable[[str, float, Optional[str]], object],
+    max_workers: int,
+) -> List[dict]:
+    def fetch_condition(condition_id: str) -> List[dict]:
+        response = fetch_json(_polymarket_data_trades_url([condition_id], limit, offset, side), timeout, proxy)
+        trades = _polymarket_data_trade_rows_from_response(response)
+        for trade in trades:
+            if isinstance(trade, dict) and not (trade.get("conditionId") or trade.get("condition_id")):
+                trade["conditionId"] = condition_id
+        return trades
+
+    if max_workers <= 1 or len(condition_ids) <= 1:
+        rows = []
+        for condition_id in condition_ids:
+            rows.extend(fetch_condition(condition_id))
+        return rows
+
+    rows_by_condition = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(condition_ids))) as executor:
+        futures = {executor.submit(fetch_condition, condition_id): condition_id for condition_id in condition_ids}
+        for future in as_completed(futures):
+            rows_by_condition[futures[future]] = future.result()
+
+    rows = []
+    for condition_id in condition_ids:
+        rows.extend(rows_by_condition.get(condition_id, []))
+    return rows
+
+
+def _polymarket_data_trades_url(
+    condition_ids: List[str],
+    limit: int,
+    offset: int,
+    side: Optional[str],
+) -> str:
+    params = {
+        "market": ",".join(condition_ids),
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    if side:
+        params["side"] = str(side).upper()
+    return f"{POLYMARKET_DATA_TRADES_URL}?{urlencode(params)}"
+
+
+def _polymarket_data_trade_rows_from_response(response: object) -> List[dict]:
+    if isinstance(response, list):
+        trades = response
+    elif isinstance(response, dict):
+        trades = response.get("trades")
+    else:
+        trades = None
+    if not isinstance(trades, list):
+        raise RuntimeError("unexpected Polymarket data trades response")
+    return [trade for trade in trades if isinstance(trade, dict)]
+
+
+def _polymarket_data_trade_key(trade: dict) -> tuple:
+    return (
+        str(trade.get("transactionHash") or trade.get("transaction_hash") or ""),
+        str(trade.get("asset") or trade.get("asset_id") or ""),
+        str(trade.get("conditionId") or trade.get("condition_id") or ""),
+        str(trade.get("timestamp") or trade.get("trade_ts") or ""),
+        str(trade.get("side") or "").upper(),
+        str(trade.get("price") or ""),
+        str(trade.get("size") or ""),
+    )
 
 
 def fetch_polymarket_books_by_token_id(
@@ -1206,7 +1299,9 @@ def _is_binary_market(market: dict) -> bool:
     if market.get("acceptingOrders") is False:
         return False
     outcomes = _loads_json_list(market.get("outcomes"))
-    return [str(outcome).lower() for outcome in outcomes] == ["yes", "no"]
+    if outcomes and len(outcomes) != 2:
+        return False
+    return len(_loads_json_list(market.get("clobTokenIds"))) == 2
 
 
 def _loads_json_list(value) -> List[str]:

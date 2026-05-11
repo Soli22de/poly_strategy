@@ -35,11 +35,15 @@ MIN_RUN_SECONDS="${MIN_RUN_SECONDS:-0}"
 MAX_TRADES="${MAX_TRADES:-3}"
 SLIPPAGE_BPS="${SLIPPAGE_BPS:-50}"
 TICK_SIZE="${TICK_SIZE:-0.01}"
+MAX_LEG_COUNT="${MAX_LEG_COUNT:-2}"
+MIN_LIMIT_EDGE_PER_SHARE="${MIN_LIMIT_EDGE_PER_SHARE:-0.002}"
+MIN_LIMIT_ROI="${MIN_LIMIT_ROI:-0.001}"
 RISK_STATE="${RISK_STATE:-data/risk-state.json}"
 KILL_SWITCH="${KILL_SWITCH:-data/KILL_SWITCH}"
 MAX_TRADE_NOTIONAL="${MAX_TRADE_NOTIONAL:-10}"
 MAX_DAILY_LOSS="${MAX_DAILY_LOSS:-25}"
 MAX_DAILY_ORDERS="${MAX_DAILY_ORDERS:-20}"
+MAX_ORDER_COUNT="${MAX_ORDER_COUNT:-2}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -71,11 +75,14 @@ exec "$PYTHON_BIN" -m poly_strategy.cli execute-alerts "$ALERTS_PATH" \
   --max-trades "$MAX_TRADES" \
   --slippage-bps "$SLIPPAGE_BPS" \
   --tick-size "$TICK_SIZE" \
-  --require-single-level \
+  --max-leg-count "$MAX_LEG_COUNT" \
+  --min-limit-edge-per-share "$MIN_LIMIT_EDGE_PER_SHARE" \
+  --min-limit-roi "$MIN_LIMIT_ROI" \
   --require-pretrade-pass \
   --risk-state "$RISK_STATE" \
   --kill-switch "$KILL_SWITCH" \
   --max-trade-notional "$MAX_TRADE_NOTIONAL" \
   --max-daily-loss "$MAX_DAILY_LOSS" \
   --max-daily-orders "$MAX_DAILY_ORDERS" \
+  --max-order-count "$MAX_ORDER_COUNT" \
   --require-risk-pass

@@ -178,6 +178,8 @@ def main(argv=None) -> int:
                 proxy=args.proxy,
                 side=args.side,
                 offset=args.offset,
+                per_market=args.per_market,
+                max_workers=args.trade_workers,
             )
             print(f"wrote={count} out={args.out}")
             return 0
@@ -673,7 +675,9 @@ def main(argv=None) -> int:
                 maker_adaptive_path=Path(args.maker_adaptive) if args.maker_adaptive else None,
                 maker_hedge_path=Path(args.maker_hedge) if args.maker_hedge else None,
                 maker_hybrid_path=Path(args.maker_hybrid) if args.maker_hybrid else None,
+                maker_hybrid_tape_path=Path(args.maker_hybrid_tape) if args.maker_hybrid_tape else None,
                 cross_platform_scan_path=Path(args.cross_platform_scan) if args.cross_platform_scan else None,
+                min_maker_hybrid_tape_edge_at_cap=args.min_maker_hybrid_tape_edge_at_cap,
                 min_cross_platform_capital_edge=args.min_cross_platform_capital_edge,
             )
             if args.out:
@@ -1159,6 +1163,12 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_trades.add_argument("--limit", type=int, default=500, help="maximum trade rows per request")
     collect_trades.add_argument("--offset", type=int, default=0, help="Data API pagination offset")
     collect_trades.add_argument("--side", choices=["BUY", "SELL"], help="optional Data API side filter")
+    collect_trades.add_argument(
+        "--per-market",
+        action="store_true",
+        help="request each condition ID separately so active markets do not crowd out quieter ones",
+    )
+    collect_trades.add_argument("--trade-workers", type=int, default=1, help="parallel trade requests when --per-market is set")
     collect_trades.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     collect_trades.add_argument("--proxy", help="HTTP proxy, for example 127.0.0.1:10808")
 
@@ -1663,7 +1673,14 @@ def _build_parser() -> argparse.ArgumentParser:
     success_status.add_argument("--maker-adaptive", help="maker adaptive quote report JSON path")
     success_status.add_argument("--maker-hedge", help="maker hedge simulation report JSON path")
     success_status.add_argument("--maker-hybrid", help="maker hybrid simulation report JSON path")
+    success_status.add_argument("--maker-hybrid-tape", help="maker hybrid public trade tape simulation report JSON path")
     success_status.add_argument("--cross-platform-scan", help="latest cross_platform_scan_report JSON path")
+    success_status.add_argument(
+        "--min-maker-hybrid-tape-edge-at-cap",
+        type=float,
+        default=0.0,
+        help="minimum capital-capped public tape edge required to treat a maker-hybrid tape candidate as actionable",
+    )
     success_status.add_argument(
         "--min-cross-platform-capital-edge",
         type=float,
@@ -1994,6 +2011,8 @@ def _add_pretrade_check_args(parser) -> None:
     parser.add_argument("--max-leg-count", type=int, help="fail pretrade check if a plan has more legs")
     parser.add_argument("--max-worst-price", type=float, help="fail pretrade check if any buy reference price exceeds this value")
     parser.add_argument("--require-single-level", action="store_true", help="fail pretrade check if a leg crosses multiple price levels")
+    parser.add_argument("--min-limit-edge-per-share", type=float, help="fail pretrade check unless order limit prices keep this edge")
+    parser.add_argument("--min-limit-roi", type=float, help="fail pretrade check unless order limit prices keep this ROI")
     parser.add_argument("--require-pretrade-pass", action="store_true", help="skip execution plans that fail pretrade checks")
 
 
@@ -2631,6 +2650,9 @@ def _execution_plan_rows(result, args) -> list:
             max_leg_count=args.max_leg_count,
             max_worst_price=args.max_worst_price,
             require_single_level=args.require_single_level,
+            plan=plan,
+            min_limit_edge_per_share=args.min_limit_edge_per_share,
+            min_limit_roi=args.min_limit_roi,
         )
         if args.require_pretrade_pass and not check["passed"]:
             continue
