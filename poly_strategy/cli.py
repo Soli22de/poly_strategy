@@ -489,6 +489,7 @@ def main(argv=None) -> int:
                 maker_selection_pool_size=args.maker_selection_pool_size,
                 max_maker_combinations=args.max_maker_combinations,
                 quote_mode=args.quote_mode,
+                fill_model=args.fill_model,
                 quote_offset_ticks=args.quote_offset_ticks,
                 horizon_seconds=args.horizon_seconds,
                 max_candidates_per_batch=args.max_candidates_per_batch,
@@ -1428,6 +1429,12 @@ def _build_parser() -> argparse.ArgumentParser:
     maker_hybrid_sim.add_argument("--out", help="output maker hybrid simulation JSON path; prints JSON when omitted")
     maker_hybrid_sim.add_argument("--tick-size", type=float, default=0.001, help="passive quote tick size")
     maker_hybrid_sim.add_argument("--quote-mode", choices=["near_ask", "improve_bid"], default="near_ask")
+    maker_hybrid_sim.add_argument(
+        "--fill-model",
+        choices=["crossed_ask", "touch_bid"],
+        default="crossed_ask",
+        help="crossed_ask is conservative; touch_bid is diagnostic only and may overstate maker fills",
+    )
     maker_hybrid_sim.add_argument(
         "--quote-offset-ticks",
         type=int,

@@ -146,6 +146,7 @@ def _maker_hybrid_summary(path: Optional[Path]) -> dict:
         "path": str(path),
         "found": True,
         "status": row.get("status"),
+        "fill_model": row.get("fill_model") or "crossed_ask",
         "batch_count": int(row.get("batch_count") or 0),
         "candidate_observation_count": int(row.get("candidate_observation_count") or 0),
         "completed_count": int(row.get("completed_count") or 0),
@@ -226,7 +227,11 @@ def _success_status(
         return "stable_paper_opportunity"
     if cross_platform.get("actionable_verified_positive_count", 0) > 0:
         return "cross_platform_paper_opportunity"
-    if maker_hybrid.get("completed_count", 0) > 0 and maker_hybrid.get("completed_realized_edge_at_cap", 0.0) > 0:
+    if (
+        maker_hybrid.get("fill_model") in {None, "crossed_ask"}
+        and maker_hybrid.get("completed_count", 0) > 0
+        and maker_hybrid.get("completed_realized_edge_at_cap", 0.0) > 0
+    ):
         return "maker_hybrid_positive_ev"
     if maker_hedge.get("completed_count", 0) > 0 and maker_hedge.get("completed_realized_edge_at_cap", 0.0) > 0:
         return "maker_hedge_positive_ev"

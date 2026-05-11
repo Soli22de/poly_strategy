@@ -471,6 +471,7 @@ def maker_hybrid_sim_report(
     maker_selection_pool_size: int = 8,
     max_maker_combinations: int = 25,
     quote_mode: str = "near_ask",
+    fill_model: str = "crossed_ask",
     horizon_seconds: float = 300.0,
     max_candidates_per_batch: int = 25,
     top_n: int = 25,
@@ -494,6 +495,7 @@ def maker_hybrid_sim_report(
     min_maker_legs, max_maker_legs = _normalize_maker_leg_bounds(min_maker_legs, max_maker_legs)
     maker_selection_pool_size = _normalize_positive_int(maker_selection_pool_size, "maker_selection_pool_size")
     max_maker_combinations = _normalize_positive_int(max_maker_combinations, "max_maker_combinations")
+    fill_model = _normalize_fill_model(fill_model)
     quote_offset_ticks = _normalize_quote_offset_ticks(quote_offset_ticks)
 
     rule_set = load_rule_set(rules_path, gamma_path=gamma_path)
@@ -512,6 +514,7 @@ def maker_hybrid_sim_report(
         max_maker_combinations=max_maker_combinations,
         quote_mode=quote_mode,
         quote_offset_ticks=quote_offset_ticks,
+        fill_model=fill_model,
         horizon_seconds=horizon_seconds,
         max_candidates_per_batch=max_candidates_per_batch,
         include_yes_no_pairs=include_yes_no_pairs,
@@ -551,6 +554,7 @@ def maker_hybrid_sim_report(
         "max_maker_combinations": max_maker_combinations,
         "quote_mode": _normalize_quote_mode(quote_mode),
         "quote_offset_ticks": quote_offset_ticks,
+        "fill_model": fill_model,
         "by_kind": _hybrid_fill_summary_by_kind(results),
         "top_completed": sorted(completed, key=_hybrid_result_sort_key)[:top_n],
         "top_unsafe": sorted(unsafe, key=_hybrid_result_sort_key)[:top_n],
@@ -648,6 +652,7 @@ def simulate_maker_hybrids(
     max_maker_combinations: int = 25,
     quote_mode: str = "near_ask",
     quote_offset_ticks: int = 1,
+    fill_model: str = "crossed_ask",
     horizon_seconds: float = 300.0,
     max_candidates_per_batch: int = 25,
     include_yes_no_pairs: bool = False,
@@ -655,6 +660,7 @@ def simulate_maker_hybrids(
     min_maker_legs, max_maker_legs = _normalize_maker_leg_bounds(min_maker_legs, max_maker_legs)
     maker_selection_pool_size = _normalize_positive_int(maker_selection_pool_size, "maker_selection_pool_size")
     max_maker_combinations = _normalize_positive_int(max_maker_combinations, "max_maker_combinations")
+    fill_model = _normalize_fill_model(fill_model)
     results = []
     for index, batch in enumerate(batches[:-1]):
         candidates = scan_maker_hybrid_candidates(
@@ -678,7 +684,7 @@ def simulate_maker_hybrids(
             continue
         future_batches = _future_batches_within_horizon(batches, index, horizon_seconds)
         for candidate in candidates:
-            results.append(_simulate_hybrid_candidate(candidate, future_batches, min_edge=min_edge))
+            results.append(_simulate_hybrid_candidate(candidate, future_batches, min_edge=min_edge, fill_model=fill_model))
     return results
 
 
@@ -1563,6 +1569,15 @@ def _normalize_positive_int(value: int, name: str) -> int:
     return normalized
 
 
+def _normalize_fill_model(value: str) -> str:
+    normalized = (value or "crossed_ask").strip().lower().replace("-", "_")
+    if normalized in {"crossed_ask", "ask_cross", "strict"}:
+        return "crossed_ask"
+    if normalized in {"touch_bid", "bid_touch", "queue_touch"}:
+        return "touch_bid"
+    raise ValueError("fill_model must be crossed_ask or touch_bid")
+
+
 def _token_book(snapshot: BinaryMarketSnapshot, token: str) -> OrderBook:
     if token == "YES":
         return snapshot.yes
@@ -1941,7 +1956,12 @@ def _simulate_hedge_candidate(candidate: dict, future_batches: List[List[BinaryM
     return row
 
 
-def _simulate_hybrid_candidate(candidate: dict, future_batches: List[List[BinaryMarketSnapshot]], min_edge: float) -> dict:
+def _simulate_hybrid_candidate(
+    candidate: dict,
+    future_batches: List[List[BinaryMarketSnapshot]],
+    min_edge: float,
+    fill_model: str,
+) -> dict:
     open_maker_legs = {int(leg.get("source_leg_index") or 0): dict(leg) for leg in candidate.get("maker_legs") or []}
     maker_fills = []
     hedge_rows = []
@@ -1956,7 +1976,7 @@ def _simulate_hybrid_candidate(candidate: dict, future_batches: List[List[Binary
             snapshot = by_market_id.get(str(leg.get("market_id") or ""))
             if snapshot is None:
                 continue
-            observation = _leg_fill_observation(snapshot, leg)
+            observation = _maker_leg_fill_observation(snapshot, leg, fill_model)
             if observation is None:
                 continue
             maker_fills.append({"leg_index": index, **observation})
@@ -2013,6 +2033,7 @@ def _simulate_hybrid_candidate(candidate: dict, future_batches: List[List[Binary
         "maker_fills": maker_fills,
         "unfilled_maker_legs": [open_maker_legs[index] for index in sorted(open_maker_legs)],
         "risk_flags": candidate.get("risk_flags"),
+        "fill_model": fill_model,
     }
     return row
 
@@ -2046,6 +2067,32 @@ def _leg_fill_observation(snapshot: BinaryMarketSnapshot, leg: dict) -> Optional
         "token": token,
         "limit_price": limit_price,
         "observed_best_ask": best_ask,
+    }
+
+
+def _maker_leg_fill_observation(snapshot: BinaryMarketSnapshot, leg: dict, fill_model: str) -> Optional[dict]:
+    crossed = _leg_fill_observation(snapshot, leg)
+    if crossed is not None:
+        crossed["fill_model"] = "crossed_ask"
+        return crossed
+    if fill_model != "touch_bid":
+        return None
+    token = str(leg.get("token") or "")
+    book = _token_book(snapshot, token)
+    if not book.bids:
+        return None
+    best_bid = book.bids[0].price
+    limit_price = float(leg.get("limit_price") or 0.0)
+    if best_bid < limit_price:
+        return None
+    return {
+        "fill_ts": snapshot.ts,
+        "market_id": snapshot.market_id,
+        "token": token,
+        "limit_price": limit_price,
+        "observed_best_bid": best_bid,
+        "fill_model": "touch_bid",
+        "diagnostic_only": True,
     }
 
 

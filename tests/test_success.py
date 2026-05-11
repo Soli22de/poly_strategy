@@ -103,6 +103,28 @@ class SuccessStatusTests(unittest.TestCase):
         self.assertTrue(report["paper_success_candidate"])
         self.assertEqual(report["maker_hybrid"]["completed_count"], 1)
 
+    def test_success_status_ignores_diagnostic_touch_bid_hybrid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hybrid = Path(tmp) / "maker-hybrid-touch.json"
+            hybrid.write_text(
+                json.dumps(
+                    {
+                        "status": "positive_ev_hybrid_found",
+                        "fill_model": "touch_bid",
+                        "completed_count": 1,
+                        "completed_realized_edge_at_cap": 0.35,
+                        "top_completed": [{"realized_edge_at_cap": 0.35}],
+                    }
+                )
+                + "\n"
+            )
+
+            report = success_status_report(maker_hybrid_path=hybrid)
+
+        self.assertEqual(report["status"], "no_success")
+        self.assertFalse(report["paper_success_candidate"])
+        self.assertEqual(report["maker_hybrid"]["fill_model"], "touch_bid")
+
     def test_success_status_reports_cross_platform_paper_opportunity(self):
         with tempfile.TemporaryDirectory() as tmp:
             scan = Path(tmp) / "cross.json"

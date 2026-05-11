@@ -394,6 +394,55 @@ class MakerTests(unittest.TestCase):
         self.assertEqual(report["partial_maker_fill_count"], 2)
         self.assertEqual(report["top_partial"][0]["filled_maker_leg_count"], 1)
 
+    def test_maker_hybrid_touch_bid_fill_model_is_diagnostic(self):
+        rows = [
+            _snapshot("a", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:00:00Z"),
+            _snapshot("b", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:00:00Z"),
+            _snapshot("c", no_bid=0.62, no_ask=0.66, ts="2026-05-10T00:00:00Z"),
+            _snapshot("a", no_bid=0.66, no_ask=0.67, ts="2026-05-10T00:01:00Z"),
+            _snapshot("b", no_bid=0.63, no_ask=0.67, ts="2026-05-10T00:01:00Z"),
+            _snapshot("c", no_bid=0.65, no_ask=0.66, ts="2026-05-10T00:01:00Z"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshots.ndjson"
+            gamma_path = Path(tmp) / "gamma.ndjson"
+            snapshot_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            gamma_path.write_text(
+                "\n".join(json.dumps(_gamma_row(market_id, index)) for index, market_id in enumerate(["a", "b", "c"]))
+                + "\n"
+            )
+
+            strict = maker_hybrid_sim_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                min_maker_legs=2,
+                max_maker_legs=2,
+                max_maker_combinations=1,
+                horizon_seconds=120,
+            )
+            touch = maker_hybrid_sim_report(
+                snapshot_path,
+                gamma_path=gamma_path,
+                tick_size=0.01,
+                min_edge=0.005,
+                min_roi=0.001,
+                max_capital=100,
+                min_maker_legs=2,
+                max_maker_legs=2,
+                max_maker_combinations=1,
+                fill_model="touch_bid",
+                horizon_seconds=120,
+            )
+
+        self.assertEqual(strict["completed_count"], 0)
+        self.assertEqual(touch["fill_model"], "touch_bid")
+        self.assertEqual(touch["completed_count"], 1)
+        self.assertTrue(touch["top_completed"][0]["maker_fills"][0]["diagnostic_only"])
+
 
 def _snapshot(market_id: str, no_bid: float, no_ask: float, ts: str = "2026-05-10T00:00:00Z"):
     yes_bid = max(0.0, 1.0 - no_ask - 0.02)
