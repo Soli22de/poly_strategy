@@ -43,3 +43,4 @@ python -m poly_strategy.cli collect-polymarket --out data/polymarket-gamma.ndjso
 
 - Keep `.env.local`, generated snapshots, logs, and other runtime artifacts out of git.
 - The repo ships with dry-run workflows and optional live integrations, but no secrets.
+- Licensed under MIT. See [LICENSE](LICENSE).
