@@ -43,6 +43,22 @@ from urllib.request import Request, urlopen
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Provider config — different models can route through different OpenAI-compatible endpoints.
+# `api_key_env`: env var name to read the API key from.
+# `base_url`: chat-completions endpoint URL.
+PROVIDERS: dict[str, dict] = {
+    "openrouter": {
+        "base_url": OPENROUTER_URL,
+        "api_key_env": "OPENROUTER_API_KEY",
+    },
+    "elysiver": {
+        # User-paid endpoint with quota-limited GLM access. No per-token billing
+        # passed to us; treat cost as $0 (only quota matters).
+        "base_url": "https://elysiver.h-e.top/v1/chat/completions",
+        "api_key_env": "OPENAI_BACKUP_API_KEY",  # from .env
+    },
+}
+
 # Same V2 prompt as experiment 2 — keep constant across models so the
 # only variable is the model itself.
 PROMPT_V2 = """You are extracting deterministic resolution clauses from a
@@ -81,23 +97,50 @@ D. Return AT MOST 8 deterministic_clauses.
 # OpenRouter pricing as of 2026-05-12, USD per 1M tokens (input, output).
 # If a model is wrong/retired the script will get HTTP 400 and skip it.
 MODELS: dict[str, dict] = {
-    "google/gemini-2.0-flash-001": {"in": 0.10, "out": 0.40, "label": "Gemini 2.0 Flash"},
-    "deepseek/deepseek-chat":       {"in": 0.27, "out": 1.10, "label": "DeepSeek V3"},
-    "openai/gpt-4o-mini":           {"in": 0.15, "out": 0.60, "label": "GPT-4o-mini"},
-    "meta-llama/llama-3.3-70b-instruct": {"in": 0.13, "out": 0.40, "label": "Llama 3.3 70B"},
+    # OpenRouter models — priced per token, charged to OPENROUTER_API_KEY
+    "google/gemini-2.0-flash-001":       {"provider": "openrouter", "in": 0.10, "out": 0.40, "label": "Gemini 2.0 Flash"},
+    "deepseek/deepseek-chat":             {"provider": "openrouter", "in": 0.27, "out": 1.10, "label": "DeepSeek V3"},
+    "openai/gpt-4o-mini":                 {"provider": "openrouter", "in": 0.15, "out": 0.60, "label": "GPT-4o-mini"},
+    "meta-llama/llama-3.3-70b-instruct":  {"provider": "openrouter", "in": 0.13, "out": 0.40, "label": "Llama 3.3 70B"},
+    # Elysiver-hosted GLM — user-paid endpoint, quota-limited, treat cost as $0 to us
+    "glm-5":                              {"provider": "elysiver", "in": 0.0, "out": 0.0, "label": "GLM-5 (elysiver)"},
+    "glm-4.6":                            {"provider": "elysiver", "in": 0.0, "out": 0.0, "label": "GLM-4.6 (elysiver)"},
 }
 
 
-def load_api_key() -> str:
-    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+def load_env_file(path: Path = None) -> None:
+    """Minimal .env loader — only sets env vars not already present."""
+    if path is None:
+        path = REPO_ROOT / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+def load_api_key_for(provider: str) -> str:
+    env_var = PROVIDERS[provider]["api_key_env"]
+    key = os.environ.get(env_var, "").strip()
     if not key:
-        raise RuntimeError("OPENROUTER_API_KEY env var not set")
+        raise RuntimeError(f"{env_var} env var not set (required for provider '{provider}')")
     return key
 
 
-def call_model(api_key: str, description: str, model: str, timeout: int = 90) -> tuple[str, dict, float]:
-    """Returns (raw_text, usage, elapsed). raw_text is the model's verbatim message content
-    so the caller can inspect what was actually returned even when parsing fails."""
+def call_model(description: str, model: str, timeout: int = 90) -> tuple[str, dict, float]:
+    """Returns (raw_text, usage, elapsed). Routes through the model's configured provider.
+    raw_text is the model's verbatim message content so the caller can inspect what was
+    actually returned even when parsing fails."""
+    cfg = MODELS[model]
+    provider = cfg.get("provider", "openrouter")
+    api_key = load_api_key_for(provider)
+    url = PROVIDERS[provider]["base_url"]
     body = {
         "model": model,
         "messages": [
@@ -111,11 +154,14 @@ def call_model(api_key: str, description: str, model: str, timeout: int = 90) ->
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/Soli22de/poly_strategy",
-        "X-Title": "poly_strategy-T2-multi-model",
+        # Browser-like UA — Cloudflare-protected endpoints (elysiver) reject urllib default UA
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
+    if provider == "openrouter":
+        headers["HTTP-Referer"] = "https://github.com/Soli22de/poly_strategy"
+        headers["X-Title"] = "poly_strategy-T2-multi-model"
     t0 = time.time()
-    req = Request(OPENROUTER_URL, data=json.dumps(body).encode("utf-8"), headers=headers)
+    req = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
     try:
         with urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -126,8 +172,10 @@ def call_model(api_key: str, description: str, model: str, timeout: int = 90) ->
         raise RuntimeError(f"URL error: {e.reason}")
     elapsed = time.time() - t0
     if payload.get("error"):
-        raise RuntimeError(f"OpenRouter error: {payload['error']}")
-    text = payload["choices"][0]["message"]["content"] or ""
+        raise RuntimeError(f"{provider} error: {payload['error']}")
+    if "choices" not in payload or not payload["choices"]:
+        raise RuntimeError(f"{provider} returned no choices: {str(payload)[:300]}")
+    text = payload["choices"][0]["message"].get("content") or ""
     usage = payload.get("usage", {}) or {}
     return text, usage, elapsed
 
@@ -222,10 +270,13 @@ def main() -> int:
     ap.add_argument("--models", type=str, nargs="*", default=list(MODELS.keys()))
     ap.add_argument("--max-cost-usd", type=float, default=0.50)
     ap.add_argument("--out-dir", type=Path, default=None)
+    ap.add_argument("--out-name", type=str, default="multi-model-results",
+                    help="Output NDJSON base name (without .ndjson). Pass a different name to avoid overwriting prior runs.")
     args = ap.parse_args()
 
     random.seed(42)
-    api_key = load_api_key()
+    load_env_file()
+    # Per-call provider key lookup happens inside call_model now
 
     print("Loading markets...")
     markets = []
@@ -262,8 +313,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    ndjson_path = out_dir / "multi-model-results.ndjson"
-    report_path = reports_dir / f"experiment-multi-model-extraction-{date_tag}.md"
+    ndjson_path = out_dir / f"{args.out_name}.ndjson"
+    report_path = reports_dir / f"experiment-{args.out_name}-{date_tag}.md"
 
     cumulative_cost = 0.0
     rows = []
@@ -292,7 +343,7 @@ def main() -> int:
                     "description_bucket": bucket,
                 }
                 try:
-                    raw_text, usage, elapsed = call_model(api_key, desc, model)
+                    raw_text, usage, elapsed = call_model(desc, model)
                 except Exception as e:
                     row["error"] = str(e)[:300]
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
