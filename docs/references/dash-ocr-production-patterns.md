@@ -183,15 +183,15 @@ Three design choices that are load-bearing — flag before changing:
 | 步骤 | 调用次数 | 单价 | 小计 |
 |---|---|---|---|
 | T2 V2 主提取（Gemini Flash） | 2000 | $0.00009 | **$0.18** |
-| T2 V1 fallback（10% silent-empty，retry Qwen 2.5-72B） | 200 | $0.00015 | **$0.03** |
-| T2 prompt tuning head-to-head（4 模型 × 20 markets） | 80 | 平均 $0.0003 | **$0.02** |
-| T3 embedding（OpenAI text-embedding-3-small 仍最划算） | ~10M token | $0.00002/1k | **$0.20** |
-| T3 LLM 验证 candidates（Qwen 2.5-72B） | 500 | $0.00015 | **$0.08** |
+| T2 V1 fallback（10% silent-empty，**同 Gemini Flash + V1 permissive prompt**） | 200 | $0.00009 | **$0.02** |
+| T2 prompt tuning head-to-head（3 模型 × 20 markets，仅调优阶段） | 60 | 平均 $0.0003 | **$0.02** |
+| T3 embedding（OpenAI text-embedding-3-small） | ~10M token | $0.00002/1k | **$0.20** |
+| T3 LLM 验证 candidates（Gemini 2.0 Flash） | 500 | $0.00009 | **$0.05** |
 | T4 corpus（结构化派生，无 LLM 调用） | 0 | — | **$0** |
 | T4 judge ensemble（3 模型 × 100 cases） | 300 | 平均 $0.00015 | **$0.05** |
-| **合计单次完整跑** | | | **~$0.56** |
+| **合计单次完整跑** | | | **~$0.52** |
 
-**vs 原 $17 估算**：30× 便宜。
+**vs 原 $17 估算**：33× 便宜。
 
 每月跑 2 次 ≈ $1.20。零成本敏感度。
 
@@ -203,7 +203,7 @@ Three design choices that are load-bearing — flag before changing:
 |---|---|---|
 | API gateway | OpenRouter | §0 |
 | T2 主模型 | `google/gemini-2.0-flash-001` | §3.1 性价比 |
-| T2 fallback 模型 | `qwen/qwen-2.5-72b-instruct` | dash-ocr head-to-head 赢家 |
+| T2 silent-empty fallback | **同 `google/gemini-2.0-flash-001` + V1 permissive prompt** | dash-ocr-pipeline `retry_silent_empty_checkpoint.py` 模式：同模型不同 prompt，而非换模型。pipeline 已弃用 Qwen（Gemini Flash 单 call F1 0.965 > Qwen pairer 0.950） |
 | 并发 workers | 1（先单线程，按需加） | §2.1 暂缓 |
 | MAX_COST_USD 默认 | $5 | 远超 $0.56 完整跑，留余量 |
 | HTTP 重试 | 3 次 exp backoff（2/4/8s）on 429/5xx | dash-ocr 同款 |
@@ -241,12 +241,10 @@ Three design choices that are load-bearing — flag before changing:
 
 本文件**事实上回答了 §9 的 Q2 和 Q3**：
 
-- **Q2（T2 模型选择）**：默认 Gemini Flash via OpenRouter，fallback Qwen 2.5-72B。不默认 Haiku。
+- **Q2（T2 模型选择）**：默认 `google/gemini-2.0-flash-001` via OpenRouter (V2 strict prompt)。silent-empty 时同模型 + V1 permissive prompt fallback。**不**用 Qwen——pipeline 最新版已弃用，Gemini Flash 单 call 实测优于多模型组合。**不**默认 Haiku。
 - **Q3（T3 embedding）**：OpenAI `text-embedding-3-small` 仍最划算（开源模型部署成本更高），决议不变。
 
-**但本文件不更新 PR #3（§9 决议稿）**。等同学先看完原版 + 本备忘录，他可以选择：
-- 接受新方案 → 直接在 PR #3 push 一个 fix commit 改 Q2 Decision
-- 不接受 → 在 PR 上评论原因，我们讨论
+**已同步到 PR #3**：本文件起草后，作者已在 PR #3 push commit 把 Q2 Decision 填为本节决定，把 Q3 Decision 填为采纳原建议。详见 PR #3 (`prep/q9-quick-decisions`) commit b299269。
 
 ---
 
