@@ -41,7 +41,7 @@
 
 ### 0.4 这个工作流不要做的事
 
-- ❌ 不要从零写 HTTP 客户端 —— 复用 `OpenAIRuleDiscoveryClient`（它已支持 `OPENAI_BASE_URL` 覆盖 + JSON 响应格式 + 重试），只新建一个 T2 专用包装类。
+- ❌ 不要从零写 HTTP 客户端 —— 复用 `OpenAIRuleDiscoveryClient`（它已支持 base_url 覆盖、chat JSON 响应格式和重试），只新建一个 T2 专用包装类。
 - ❌ 不要在 T2 阶段做 head-to-head 模型对比 —— 实验已证明 Gemini Flash 一次过，head-to-head 是浪费。
 - ❌ 不要尝试用 Claude / Anthropic SDK 直连。**所有 LLM 调用统一走 OpenRouter**（PR #6 §0 决议）。
 - ❌ 不要把 T2 输出直接接进 `scanner.py` / `realtime.py` / `execution.py`。T2 是 research-only。
@@ -143,11 +143,25 @@ class ResolutionReaderClient:
         Returns a ResolutionClauseSet even if extraction produces empty clauses."""
 ```
 
+Wrapper 初始化 `OpenAIRuleDiscoveryClient` 时必须显式传：
+
+```python
+api_key=api_key or os.environ.get("OPENROUTER_API_KEY")
+base_url=base_url or DEFAULT_BASE_URL
+api_mode="chat"
+chat_response_format="json_object"
+chat_stream=False
+temperature=0.0
+max_output_tokens=1500
+```
+
+不要依赖 `OpenAIRuleDiscoveryClient` 的默认 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 或 `api_mode="responses"`；那些默认值是给原有 Responses API 规则发现链路用的，不适合 OpenRouter chat-completions。
+
 ```python
 # Module-level orchestrator
 def extract_batch(
     markets: Iterable[MarketRecord],
-    out_path: Path,
+    out_path: Optional[Path] = None,
     *,
     client: Optional[ResolutionReaderClient] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
