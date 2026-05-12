@@ -14,7 +14,20 @@
 
 **替代**：现在直接拍板初稿数字，后续如果数据严重不符再改。
 
-**Decision**: ⏳ 等 PR #4 (DS pkg #02 Gamma 分布) 数据回填
+**Decision**: ✅ **用实测数据**（来自 PR #7 实验，n=2000 活跃市场，2026-05-12 snapshot）：
+
+| Tier | 24h 量 | 流动性 | spread | 距 resolution |
+|---|---|---|---|---|
+| `headline` (P90+) | ≥ \$18,333 | ≥ \$221,690 | ≤ 0.001 | 任意 |
+| `mid` (P50-P90) | \$40 – \$18,333 | \$10,138 – \$221,690 | ≤ 0.01 | 任意 |
+| **`longtail` (P10-P50)** | **\$0 – \$40** | **\$787 – \$10,138** | ≤ 0.10 | **14-90 天**（研究目标） |
+| `dead` (<P10) | ≤ \$0 (或缺) | < \$787 | > 0.10 或缺 quote | 任意 |
+
+**实务调整**：因 P10 vol24hr = \$0，longtail 和 dead 不应在 volume 上区分。**用 liquidity ≥ \$787 作为 dead 边界**：vol=0 但 liquidity 在 \$787-\$10k 的市场是真长尾（做市商不来但有底子）；vol=0 且 liquidity<\$787 才是 dead。
+
+距 resolution 14-90 天区间：实测 35% 的市场（693/2000）落在此段，样本充裕。
+
+详见 [`reports/experiment-gamma-distribution-2026-05-12.md`](../../reports/experiment-gamma-distribution-2026-05-12.md)。
 
 ---
 
