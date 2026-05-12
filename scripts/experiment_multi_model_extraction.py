@@ -103,26 +103,31 @@ MODELS: dict[str, dict] = {
     "openai/gpt-4o-mini":                 {"provider": "openrouter", "in": 0.15, "out": 0.60, "label": "GPT-4o-mini"},
     "meta-llama/llama-3.3-70b-instruct":  {"provider": "openrouter", "in": 0.13, "out": 0.40, "label": "Llama 3.3 70B"},
     # Elysiver-hosted GLM — user-paid endpoint, quota-limited, treat cost as $0 to us
+    "glm-5.1":                            {"provider": "elysiver", "in": 0.0, "out": 0.0, "label": "GLM-5.1 (elysiver)"},
     "glm-5":                              {"provider": "elysiver", "in": 0.0, "out": 0.0, "label": "GLM-5 (elysiver)"},
     "glm-4.6":                            {"provider": "elysiver", "in": 0.0, "out": 0.0, "label": "GLM-4.6 (elysiver)"},
 }
 
 
 def load_env_file(path: Path = None) -> None:
-    """Minimal .env loader — only sets env vars not already present."""
-    if path is None:
-        path = REPO_ROOT / ".env"
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    """Minimal env loader — only sets vars not already present.
+
+    Repo convention uses `.env.local` for local secrets, so load that first
+    and fall back to `.env` if present.
+    """
+    paths = [path] if path is not None else [REPO_ROOT / ".env.local", REPO_ROOT / ".env"]
+    for candidate in paths:
+        if not candidate.exists():
             continue
-        k, _, v = line.partition("=")
-        k = k.strip()
-        v = v.strip().strip('"').strip("'")
-        if k and k not in os.environ:
-            os.environ[k] = v
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
 
 
 def load_api_key_for(provider: str) -> str:
