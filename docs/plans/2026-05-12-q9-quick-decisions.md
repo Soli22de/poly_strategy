@@ -14,7 +14,7 @@
 
 **替代**：现在直接拍板初稿数字，后续如果数据严重不符再改。
 
-**Decision**: ⏳ 等数据
+**Decision**: ⏳ 等 PR #4 (DS pkg #02 Gamma 分布) 数据回填
 
 ---
 
@@ -24,7 +24,7 @@
 
 **替代**：在 T2 prompt 调优阶段（前 50 个市场）跑 head-to-head Haiku vs DeepSeek，再决定主跑模型。代价：多花 ~$3 + 半天。
 
-**Decision**: ___
+**Decision**: ✅ **撤回原建议**，改为：**OpenRouter `google/gemini-2.0-flash-001` (V2 strict prompt) 主跑 + 同模型 V1 (permissive) prompt 用于 silent-empty fallback**。详见 [`docs/references/dash-ocr-production-patterns.md`](../references/dash-ocr-production-patterns.md) §0 / §1.1 / §4。理由：dash-ocr-pipeline 生产已验证（Pair F1 0.965，hallucination 0.3-0.6%），单模型 V2/V1 双 prompt 比双模型简单且更便宜。**不用 Qwen 2.5-72B**——pipeline 最新版已将其移除，因 Gemini Flash 单 call 实测优于"Gemini → Qwen pairer"两阶段。
 
 ---
 
@@ -34,7 +34,7 @@
 
 **替代**：本地跑开源 `BAAI/bge-large-en-v1.5`（免费但要 GPU/CPU 资源和封装时间）。
 
-**Decision**: ___
+**Decision**: ✅ **采纳建议**：OpenAI `text-embedding-3-small`，复用现有 key。阈值 0.85 初稿，T3 实施阶段用 100 对人工标注调优。
 
 ---
 
@@ -46,7 +46,7 @@
 
 **替代**：保留 100 条规则样本，分两阶段标 —— 先 50 条（每人 50 份）跑通流程，再做后 50 条。代价：拖 1-2 天，但能拿到更高样本量。
 
-**Decision**: ___
+**Decision**: ⏳ **等同学（WW）确认愿意承担的标注份数**。我（Soli22de）这边按"4 × 50 = 200 份双标 = 100 条规则"接受。如果他只能做 25 份，把样本量降到 50 条。同时**先决条件**是必须有 rule_discovery 输出作 corpus，目前没有 —— 详见 §T4 重设计：用 [`dash-ocr-production-patterns.md`](../references/dash-ocr-production-patterns.md) 提到的"$0 corpus" 路线（neg-risk 派生 + 重复检测），把 T4 重定位为 judge 校准任务。新方向下样本来源不再卡脖子。
 
 ---
 
@@ -56,7 +56,7 @@
 
 **替代**：所有 PR 必须双 approve，没人 approve 就不 merge。代价：节奏被任一人的可用时间卡住。
 
-**Decision**: ___
+**Decision**: ✅ **采纳建议**：作者 → 另一人 review + Claude sanity check → CI 过 → merge。**24 小时对方未响应可作者自合**（PR 描述里标注 `auto-merged after 24h`），任一人都可 merge。
 
 ---
 
@@ -66,7 +66,7 @@
 
 **替代**：每 T 都拆成"实现 + 测试 + 验证"三子包，共 ~12 个包。代价：协调成本变高，但每个 PR 更小更好 review。
 
-**Decision**: ___
+**Decision**: ✅ **采纳建议**：一个工作流（T1/T2/T3/T4）= 一个 DS 包，>300 行再拆"实现 + 测试"。横切任务（fee schedule #01、Gamma 分布 #02）独立成包。总计 5-7 个包。spec 作者负责拆解 + 发送 DS，DS 跑回的 code PR 两人都 review。
 
 ---
 
@@ -76,7 +76,7 @@
 
 **替代**：完全异步，没固定会议；只在 Gate 触发时开会。代价：节奏放松，可能拖。
 
-**Decision**: ___
+**Decision**: ✅ **采纳建议**：每周一晚 30 分钟同步（上周进度 + 本周计划）。每两周复审 §7 kill criteria。Gate 失败 48 小时内开会决定走或留。其他时间纯异步（PR + 微信）。
 
 ---
 
@@ -86,7 +86,7 @@
 
 **替代**：建独立的 `decisions-log.md`，所有 Gate 决议集中。代价：多一个文件维护，但搜起来方便。
 
-**Decision**: ___
+**Decision**: ✅ **采纳建议**：直接 append 到主方案对应章节末尾，格式 `> 2026-XX-XX 决议: ...（决议者）`。不单独建 `decisions-log.md`。不用 GitHub Issues。
 
 ---
 
