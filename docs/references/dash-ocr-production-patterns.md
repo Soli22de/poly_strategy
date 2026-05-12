@@ -168,32 +168,36 @@ Three design choices that are load-bearing — flag before changing:
 
 ### 3.1 模型单价（OpenRouter 公开价）
 
-| 模型 | 价格 ($/1M input + output token) | T2 单 call 估算 |
+| 模型 | 价格 ($/1M input + output token) | T2 单 call 校准值 |
 |---|---|---|
-| Gemini 2.0 Flash | $0.10 + $0.40 | ~$0.00009 |
-| Qwen 2.5-72B | $0.15 + $0.40 | ~$0.00015 |
-| Claude Haiku 4.5 | $0.80 + $4 | ~$0.0008 |
-| Claude Sonnet 4.6 | $3 + $15 | ~$0.003 |
-| DeepSeek V3 | $0.27 + $1.10 | ~$0.0003 |
+| **Gemini 2.0 Flash** | **$0.10 + $0.40** | **$0.000214** ✅ 实测 |
+| Qwen 2.5-72B | $0.15 + $0.40 | ~$0.0003 (估算) |
+| Claude Haiku 4.5 | $0.80 + $4 | ~$0.0015 (估算) |
+| Claude Sonnet 4.6 | $3 + $15 | ~$0.005 (估算) |
+| DeepSeek V3 | $0.27 + $1.10 | ~$0.0006 (估算) |
 
-**T2 单 call** 估算口径：input ~500 token（resolution criteria + prompt），output ~150 token（verbatim + clauses JSON）。
+**T2 单 call 实测口径**（[`reports/experiment-openrouter-calibration-2026-05-12.md`](../../reports/experiment-openrouter-calibration-2026-05-12.md)，n=5）：
+- input 平均 552 token（system prompt + description）
+- output 平均 397 token（verbatim_text + clauses JSON，verbatim 占大头）
+- 实测成本：$0.000214/call —— 比早先估算 $0.00009 高 2.4×，因 verbatim grounding 的 output 比"短结构 JSON"大 ~2.6×
+- 校准结论：schema_ok = 5/5, grounding_ok = 5/5，prompt 不需要再调
 
-### 3.2 T2 + T4 总预算（OpenRouter routing）
+### 3.2 T2 + T4 总预算（OpenRouter routing，校准后）
 
 | 步骤 | 调用次数 | 单价 | 小计 |
 |---|---|---|---|
-| T2 V2 主提取（Gemini Flash） | 2000 | $0.00009 | **$0.18** |
-| T2 V1 fallback（10% silent-empty，**同 Gemini Flash + V1 permissive prompt**） | 200 | $0.00009 | **$0.02** |
-| T2 prompt tuning head-to-head（3 模型 × 20 markets，仅调优阶段） | 60 | 平均 $0.0003 | **$0.02** |
+| T2 V2 主提取（Gemini Flash） | 2000 | $0.000214 ✅实测 | **$0.43** |
+| T2 V1 fallback（10% silent-empty，**同 Gemini Flash + V1 permissive prompt**） | 200 | $0.000214 | **$0.04** |
+| T2 prompt tuning head-to-head（已通过 5/5，**不需要 head-to-head**） | 0 | — | **$0** |
 | T3 embedding（OpenAI text-embedding-3-small） | ~10M token | $0.00002/1k | **$0.20** |
-| T3 LLM 验证 candidates（Gemini 2.0 Flash） | 500 | $0.00009 | **$0.05** |
-| T4 corpus（结构化派生，无 LLM 调用） | 0 | — | **$0** |
-| T4 judge ensemble（3 模型 × 100 cases） | 300 | 平均 $0.00015 | **$0.05** |
-| **合计单次完整跑** | | | **~$0.52** |
+| T3 LLM 验证 candidates（Gemini 2.0 Flash） | 500 | $0.000214 | **$0.11** |
+| T4 corpus（结构化派生，无 LLM 调用，PR #7 已派生 10,122 mutex pairs） | 0 | — | **$0** |
+| T4 judge ensemble（3 模型 × 100 cases，按 Gemini 单价估） | 300 | 平均 $0.0003 | **$0.09** |
+| **合计单次完整跑** | | | **~$0.87** |
 
-**vs 原 $17 估算**：33× 便宜。
+**vs 原 $17 估算**：仍然 20× 便宜。
 
-每月跑 2 次 ≈ $1.20。零成本敏感度。
+每月跑 2 次 ≈ $1.74。仍然零成本敏感度。
 
 ---
 
