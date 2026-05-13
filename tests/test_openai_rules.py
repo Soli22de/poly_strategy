@@ -55,6 +55,27 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertIn("polymarket_relation_discovery", payload["messages"][0]["content"])
         self.assertIn('"relations"', payload["messages"][1]["content"])
 
+    def test_build_payload_can_use_messages_format(self):
+        client = OpenAIRuleDiscoveryClient(
+            model="test-model",
+            api_key="test-key",
+            api_mode="messages",
+            max_output_tokens=123,
+        )
+        market = MarketText("a", "Will A happen?", "", ["Yes", "No"], "", "", "will-a-happen")
+
+        payload = client.build_payload([market])
+
+        self.assertEqual(payload["model"], "test-model")
+        self.assertIn("polymarket_relation_discovery", payload["system"])
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertEqual(payload["max_tokens"], 123)
+        self.assertEqual(payload["temperature"], 0.0)
+        self.assertNotIn("input", payload)
+        self.assertNotIn("text", payload)
+        self.assertNotIn("response_format", payload)
+        self.assertIn('"relations"', payload["messages"][0]["content"])
+
     def test_chat_payload_can_opt_into_json_schema_response_format(self):
         client = OpenAIRuleDiscoveryClient(
             model="test-model",
@@ -170,6 +191,43 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(fake_opener.calls[0][0].get_header("Accept"), "text/event-stream")
         self.assertEqual(json.loads(response["choices"][0]["message"]["content"])["relations"][0]["market_a_id"], "a")
 
+    def test_messages_post_uses_configured_proxy_opener_and_headers(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({"content": [{"type": "text", "text": "{\"relations\":[]}"}]}).encode("utf-8")
+
+        class FakeOpener:
+            def __init__(self):
+                self.calls = []
+
+            def open(self, request, timeout):
+                self.calls.append((request, timeout))
+                return FakeResponse()
+
+        client = OpenAIRuleDiscoveryClient(
+            model="test-model",
+            api_key="test-key",
+            api_mode="messages",
+            proxy="127.0.0.1:10808",
+        )
+        fake_opener = FakeOpener()
+        client._opener = fake_opener
+
+        response = client._post_messages({"model": "test-model", "messages": []}, timeout=12)
+
+        request = fake_opener.calls[0][0]
+        self.assertEqual(response["content"][0]["text"], "{\"relations\":[]}")
+        self.assertEqual(fake_opener.calls[0][1], 12)
+        self.assertTrue(request.full_url.endswith("/messages"))
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
+
     def test_chat_stream_can_be_disabled_from_environment(self):
         with patch.dict(os.environ, {"OPENAI_CHAT_STREAM": "0"}, clear=True):
             client = OpenAIRuleDiscoveryClient(model="test-model", api_key="test-key", api_mode="chat")
@@ -186,6 +244,16 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertIn("polymarket_exhaustive_group_verification", payload["messages"][0]["content"])
         self.assertEqual(payload["messages"][0]["role"], "system")
         self.assertIn("Will A win?", payload["messages"][1]["content"])
+
+    def test_verify_group_can_use_messages_format(self):
+        client = OpenAIExhaustiveGroupVerifierClient(model="test-model", api_key="test-key", api_mode="messages")
+        market = MarketText("a", "Will A win?", "", ["Yes", "No"], "", "", "a-wins")
+
+        payload = client.build_payload([market])
+
+        self.assertIn("polymarket_exhaustive_group_verification", payload["system"])
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertIn("Will A win?", payload["messages"][0]["content"])
 
     def test_cross_platform_verifier_payload_can_use_chat_completions_format(self):
         client = OpenAICrossPlatformVerifierClient(model="test-model", api_key="test-key", api_mode="chat")
@@ -204,6 +272,24 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(payload["response_format"]["type"], "json_object")
         self.assertIn("polymarket_kalshi_cross_platform_verification", payload["messages"][0]["content"])
         self.assertIn("Will Bitcoin hit 100k in 2026?", payload["messages"][1]["content"])
+
+    def test_cross_platform_verifier_payload_can_use_messages_format(self):
+        client = OpenAICrossPlatformVerifierClient(model="test-model", api_key="test-key", api_mode="messages")
+
+        payload = client.build_payload(
+            [
+                {
+                    "polymarket_market_id": "pm1",
+                    "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                    "kalshi_ticker": "KXBTC",
+                    "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                }
+            ]
+        )
+
+        self.assertIn("polymarket_kalshi_cross_platform_verification", payload["system"])
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertIn("Will Bitcoin hit 100k in 2026?", payload["messages"][0]["content"])
 
     def test_cross_platform_verifier_payload_includes_kalshi_rules(self):
         client = OpenAICrossPlatformVerifierClient(model="test-model", api_key="test-key", api_mode="chat")
@@ -332,6 +418,51 @@ class OpenAIRulesTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].market_b_id, "b")
         self.assertEqual(calls[0][0]["response_format"]["type"], "json_object")
+
+    def test_discover_relations_parses_messages_response(self):
+        response = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "relations": [
+                                {
+                                    "relation_type": "implies",
+                                    "market_a_id": "a",
+                                    "market_b_id": "b",
+                                    "direction": "a_implies_b",
+                                    "confidence": 0.98,
+                                    "trade_allowed": True,
+                                    "risk_flags": [],
+                                    "reason": "a implies b",
+                                }
+                            ]
+                        }
+                    ),
+                }
+            ]
+        }
+        calls = []
+
+        def transport(payload, timeout):
+            calls.append((payload, timeout))
+            return response
+
+        client = OpenAIRuleDiscoveryClient(
+            model="test-model",
+            api_key="test-key",
+            timeout=12,
+            api_mode="messages",
+            transport=transport,
+        )
+        market = MarketText("a", "Will A happen?", "", ["Yes", "No"], "", "", "will-a-happen")
+
+        candidates = client.discover_relations([market])
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].market_b_id, "b")
+        self.assertIn("system", calls[0][0])
 
     def test_discover_relations_retries_invalid_structured_response(self):
         responses = [

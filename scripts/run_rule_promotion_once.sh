@@ -25,6 +25,10 @@ PRIMARY_MODEL="${OPENAI_MODEL:-}"
 PRIMARY_BASE_URL="${OPENAI_BASE_URL:-}"
 PRIMARY_API_MODE="${OPENAI_API_MODE:-}"
 PRIMARY_API_KEY="${OPENAI_API_KEY:-}"
+SECONDARY_MODEL="${OPENAI_SECONDARY_MODEL:-}"
+SECONDARY_BASE_URL="${OPENAI_SECONDARY_BASE_URL:-}"
+SECONDARY_API_MODE="${OPENAI_SECONDARY_API_MODE:-}"
+SECONDARY_API_KEY="${OPENAI_SECONDARY_API_KEY:-}"
 BACKUP_MODEL="${OPENAI_BACKUP_MODEL:-}"
 BACKUP_BASE_URL="${OPENAI_BACKUP_BASE_URL:-}"
 BACKUP_API_MODE="${OPENAI_BACKUP_API_MODE:-}"
@@ -146,6 +150,11 @@ run_verifier() {
 set +e
 run_with_timeout "$COMMAND_TIMEOUT" run_verifier primary "$PRIMARY_MODEL" "$PRIMARY_BASE_URL" "$PRIMARY_API_MODE" "$PRIMARY_API_KEY"
 status=$?
+if [[ "$status" != "0" && -n "$SECONDARY_MODEL" ]]; then
+  echo "rule_promotion_retry previous_status=$status next_label=secondary next_model=$SECONDARY_MODEL"
+  run_with_timeout "$COMMAND_TIMEOUT" run_verifier secondary "$SECONDARY_MODEL" "$SECONDARY_BASE_URL" "$SECONDARY_API_MODE" "$SECONDARY_API_KEY"
+  status=$?
+fi
 if [[ "$status" != "0" && -n "$BACKUP_MODEL" ]]; then
   echo "rule_promotion_retry previous_status=$status next_label=backup next_model=$BACKUP_MODEL"
   run_with_timeout "$COMMAND_TIMEOUT" run_verifier backup "$BACKUP_MODEL" "$BACKUP_BASE_URL" "$BACKUP_API_MODE" "$BACKUP_API_KEY"
