@@ -24,6 +24,8 @@ def _normalize_api_mode(api_mode: Optional[str]) -> str:
         return "responses"
     if value in {"chat", "chat_completions", "chat-completions", "chatcompletions"}:
         return "chat"
+    if value in {"messages", "message", "anthropic", "anthropic_messages", "anthropic-messages"}:
+        return "messages"
     raise OpenAIConfigError(f"unsupported OPENAI_API_MODE: {api_mode!r}")
 
 
@@ -204,7 +206,14 @@ class OpenAIRuleDiscoveryClient:
             if self.proxy
             else None
         )
-        self._transport = transport or (self._post_chat_completions if self.api_mode == "chat" else self._post_responses)
+        if transport is not None:
+            self._transport = transport
+        elif self.api_mode == "chat":
+            self._transport = self._post_chat_completions
+        elif self.api_mode == "messages":
+            self._transport = self._post_messages
+        else:
+            self._transport = self._post_responses
 
     def build_payload(self, markets: Iterable[MarketText]) -> dict:
         return self._build_payload(
@@ -217,7 +226,7 @@ class OpenAIRuleDiscoveryClient:
     def _build_payload(self, markets: Iterable[MarketText], system_prompt: str, schema_name: str, schema: dict) -> dict:
         market_rows = market_texts_to_prompt_rows(list(markets))
         prompt_text = json.dumps({"markets": market_rows}, ensure_ascii=True, sort_keys=True)
-        if self.api_mode == "chat":
+        if self.api_mode in {"chat", "messages"}:
             if schema_name == "polymarket_relation_discovery":
                 chat_system_prompt, chat_user_prompt = _relation_chat_prompts(prompt_text)
             else:
@@ -244,6 +253,17 @@ class OpenAIRuleDiscoveryClient:
                     "Never return verification sources, market summaries, safe_items, or a top-level markets key.\n\n"
                     f"Input markets JSON:\n{prompt_text}"
                 )
+            if self.api_mode == "messages":
+                payload = {
+                    "model": self.model,
+                    "system": chat_system_prompt,
+                    "messages": [{"role": "user", "content": chat_user_prompt}],
+                }
+                if self.max_output_tokens is not None:
+                    payload["max_tokens"] = self.max_output_tokens
+                if self.temperature is not None:
+                    payload["temperature"] = self.temperature
+                return payload
             payload = {
                 "model": self.model,
                 "messages": [
@@ -336,6 +356,23 @@ class OpenAIRuleDiscoveryClient:
                 return _parse_chat_stream_response(response)
             return json.loads(response.read().decode("utf-8"))
 
+    def _post_messages(self, payload: dict, timeout: float) -> dict:
+        request = Request(
+            _messages_url(self.base_url),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "authorization": f"Bearer {self.api_key}",
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+                "accept": "application/json",
+                "user-agent": "poly-strategy/0.1",
+            },
+            method="POST",
+        )
+        with self._open_request(request, timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
     def _open_request(self, request: Request, timeout: float):
         if self._opener is not None:
             return self._opener.open(request, timeout=timeout)
@@ -389,7 +426,7 @@ class OpenAICrossPlatformVerifierClient(OpenAIRuleDiscoveryClient):
     def build_payload(self, matches: Iterable[dict]) -> dict:
         rows = [_cross_platform_prompt_row(match) for match in matches]
         prompt_text = json.dumps({"matches": rows}, ensure_ascii=True, sort_keys=True)
-        if self.api_mode == "chat":
+        if self.api_mode in {"chat", "messages"}:
             required_keys = ", ".join(_CROSS_PLATFORM_RESPONSE_SCHEMA.get("required", []))
             output_contract = _chat_output_contract("polymarket_kalshi_cross_platform_verification")
             output_instruction = _chat_output_instruction("polymarket_kalshi_cross_platform_verification")
@@ -414,6 +451,17 @@ class OpenAICrossPlatformVerifierClient(OpenAIRuleDiscoveryClient):
                 "Return only one JSON object matching the schema; no markdown, no prose.\n\n"
                 f"Input matches JSON:\n{prompt_text}"
             )
+            if self.api_mode == "messages":
+                payload = {
+                    "model": self.model,
+                    "system": chat_system_prompt,
+                    "messages": [{"role": "user", "content": chat_user_prompt}],
+                }
+                if self.max_output_tokens is not None:
+                    payload["max_tokens"] = self.max_output_tokens
+                if self.temperature is not None:
+                    payload["temperature"] = self.temperature
+                return payload
             payload = {
                 "model": self.model,
                 "messages": [
@@ -644,6 +692,15 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{normalized}/v1/chat/completions"
 
 
+def _messages_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/messages"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/messages"
+    return f"{normalized}/v1/messages"
+
+
 def _parse_chat_stream_response(response) -> dict:
     content_parts = []
     for data in _iter_sse_data(response):
@@ -729,6 +786,10 @@ def _extract_output_text(response: dict) -> str:
     output_text = response.get("output_text")
     if isinstance(output_text, str) and output_text:
         return output_text
+
+    content_text = _content_value_to_text(response.get("content"))
+    if content_text:
+        return content_text
 
     output = response.get("output")
     if isinstance(output, list):

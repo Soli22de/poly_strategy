@@ -84,6 +84,7 @@ class Provider:
 
 PROVIDER_ENV_VARS = (
     ("windhub", "OPENAI_BASE_URL", "OPENAI_API_KEY"),
+    ("secondary", "OPENAI_SECONDARY_BASE_URL", "OPENAI_SECONDARY_API_KEY"),
     ("elysiver", "OPENAI_BACKUP_BASE_URL", "OPENAI_BACKUP_API_KEY"),
 )
 

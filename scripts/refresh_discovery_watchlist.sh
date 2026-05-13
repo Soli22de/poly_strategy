@@ -63,6 +63,10 @@ PRIMARY_MODEL="${OPENAI_MODEL:-}"
 PRIMARY_BASE_URL="${OPENAI_BASE_URL:-}"
 PRIMARY_API_MODE="${OPENAI_API_MODE:-}"
 PRIMARY_API_KEY="${OPENAI_API_KEY:-}"
+SECONDARY_MODEL="${OPENAI_SECONDARY_MODEL:-}"
+SECONDARY_BASE_URL="${OPENAI_SECONDARY_BASE_URL:-}"
+SECONDARY_API_MODE="${OPENAI_SECONDARY_API_MODE:-}"
+SECONDARY_API_KEY="${OPENAI_SECONDARY_API_KEY:-}"
 BACKUP_MODEL="${OPENAI_BACKUP_MODEL:-}"
 BACKUP_BASE_URL="${OPENAI_BACKUP_BASE_URL:-}"
 BACKUP_API_MODE="${OPENAI_BACKUP_API_MODE:-}"
@@ -298,7 +302,7 @@ run_discovery_provider() {
   local request_timeout="$LLM_TIMEOUT"
   local request_retries="$LLM_RETRIES"
   case "${api_mode:-}" in
-    chat|chat_completions|chat-completions|chatcompletions)
+    chat|chat_completions|chat-completions|chatcompletions|messages|message|anthropic|anthropic_messages|anthropic-messages)
       request_timeout="$LLM_CHAT_TIMEOUT"
       request_retries="$LLM_CHAT_RETRIES"
       ;;
@@ -349,7 +353,7 @@ run_discovery_provider() {
 provider_command_timeout() {
   local api_mode="$1"
   case "${api_mode:-}" in
-    chat|chat_completions|chat-completions|chatcompletions)
+    chat|chat_completions|chat-completions|chatcompletions|messages|message|anthropic|anthropic_messages|anthropic-messages)
       echo "$LLM_CHAT_COMMAND_TIMEOUT"
       ;;
     *)
@@ -365,6 +369,7 @@ if [[ "$SKIP_LLM" != "1" && -n "$PRIMARY_MODEL" ]]; then
   final_status=0
   for spec in \
     "primary|$PRIMARY_MODEL|$PRIMARY_BASE_URL|$PRIMARY_API_MODE|$PRIMARY_API_KEY" \
+    "secondary|$SECONDARY_MODEL|$SECONDARY_BASE_URL|$SECONDARY_API_MODE|$SECONDARY_API_KEY" \
     "backup|$BACKUP_MODEL|$BACKUP_BASE_URL|$BACKUP_API_MODE|$BACKUP_API_KEY" \
     "fallback|$FALLBACK_MODEL|$FALLBACK_BASE_URL|$FALLBACK_API_MODE|$FALLBACK_API_KEY"; do
     IFS='|' read -r label model base_url api_mode api_key <<< "$spec"
