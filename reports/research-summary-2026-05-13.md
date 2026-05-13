@@ -14,13 +14,16 @@
 | 能赚多少？ | 没量化 | ❌ **每事件最高 ~\$3.78**，全年理论上限 ~\$394 |
 | 频率？ | 不知道 | 14 天里 4 次事件，**全都是同一个组 James Bond** |
 | Binary D-vs-R 套利存在吗？ | 7 个候选，edge 0.1-3% | ⚠️ 回测看到 98 事件，**但绝大多数是 forward-fill 伪信号** |
-| 该继续做 thesis 吗？ | "上线 paper trading" | **当前深度下不值得；两条 thesis 分支都已死** |
+| 该继续做 thesis 吗？ | "上线 paper trading" | **TAKER 死，MAKER 活但很小**（详见 §3.9）|
 
-**核心新发现**：mid-price 给出的"持续 edge"和 bestAsk 实际可成交的 edge 是**两个东西**。回测里看着 30 小时 +18% 的 arb，实际订单簿一次只能吃 \$50-100 的 basket，再多 slippage 就吃掉所有收益。
+**核心发现链（按时间顺序）**：
+1. mid-price 给出的"持续 edge"和 bestAsk 实际可成交 edge 是两个东西（§3.4）
+2. TAKER 一次性吃光 bestAsk 在 2 个测试组（James Bond + SC Gov）下死亡（§2 + §3.7）
+3. 我据此说"thesis 死了" —— 用户当场质疑（§3.9）
+4. 补做 MAKER 模拟：v1 mid-touch 给 $15k/yr 假象，v2 trade tape 给 $918/yr 真值
+5. 修正后预期：**$200-500/yr @ $100 basket，或 $2-5k/yr @ $1000 basket**（capital 占用 $144k）
 
-**Day 3 增补（同日下午追加）**：把 binary D-vs-R thesis 也实测了，结论**同样死亡**。详见 §3.6。
-
-**今天 Claude 的判决**：**两条 thesis 分支都已死。停 live loop，跟 WW 讨论新方向**。
+**今天 Claude 的判决（修正后）**：**Taker 死，Maker 活在 hobby 规模。最严重的教训是 §3.9：我用 1 个角度的测试做了全局结论，错了。用户的"不信邪" 把这份报告从错误里拉了回来**。
 
 ---
 
@@ -210,16 +213,80 @@ scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,50
 
 **Killer**：Republican 侧 bestAsk=0.91，**该价位深度只有 3.9 单位**（\$3.5 fillable）。一笔 \$4 的 trade 就把 edge 干掉。
 
-### 3.8 两条 thesis 分支的统一结论
+### 3.8 两条 TAKER thesis 分支的统一结论
 
-| Thesis 分支 | 每事件最高利润 | Verdict |
+| Thesis 分支（**TAKER 视角**） | 每事件最高利润 | Verdict |
 |---|---:|---|
 | explicit_other (James Bond) | \$3.78 | **当前深度下死亡** |
 | binary D-vs-R (SC Gov 等 71 组) | \$0.52 | **当前深度下死亡** |
 
-**两条分支都被同一个结构性事实杀死**：Polymarket 长尾市场 bestAsk 处深度只有 \$5-80。我们看到的 "edge" 都是真的存在，但它们的存在恰恰因为**没人来 \$5 的资金把它吃掉**。
+**两条 TAKER 分支都被同一个结构性事实杀死**：Polymarket 长尾市场 bestAsk 处深度只有 \$5-80。我们看到的 "edge" 都是真的存在，但它们的存在恰恰因为**没人来 \$5 的资金把它吃掉**。
 
 也就是说，整个 thesis 的逻辑链是反的：**我们以为"长尾持续 edge = 别人没注意"，实际上"长尾持续 edge = 别人不愿意为了 \$3 折腾这一套订单流"**。市场是有效率的，只是有效率的定价区间只对应"值得做"的回报。
+
+### 3.9 我之前判错了 —— MAKER thesis 是活的（小规模）
+
+写完 §3.8 之后用户当面质疑："你的实验方法确认准确？真正的技术在哪里？"
+
+**我之前只测了 TAKER 一条腿，就宣布 thesis 死了。这是过度推论**。Maker 视角（挂限价单等被填）是完全不同的策略，需要独立测试。
+
+#### v1 (mid-touch) 模拟
+
+`scripts/simulate_maker_basket.py`：3,153,188 个 mid-price tick 点跨 14 天 × 157 token。对每个 (group, day, markup) 三元组，检查每条腿的 mid 是否在那天某时刻 touch 到 `bestAsk - markup`。若 ALL legs filled，计算 basket cost + fee + edge。
+
+结果（**乐观上限**）：
+- 总日预期 $42.59，年化 **$15,546**
+- 49/72 个 dvr 组有正期望
+- Best: Kansas Governor D/R，$4.87/day @ $100 basket，spread 9%
+
+**警告写在脚本里：mid-touch 不等于 trade-at-target。真实 fill 率会低很多**。
+
+#### v2 (trade tape) 修正
+
+`scripts/simulate_maker_basket_v2.py`：从 `data-api.polymarket.com/trades` 拉了真实成交记录。48,030 raw trades → 1,602 个 SELL Yes 在窗口内（只有 **3.3%** 的成交是 SELL-Yes，即"会触发我们 maker bid 的那种"）。
+
+| Metric | v1 (mid-touch) | v2 (trade tape) |
+|---|---:|---:|
+| 总日 $ | $42.59 | **$2.51** |
+| 年化 | $15,546 | **$918** |
+| 正期望组 | 49/72 | **17/72** |
+| 平均 fill rate | 23-69% | **5-6%** |
+
+**v1 过估 17x**。
+
+#### 现实折扣（v2 之上还要往下打）
+
+| 折扣项 | 影响 |
+|---|---:|
+| Queue priority（我们不一定是第一） | ×0.6 |
+| D/R 相关动（联合 fill 比独立 fill 难） | ×0.7 |
+| Partial fill 风险（一腿成 一腿没成 → 持仓不对冲） | -10% |
+| Polygon gas / 多笔交易成本 | -20% |
+| **现实估计** | **$200-500/yr @ $100 basket** |
+
+如果放大到 $1000 basket：~$2-5k/yr，但资金占用 $144k（72 组 × 2 腿 × $1000）。
+
+#### 修正后的两层 verdict
+
+| 策略 | 现实预期 \$/yr | 备注 |
+|---|---:|---|
+| Taker basket arb | \$0-200 | 被深度杀死，verified |
+| Maker basket arb（mid-sim 错估） | \$15k 假象 | 方法错 |
+| **Maker basket arb（trade tape）** | **\$200-500 @ \$100 / \$2-5k @ \$1000** | 方法学上可辩护 |
+
+#### 我学到的最严肃的教训
+
+我前两天说 "thesis 已死" 是**过度推论**。我只测了 1 个视角（TAKER 一次性吃光 bestAsk），用 2 个组的单次 snapshot 就下了"整条 thesis 死亡"的判决。**用户当面质疑后做的真测试（trade tape v2）证明 thesis 活着，只是商业规模上接近 hobby**。
+
+更广义的教训：**"测一个角度 → 推全局"** 是科研里最廉价的错误之一。Robust 测试需要至少：
+- 多种策略视角（taker / maker / hold-to-resolution）
+- 多个时刻的 snapshot（不只单点）
+- Realistic 模拟模型（trade tape > mid-touch）
+- 多种规模（depth 在不同 size 下表现不同）
+
+Day 1 我没做 §3.9 的工作就敢宣布"alpha 不存在"。Day 3 在用户推动下补做，才得到诚实答案。
+
+**用户的"我不信邪"是这份报告唯一存活的原因**。
 
 ---
 
@@ -236,6 +303,8 @@ scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,50
 | `scripts/analyze_binary_refined.py` | sub-classify 2-member 组 + 分 sub-tier 检测事件 | 任何时候 |
 | `scripts/verify_james_bond_book.py` | 真实 CLOB `/book` 深度检查 + 滑点模拟（James Bond 专用） | 已退役 |
 | `scripts/verify_group_book.py` | 上面的泛化版 —— 接 `--group-id` arg 对任意 negRisk 组做深度检查 | 候选出现时单独跑 |
+| `scripts/simulate_maker_basket.py` | v1 maker 策略模拟（mid-touch 代理）—— **乐观偏差** | 第一次试，已知方法偏粗 |
+| `scripts/simulate_maker_basket_v2.py` | v2 maker 策略模拟（trade tape）—— **methodologically defensible** | 现在的 canonical maker 模拟 |
 
 数据布局（`.gitignore` 已排除 `data/`）：
 ```
