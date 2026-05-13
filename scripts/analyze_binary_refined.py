@@ -161,6 +161,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--min-edge", type=float, default=0.02)
     ap.add_argument("--max-gap-minutes", type=float, default=35.0)
+    ap.add_argument("--live-only", action="store_true",
+                    help="Drop is_backfill=true rows (use only live snapshot data).")
     args = ap.parse_args()
 
     # Find latest live markets.ndjson for question lookup
@@ -198,6 +200,10 @@ def main() -> int:
     all_rows: list[dict] = []
     for gp in sorted(SNAPSHOTS_ROOT.glob("*/*/groups.ndjson")):
         all_rows.extend(load_ndjson(gp))
+    if args.live_only:
+        before = len(all_rows)
+        all_rows = [r for r in all_rows if not r.get("is_backfill")]
+        print(f"  --live-only: dropped {before - len(all_rows)} backfill rows, kept {len(all_rows)}")
     binary_rows = [r for r in all_rows if r["tier"] == "binary"]
     print(f"  total: {len(all_rows)} group-rows, of which binary: {len(binary_rows)}")
 

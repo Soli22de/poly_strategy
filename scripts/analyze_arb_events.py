@@ -140,6 +140,8 @@ def main() -> int:
     ap.add_argument("--max-gap-minutes", type=float, default=35.0,
                     help="Snapshots farther apart than this break a run.")
     ap.add_argument("--root", type=Path, default=SNAPSHOTS_ROOT)
+    ap.add_argument("--live-only", action="store_true",
+                    help="Drop is_backfill=true rows (use only live snapshot data).")
     args = ap.parse_args()
 
     if not args.root.exists():
@@ -151,6 +153,11 @@ def main() -> int:
     if not rows:
         print("ERROR: no group rows loaded", file=sys.stderr)
         return 2
+
+    if args.live_only:
+        before = len(rows)
+        rows = [r for r in rows if not r.get("is_backfill")]
+        print(f"  --live-only: dropped {before - len(rows)} backfill rows, kept {len(rows)}")
 
     # Filter to chosen tier
     if args.tier != "any":

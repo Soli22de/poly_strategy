@@ -14,11 +14,13 @@
 | 能赚多少？ | 没量化 | ❌ **每事件最高 ~\$3.78**，全年理论上限 ~\$394 |
 | 频率？ | 不知道 | 14 天里 4 次事件，**全都是同一个组 James Bond** |
 | Binary D-vs-R 套利存在吗？ | 7 个候选，edge 0.1-3% | ⚠️ 回测看到 98 事件，**但绝大多数是 forward-fill 伪信号** |
-| 该继续做 thesis 吗？ | "上线 paper trading" | **当前深度下不值得；继续观察实盘 bestAsk 才能定 binary** |
+| 该继续做 thesis 吗？ | "上线 paper trading" | **当前深度下不值得；两条 thesis 分支都已死** |
 
 **核心新发现**：mid-price 给出的"持续 edge"和 bestAsk 实际可成交的 edge 是**两个东西**。回测里看着 30 小时 +18% 的 arb，实际订单簿一次只能吃 \$50-100 的 basket，再多 slippage 就吃掉所有收益。
 
-**今天 Claude 的判决**：**stop chasing this，把 live snapshot loop 留着跑，下周再用真 bestAsk 时间序列验证 binary 那边**。
+**Day 3 增补（同日下午追加）**：把 binary D-vs-R thesis 也实测了，结论**同样死亡**。详见 §3.6。
+
+**今天 Claude 的判决**：**两条 thesis 分支都已死。停 live loop，跟 WW 讨论新方向**。
 
 ---
 
@@ -172,6 +174,53 @@ mid-edge 是上界。真要交易得用 CLOB `/book` 看 bestAsk 阶梯。
 
 15 分钟 cadence 的 live snapshot loop 已经在跑（21:05 UTC 开始），未来 7-14 天会积累真 bestAsk-基础的 binary 时间序列。等积累到 1-2 周后再跑 `analyze_arb_events.py --tier binary --min-edge 0.02`，那时候才是 binary thesis 的真测试。
 
+### 3.6 Day 3 实测结果（不用等 1-2 周了）
+
+第二天醒来跑了一次 `analyze_binary_refined.py --live-only`（新加的 flag），用过去 14 小时纯 live bestAsk 数据：
+
+| | 14 天回测（mid） | 纯 14 小时 live（bestAsk） |
+|---|---:|---:|
+| dvr 事件数 (edge>2%) | 98 | **7** |
+| 中位持续时间 | 22 小时 | **15 分钟（1 个 snapshot）** |
+| 最高峰 | +41.7% | +19.8% |
+
+确认 22 小时持续是 forward-fill 假象。**真实 bestAsk 看到的"persistent edge floor"**：
+
+- **WV Senate D/R**：14:35-17:35 sustained +4-5%（3 小时 +4-5% 边际 edge）
+- **TN Governor D/R**：14:35-15:50 sustained +9-10%，然后崩到负
+- **SC Governor D/R**：**14 小时连续 +2.5-3.0%**，min_liq \$4,377（看起来最稳）
+- **OK Senate D/R**：peak +3.55% 后 settled +0.5%
+- **AR Senate D/R**：徘徊 ±0.15%，噪音
+
+这 5 个里 SC Governor 看起来最像真 alpha：持续小 edge，深度看起来还行。所以**深度检查走起**。
+
+### 3.7 SC Governor D/R 深度检查 —— 同样死亡
+
+```
+scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,500,1000,2000,5000"
+```
+
+| Basket size | Avg cost/u | Total fee | Edge $ | Edge % |
+|---:|---:|---:|---:|---:|
+| 1u marginal | 0.969 | 0.005 | +\$0.026 | +2.55% |
+| 50u | 0.9846 | 0.25 | **+\$0.52** | +1.04% |
+| 200u | 0.9934 | 1.01 | +\$0.31 | +0.15% ← 接近 breakeven |
+| 500u | 1.0371 | 2.88 | -\$21 | -4.29% |
+| 1000u | 1.0644 | 5.75 | -\$70 | -7.01% |
+
+**Killer**：Republican 侧 bestAsk=0.91，**该价位深度只有 3.9 单位**（\$3.5 fillable）。一笔 \$4 的 trade 就把 edge 干掉。
+
+### 3.8 两条 thesis 分支的统一结论
+
+| Thesis 分支 | 每事件最高利润 | Verdict |
+|---|---:|---|
+| explicit_other (James Bond) | \$3.78 | **当前深度下死亡** |
+| binary D-vs-R (SC Gov 等 71 组) | \$0.52 | **当前深度下死亡** |
+
+**两条分支都被同一个结构性事实杀死**：Polymarket 长尾市场 bestAsk 处深度只有 \$5-80。我们看到的 "edge" 都是真的存在，但它们的存在恰恰因为**没人来 \$5 的资金把它吃掉**。
+
+也就是说，整个 thesis 的逻辑链是反的：**我们以为"长尾持续 edge = 别人没注意"，实际上"长尾持续 edge = 别人不愿意为了 \$3 折腾这一套订单流"**。市场是有效率的，只是有效率的定价区间只对应"值得做"的回报。
+
 ---
 
 ## 4. 今天搭好的基础设施
@@ -185,7 +234,8 @@ mid-edge 是上界。真要交易得用 CLOB `/book` 看 bestAsk 阶梯。
 | `scripts/backfill_prices_history.py` | 从 CLOB `/prices-history` 重建历史合成 snapshot | 一次性，仅适用于较活跃市场 |
 | `scripts/analyze_arb_events.py` | 检测连续 edge 事件 + pass/kill 判决 | 任何时候，读 `data/snapshots/` 全部数据 |
 | `scripts/analyze_binary_refined.py` | sub-classify 2-member 组 + 分 sub-tier 检测事件 | 任何时候 |
-| `scripts/verify_james_bond_book.py` | 真实 CLOB `/book` 深度检查 + 滑点模拟 | 候选出现时单独跑 |
+| `scripts/verify_james_bond_book.py` | 真实 CLOB `/book` 深度检查 + 滑点模拟（James Bond 专用） | 已退役 |
+| `scripts/verify_group_book.py` | 上面的泛化版 —— 接 `--group-id` arg 对任意 negRisk 组做深度检查 | 候选出现时单独跑 |
 
 数据布局（`.gitignore` 已排除 `data/`）：
 ```
@@ -200,60 +250,74 @@ data/experiments/2026-05-12/
 
 ---
 
-## 5. 我对下一步的建议（更新版）
+## 5. 我对下一步的建议（Day 3 更新版）
 
-### 5.1 立即 (今天 / 明天)
+### 5.1 立即
 
-1. **不要再花时间在 explicit_other arb**。James Bond 是唯一候选，$394/yr 上限已知，不值得继续投入。
-2. **让 live snapshot loop 继续跑**。每 15 min 自动落盘，14 天后会有真 bestAsk 时间序列。
-3. **审本报告**，特别是 §3 的 forward-fill 伪信号问题 —— 这影响所有低活跃市场的回测结论。
+1. **停 live snapshot loop**。两条 thesis 分支都已死，继续 14 天积累已无意义。已积累的数据保留在 `data/snapshots/` 作 baseline。
+2. **审本报告**，特别是 §3.6-3.8 的 SC Gov 深度检查结果 —— 这是 binary thesis 的"棺材板"。
+3. **跟 WW 在 PR #9 上对齐新方向**。
 
-### 5.2 短期 (1-2 周)
+### 5.2 候选新 thesis（按 cost-to-falsify 升序）
 
-**等 live loop 跑满 7-14 天，再做一次 binary 真测**：
-- 用 `analyze_arb_events.py --tier binary --min-edge 0.02` 跑 **仅 live 数据**（is_backfill=False）
-- 真实 bestAsk 时间序列上看 binary D-vs-R 有没有持续机会
-- 对前 5 名峰值跑 `verify_james_bond_book.py` 类的深度检查（脚本需轻微改造泛化）
+| 方向 | 假设 | 第一步测试 | 落实成本 |
+|---|---|---|---|
+| **A. 直接放弃** | "prediction market 在我们的资金/精力水平上不值得" | 已经做完 —— 本报告就是 falsification | \$0 |
+| **B. 做市策略** | "longtail 市场 sum(bestAsk) 经常 > 1 → 双边挂单赚 spread > $1.5/day/市场" | 用现有 live 数据回测每市场每日 spread × hypothetical 50u fill 频次 | ~2hr |
+| **C. 高流动性 HFT 缝隙** | "headline 市场（vol24hr P90+）有 sub-minute mid-edge" | 抓 5 个 vol24hr > \$10k 市场的 1-second tick 数据 30 分钟，看是否存在 >0.5% 持续>10s edge | ~3hr |
+| **D. Cross-platform** | "Polymarket vs Kalshi 同一事件价格不一致" | 拉两边 active events，模糊匹配，比较 implicit prob | ~4hr |
 
-### 5.3 中期 thesis 修正
+**Claude 的偏好**：跑 **B（做市）**，因为：
+- 数据已经有（不用重新拉）
+- 假设是 `2.55%` 这种 edge 是**人家不愿来挑的服务费**，不是 alpha；如果是服务费，反方向是**我们挂上去赚**它
+- 可证伪：算一下 14 天里 sum(bestBid) - sum(bestAsk) 的累积分布即可
 
-昨日的 §6.2 推荐"T2 LLM resolution_reader 主跑改 GLM-4.6"仍然成立，但**优先级降低** —— 因为现在我们知道 thesis 的瓶颈不是 description 解读能力，是**订单簿深度**。
-
-新的 thesis 方向候选（按性价比降序，待 WW 评议）：
-- **A. 高流动性事件 + 短时 mid-edge**：放弃长尾，专做"有交易、bestAsk + bestBid spread <1pp、深度>$5k"的市场，盯短半衰期 edge。完全反方向，但有可能找到 HFT 缝隙。
-- **B. Resolution 规则不对齐的 cross-platform**：Polymarket vs Kalshi/Manifold 同一事件 implicit prob 偏差。问题是覆盖低 —— 之前提过。
-- **C. 做市策略**：在 longtail 市场挂双边赚 spread。需要 $1k+ 资金 + 24/7 监控。
-- **D. 直接放弃 prediction market，转其它领域**。诚实选项。
-
-### 5.4 已经定死不做的（KILL LIST）
+### 5.3 已经定死不做的（KILL LIST，Day 3 扩展）
 
 - ❌ 继续 polish T2/T3 LLM pipeline，期待"更智能的 description 解读 → 更好 alpha"。**已证明 alpha 瓶颈在订单簿，不在 LLM**。
 - ❌ 用 mid-price 回测 long-tail market。**已证明回测伪信号率 >90%**。
-- ❌ 上线任何 paper trading on James Bond basket。$3.78/event 经不起 gas 和监控成本。
-- ❌ 把更多模型加进 multi-model bench。GLM-4.6 / DeepSeek V3 已够。
+- ❌ 上线任何 paper trading on James Bond basket。$3.78/event 经不起 gas。
+- ❌ 上线任何 paper trading on D/R 通选 basket。$0.52/event，更糟。
+- ❌ 把更多模型加进 multi-model bench。GLM-4.6 / DeepSeek V3 已够（且当前 thesis 不需要 LLM）。
+- ❌ **再跑 14 天 backfill on long-tail markets**。已证明对低活跃市场不靠谱。
 
 ---
 
 ## 6. 数据 / 工具 / 记录的去向
 
-- 本报告 + 4 个新 reports + 5 个新 scripts + `run_snapshot_loop.ps1` 即将一次性 commit 到 `experiment/2026-05-12-gamma-baseline`
-- `data/snapshots/` 在 `.gitignore` 内不会进 PR，但本地保留作为后续分析基线
-- live loop 会一直跑直到手动停（窗口 Ctrl+C 或关闭窗口）。**建议留着跑**。
+- 本报告 + 5 个新 reports + 6 个新 scripts + `run_snapshot_loop.ps1` commit 到 `experiment/2026-05-12-gamma-baseline`
+- `data/snapshots/` 在 `.gitignore` 内不会进 PR，但本地保留作为后续分析基线（约 1.3GB）
+- live loop **Day 3 下午停**：thesis 已死，不再积累。停止时机记在 §7 时间账里。
 
 ---
 
-## 7. Day 2 honest 时间账
+## 7. Day 2 + Day 3 honest 时间账
 
 | 类别 | 时长 | 价值 |
 |---|---|---|
 | 写 snapshot_gamma + run_snapshot_loop + analyze_arb_events | ~1h | 基础设施，已验证 |
-| 写 backfill_prices_history + 跑 14 天 | ~1h | **方法上验证了 backfill 在 longtail 失败**，本身就是结论 |
+| 写 backfill_prices_history + 跑 14 天 | ~1h | **方法上验证了 backfill 在 longtail 失败** |
 | 写 verify_james_bond_book + 跑深度检查 | ~30min | **决定性 \$394/yr 结论来自这 30 分钟** |
 | 写 analyze_binary_refined + 调查 forward-fill 伪信号 | ~1h | 排除掉一条假分支 |
-| 与你的来回（决定 backfill, 决定 commit）| ~30min | 决策正确性的保证 |
+| Day 3 早晨：跑 live-only binary 分析 | ~15min | 看到 22h persistence 全是 forward-fill 假象 |
+| Day 3 早晨：泛化 verify_book + 跑 SC Gov | ~30min | **第二条 thesis 分支死亡的决定性 15 分钟** |
+| 与你的来回 + commit + PR | ~1h | 决策正确性 + WW 可视 |
 
-如果今天一开始就先 build snapshot_loop + verify_james_bond_book，4 小时就能得出"$394/yr"上限。backfill 那 1 小时事后看的价值是发现"mid-price 长尾回测不靠谱"—— 这个 meta-lesson 也很重要。
+**总耗时（Day 2 + 3）约 5 小时**，得出两个完整 thesis 分支的死亡判决。**如果只为了 verdict**，理论最短路径：build snapshot_loop + verify_group_book + 跑 2 个组（James Bond + SC Gov）= 1.5 小时。剩下 3.5 小时的"沉没成本"价值：
+- 方法论 meta-lesson：mid-price 回测对 longtail 不可信（写在 §3.4）
+- 基础设施可用于任何 future thesis（snapshot_loop + analyze_arb_events + verify_group_book 都是泛化的）
+- backfill 1.3GB 数据保留作 baseline，未来如果回头研究 D/R 价格动力学还能用
 
 ---
 
-*报告写于 2026-05-13。基于 14 天 (2026-04-28 → 2026-05-12 14:00 UTC) 合成回测 + 实时 CLOB 深度。*
+## 8. 给 WW 的明确请求
+
+请审阅这份报告 + PR #9，在 PR 评论里回答：
+
+1. **同意停 live loop 吗？**（我已经停了，但可以重启）
+2. **§5.2 四个候选 thesis 你想优先做哪个？** Claude 推 B（做市），但可能我看漏了。
+3. **是否要把今天得到的 verdict 写一篇正式的"thesis post-mortem"** 文档放进 repo，作为后续协作的明确 baseline（不被未来的人重复探索）？
+
+---
+
+*报告写于 2026-05-13。基于 14 天 (2026-04-28 → 2026-05-12 14:00 UTC) 合成回测 + 实时 CLOB 深度 + Day 3 (~14h) live bestAsk 时间序列。*
