@@ -137,3 +137,15 @@ def test_verbose_output_does_not_print_keys():
     assert "backup-secret" not in combined
     assert "fallback-secret" not in combined
     assert "deepseek-v3-2-251201" in combined
+
+
+def test_mainline_scripts_source_research_profile_loader():
+    scripts = [
+        ROOT / "scripts" / "refresh_discovery_watchlist.sh",
+        ROOT / "scripts" / "run_rule_promotion_once.sh",
+        ROOT / "scripts" / "run_cross_platform_scan_once.sh",
+    ]
+
+    for script in scripts:
+        text = script.read_text(encoding="utf-8")
+        assert "source scripts/load_llm_research_profile.sh" in text

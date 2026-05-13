@@ -25,6 +25,10 @@ if [[ -n "$PROXY" && -z "${HTTPS_PROXY:-}" ]]; then
   export HTTPS_PROXY="http://${PROXY}"
   export HTTP_PROXY="http://${PROXY}"
 fi
+if [[ -f scripts/load_llm_research_profile.sh ]]; then
+  # shellcheck disable=SC1091
+  source scripts/load_llm_research_profile.sh
+fi
 LIMIT="${LIMIT:-100}"
 PAGES="${PAGES:-5}"
 OFFSET="${OFFSET:-0}"

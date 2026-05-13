@@ -16,6 +16,10 @@ if [[ -f .env.local ]]; then
   source .env.local
   set +a
 fi
+if [[ -f scripts/load_llm_research_profile.sh ]]; then
+  # shellcheck disable=SC1091
+  source scripts/load_llm_research_profile.sh
+fi
 
 CANDIDATES="${CROSS_PLATFORM_EVENT_CANDIDATES:-data/cross-platform-event-title-candidates.json}"
 GAMMA="${GAMMA:-data/polymarket-gamma.ndjson}"
