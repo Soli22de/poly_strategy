@@ -1765,6 +1765,83 @@ class CliTests(unittest.TestCase):
         self.assertEqual([attempt["status"] for attempt in row["llm_provider_attempts"]], ["error", "ok"])
         self.assertIn("verified=1", stdout.getvalue())
 
+    def test_verify_cross_platform_command_uses_semantic_after_non_tradeable_primary(self):
+        class FakeVerifier:
+            def __init__(self, model, **kwargs):
+                self.model = model
+
+            def verify_matches(self, matches):
+                if self.model == "primary-model":
+                    return [
+                        {
+                            "polymarket_market_id": matches[0]["polymarket_market_id"],
+                            "kalshi_ticker": matches[0]["kalshi_ticker"],
+                            "verified_same_binary_event": False,
+                            "trade_allowed": False,
+                            "confidence": 0.80,
+                            "risk_flags": ["insufficient_information"],
+                            "reason": "primary could not prove same binary event",
+                        }
+                    ]
+                return [
+                    {
+                        "polymarket_market_id": matches[0]["polymarket_market_id"],
+                        "kalshi_ticker": matches[0]["kalshi_ticker"],
+                        "verified_same_binary_event": True,
+                        "trade_allowed": True,
+                        "confidence": 0.99,
+                        "risk_flags": [],
+                        "reason": "semantic pass verified same binary event",
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            matches = Path(tmp) / "matches.json"
+            out = Path(tmp) / "verified.json"
+            matches.write_text(
+                json.dumps(
+                    {
+                        "top": [
+                            {
+                                "polymarket_market_id": "pm1",
+                                "polymarket_title": "Will Bitcoin hit 100k in 2026?",
+                                "kalshi_ticker": "KXBTC100K",
+                                "kalshi_title": "Will Bitcoin hit 100k in 2026?",
+                            }
+                        ]
+                    }
+                )
+            )
+
+            stdout = io.StringIO()
+            with patch("poly_strategy.cli.OpenAICrossPlatformVerifierClient", side_effect=FakeVerifier):
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "OPENAI_API_KEY": "test-key",
+                        "OPENAI_MODEL": "primary-model",
+                        "OPENAI_SEMANTIC_MODEL": "semantic-model",
+                        "OPENAI_SEMANTIC_API_KEY": "test-key",
+                    },
+                    clear=True,
+                ):
+                    with redirect_stdout(stdout):
+                        code = main(
+                            [
+                                "verify-cross-platform-matches",
+                                "--matches",
+                                str(matches),
+                                "--out",
+                                str(out),
+                            ]
+                        )
+            row = json.loads(out.read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["llm_verified_count"], 1)
+        self.assertEqual([attempt["provider"] for attempt in row["llm_provider_attempts"]], ["primary", "semantic"])
+        self.assertEqual([attempt["status"] for attempt in row["llm_provider_attempts"]], ["ok_escalated", "ok"])
+
     def test_discover_rules_command_uses_openai_client_and_prints_summary(self):
         result = SimpleNamespace(
             markets_read=2,

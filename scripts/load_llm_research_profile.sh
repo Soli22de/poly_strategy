@@ -29,6 +29,13 @@ llm_profile_set_role() {
   llm_profile_set_default "$api_mode_name" "$api_mode_value"
 }
 
+llm_profile_set_semantic_role() {
+  [[ -n "${OPENAI_SEMANTIC_API_KEY:-${OPENAI_API_KEY:-}}" ]] || return 0
+  llm_profile_set_default OPENAI_SEMANTIC_MODEL "doubao-seed-1-8-251228"
+  llm_profile_set_default OPENAI_SEMANTIC_BASE_URL "https://windhub.cc/v1"
+  llm_profile_set_default OPENAI_SEMANTIC_API_MODE "messages"
+}
+
 llm_profile_print_summary() {
   llm_profile_is_true "${LLM_RESEARCH_PROFILE_VERBOSE:-0}" || return 0
   {
@@ -36,6 +43,7 @@ llm_profile_print_summary() {
     echo "llm_provider role=primary model=${OPENAI_MODEL:-} api_mode=${OPENAI_API_MODE:-} base_url=${OPENAI_BASE_URL:-}"
     echo "llm_provider role=secondary model=${OPENAI_SECONDARY_MODEL:-} api_mode=${OPENAI_SECONDARY_API_MODE:-} base_url=${OPENAI_SECONDARY_BASE_URL:-}"
     echo "llm_provider role=backup model=${OPENAI_BACKUP_MODEL:-} api_mode=${OPENAI_BACKUP_API_MODE:-} base_url=${OPENAI_BACKUP_BASE_URL:-}"
+    echo "llm_provider role=semantic model=${OPENAI_SEMANTIC_MODEL:-} api_mode=${OPENAI_SEMANTIC_API_MODE:-} base_url=${OPENAI_SEMANTIC_BASE_URL:-}"
     echo "llm_provider role=fallback model=${OPENAI_FALLBACK_MODEL:-} api_mode=${OPENAI_FALLBACK_API_MODE:-} base_url=${OPENAI_FALLBACK_BASE_URL:-}"
   } >&2
 }
@@ -63,6 +71,7 @@ llm_profile_set_role OPENAI_SECONDARY_API_KEY OPENAI_SECONDARY_MODEL OPENAI_SECO
   "gemini-3.1-pro-preview" "https://api.xn--chy-js0fk50c.top/v1" "chat"
 llm_profile_set_role OPENAI_BACKUP_API_KEY OPENAI_BACKUP_MODEL OPENAI_BACKUP_BASE_URL OPENAI_BACKUP_API_MODE \
   "longcat-flash-chat" "https://elysiver.h-e.top/v1" "chat"
+llm_profile_set_semantic_role
 llm_profile_set_role OPENAI_FALLBACK_API_KEY OPENAI_FALLBACK_MODEL OPENAI_FALLBACK_BASE_URL OPENAI_FALLBACK_API_MODE \
   "gpt-5.4-mini" "https://api.wwcloud.app" "responses"
 

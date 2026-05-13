@@ -761,6 +761,20 @@ def main(argv=None) -> int:
                     verbosity=args.verbosity,
                     api_mode=args.api_mode,
                 )
+            semantic_model = args.semantic_model or os.environ.get("OPENAI_SEMANTIC_MODEL")
+            semantic_client = None
+            if semantic_model and args.semantic_retry_empty_batches:
+                semantic_client = OpenAIRuleDiscoveryClient(
+                    model=semantic_model,
+                    api_key=os.environ.get("OPENAI_SEMANTIC_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+                    timeout=_optional_float(args.semantic_timeout, os.environ.get("OPENAI_SEMANTIC_TIMEOUT"), args.timeout),
+                    base_url=args.semantic_base_url or os.environ.get("OPENAI_SEMANTIC_BASE_URL"),
+                    retries=args.retries,
+                    max_output_tokens=args.max_output_tokens,
+                    reasoning_effort=args.reasoning_effort,
+                    verbosity=args.verbosity,
+                    api_mode=args.semantic_api_mode or os.environ.get("OPENAI_SEMANTIC_API_MODE"),
+                )
             result = discover_rules(
                 Path(args.raw),
                 Path(args.out),
@@ -777,6 +791,10 @@ def main(argv=None) -> int:
                 fallback_client=fallback_client,
                 fallback_retry_failed_batches=args.fallback_retry_failed_batches,
                 fallback_retry_failed_batch_size=args.fallback_retry_failed_batch_size,
+                semantic_client=semantic_client,
+                semantic_retry_empty_batches=args.semantic_retry_empty_batches,
+                semantic_min_liquidity=args.semantic_min_liquidity,
+                semantic_min_volume_24h=args.semantic_min_volume_24h,
                 topic_cluster=args.topic_cluster,
                 max_new_markets=args.max_new_markets,
             )
@@ -831,6 +849,20 @@ def main(argv=None) -> int:
                 verbosity=args.verbosity,
                 api_mode=args.api_mode,
             )
+            semantic_model = args.semantic_model or os.environ.get("OPENAI_SEMANTIC_MODEL")
+            semantic_client = None
+            if semantic_model:
+                semantic_client = OpenAIExhaustiveGroupVerifierClient(
+                    model=semantic_model,
+                    api_key=os.environ.get("OPENAI_SEMANTIC_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+                    timeout=_optional_float(args.semantic_timeout, os.environ.get("OPENAI_SEMANTIC_TIMEOUT"), args.timeout),
+                    base_url=args.semantic_base_url or os.environ.get("OPENAI_SEMANTIC_BASE_URL"),
+                    retries=args.retries,
+                    max_output_tokens=args.max_output_tokens,
+                    reasoning_effort=args.reasoning_effort,
+                    verbosity=args.verbosity,
+                    api_mode=args.semantic_api_mode or os.environ.get("OPENAI_SEMANTIC_API_MODE"),
+                )
             result = promote_exhaustive_groups(
                 Path(args.gamma),
                 Path(args.rules_in),
@@ -842,6 +874,7 @@ def main(argv=None) -> int:
                 min_confidence=args.min_confidence,
                 state_path=Path(args.state) if args.state else None,
                 recheck_hours=args.recheck_hours,
+                semantic_client=semantic_client,
             )
             row = result_to_row(result)
             if args.report_out:
@@ -1760,10 +1793,21 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--out", required=True, help="output JSON rule path")
     discover.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
     discover.add_argument("--fallback-model", help="OpenAI model name for retrying remaining failed batches")
+    discover.add_argument("--semantic-model", help="high-recall model for empty important batch retries; defaults to OPENAI_SEMANTIC_MODEL")
     discover.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
     discover.add_argument("--api-mode", choices=["responses", "chat", "messages"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
+    discover.add_argument("--semantic-base-url", help="semantic model base URL; defaults to OPENAI_SEMANTIC_BASE_URL")
+    discover.add_argument("--semantic-api-mode", choices=["responses", "chat", "messages"], help="semantic model API mode; defaults to OPENAI_SEMANTIC_API_MODE")
+    discover.add_argument("--semantic-timeout", type=float, help="semantic model HTTP timeout; defaults to OPENAI_SEMANTIC_TIMEOUT or --timeout")
     discover.add_argument("--batch-size", type=int, default=10, help="markets per LLM discovery batch")
     discover.add_argument("--min-confidence", type=float, default=0.95, help="minimum candidate confidence")
+    discover.add_argument(
+        "--semantic-retry-empty-batches",
+        action="store_true",
+        help="retry important discovery batches with --semantic-model when the main provider returns no relations",
+    )
+    discover.add_argument("--semantic-min-liquidity", type=float, default=0.0, help="minimum market liquidity for semantic empty-batch retry")
+    discover.add_argument("--semantic-min-volume-24h", type=float, default=0.0, help="minimum 24h volume for semantic empty-batch retry")
     discover.add_argument("--max-markets", type=int, help="limit input markets for a small run")
     discover.add_argument(
         "--max-new-markets",
@@ -1825,6 +1869,10 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_groups.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
     verify_groups.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
     verify_groups.add_argument("--api-mode", choices=["responses", "chat", "messages"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
+    verify_groups.add_argument("--semantic-model", help="high-recall verifier model; defaults to OPENAI_SEMANTIC_MODEL")
+    verify_groups.add_argument("--semantic-base-url", help="semantic verifier base URL; defaults to OPENAI_SEMANTIC_BASE_URL")
+    verify_groups.add_argument("--semantic-api-mode", choices=["responses", "chat", "messages"], help="semantic verifier API mode; defaults to OPENAI_SEMANTIC_API_MODE")
+    verify_groups.add_argument("--semantic-timeout", type=float, help="semantic verifier HTTP timeout; defaults to OPENAI_SEMANTIC_TIMEOUT or --timeout")
     verify_groups.add_argument("--min-net-edge", type=float, default=0.002, help="minimum diagnostic net edge to verify")
     verify_groups.add_argument("--top", type=int, default=10, help="maximum diagnostic groups to verify")
     verify_groups.add_argument("--min-confidence", type=float, default=0.95, help="minimum verification confidence")
@@ -1922,14 +1970,22 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_cross.add_argument("--model", help="OpenAI model name; defaults to OPENAI_MODEL")
     verify_cross.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to OPENAI_BASE_URL or OpenAI")
     verify_cross.add_argument("--api-mode", choices=["responses", "chat", "messages"], help="OpenAI-compatible API mode; defaults to OPENAI_API_MODE or responses")
+    verify_cross.add_argument("--secondary-model", help="secondary model; defaults to OPENAI_SECONDARY_MODEL")
+    verify_cross.add_argument("--secondary-base-url", help="secondary OpenAI-compatible base URL; defaults to OPENAI_SECONDARY_BASE_URL")
+    verify_cross.add_argument("--secondary-api-mode", choices=["responses", "chat", "messages"], help="secondary API mode; defaults to OPENAI_SECONDARY_API_MODE")
     verify_cross.add_argument("--backup-model", help="backup model; defaults to OPENAI_BACKUP_MODEL")
     verify_cross.add_argument("--backup-base-url", help="backup OpenAI-compatible base URL; defaults to OPENAI_BACKUP_BASE_URL")
     verify_cross.add_argument("--backup-api-mode", choices=["responses", "chat", "messages"], help="backup API mode; defaults to OPENAI_BACKUP_API_MODE")
+    verify_cross.add_argument("--semantic-model", help="high-recall verifier model; defaults to OPENAI_SEMANTIC_MODEL")
+    verify_cross.add_argument("--semantic-base-url", help="semantic OpenAI-compatible base URL; defaults to OPENAI_SEMANTIC_BASE_URL")
+    verify_cross.add_argument("--semantic-api-mode", choices=["responses", "chat", "messages"], help="semantic API mode; defaults to OPENAI_SEMANTIC_API_MODE")
     verify_cross.add_argument("--fallback-model", help="fallback model; defaults to OPENAI_FALLBACK_MODEL")
     verify_cross.add_argument("--fallback-base-url", help="fallback OpenAI-compatible base URL; defaults to OPENAI_FALLBACK_BASE_URL")
     verify_cross.add_argument("--fallback-api-mode", choices=["responses", "chat", "messages"], help="fallback API mode; defaults to OPENAI_FALLBACK_API_MODE")
     verify_cross.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds")
+    verify_cross.add_argument("--secondary-timeout", type=float, help="secondary provider HTTP timeout; defaults to OPENAI_SECONDARY_TIMEOUT or --timeout")
     verify_cross.add_argument("--backup-timeout", type=float, help="backup provider HTTP timeout; defaults to OPENAI_BACKUP_TIMEOUT or --timeout")
+    verify_cross.add_argument("--semantic-timeout", type=float, help="semantic provider HTTP timeout; defaults to OPENAI_SEMANTIC_TIMEOUT or --timeout")
     verify_cross.add_argument("--fallback-timeout", type=float, help="fallback provider HTTP timeout; defaults to OPENAI_FALLBACK_TIMEOUT or --timeout")
     verify_cross.add_argument("--retries", type=int, default=2, help="retry count for retryable OpenAI-compatible API errors")
     verify_cross.add_argument("--max-output-tokens", type=int, default=4000, help="maximum model output tokens")
@@ -2301,12 +2357,28 @@ def _cross_platform_verifier_clients(args) -> list:
             args.timeout,
         ),
         (
+            "secondary",
+            args.secondary_model or os.environ.get("OPENAI_SECONDARY_MODEL"),
+            os.environ.get("OPENAI_SECONDARY_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+            args.secondary_base_url or os.environ.get("OPENAI_SECONDARY_BASE_URL"),
+            args.secondary_api_mode or os.environ.get("OPENAI_SECONDARY_API_MODE"),
+            _optional_float(args.secondary_timeout, os.environ.get("OPENAI_SECONDARY_TIMEOUT"), args.timeout),
+        ),
+        (
             "backup",
             args.backup_model or os.environ.get("OPENAI_BACKUP_MODEL"),
             os.environ.get("OPENAI_BACKUP_API_KEY") or os.environ.get("OPENAI_API_KEY"),
             args.backup_base_url or os.environ.get("OPENAI_BACKUP_BASE_URL"),
             args.backup_api_mode or os.environ.get("OPENAI_BACKUP_API_MODE"),
             _optional_float(args.backup_timeout, os.environ.get("OPENAI_BACKUP_TIMEOUT"), args.timeout),
+        ),
+        (
+            "semantic",
+            args.semantic_model or os.environ.get("OPENAI_SEMANTIC_MODEL"),
+            os.environ.get("OPENAI_SEMANTIC_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+            args.semantic_base_url or os.environ.get("OPENAI_SEMANTIC_BASE_URL"),
+            args.semantic_api_mode or os.environ.get("OPENAI_SEMANTIC_API_MODE"),
+            _optional_float(args.semantic_timeout, os.environ.get("OPENAI_SEMANTIC_TIMEOUT"), args.timeout),
         ),
         (
             "fallback",
@@ -2350,21 +2422,26 @@ def _verify_cross_platform_batch(batch_index: int, batch: list, clients: list) -
     errors = []
     provider_attempts = []
     batch_verified = False
-    for provider_label, client in clients:
+    last_rows = []
+    for provider_index, (provider_label, client) in enumerate(clients):
         try:
             rows = client.verify_matches(batch)
             if batch and not rows:
                 raise OpenAIResponseError("parsed zero cross-platform verifications")
-            verifications.extend(rows)
+            last_rows = rows
+            should_escalate = _should_semantic_escalate_cross_platform(provider_label, rows, batch, clients[provider_index + 1 :])
             provider_attempts.append(
                 {
                     "batch_index": batch_index,
                     "provider": provider_label,
-                    "status": "ok",
+                    "status": "ok_escalated" if should_escalate else "ok",
                     "batch_size": len(batch),
                     "parsed_rows": len(rows),
                 }
             )
+            if should_escalate:
+                continue
+            verifications.extend(rows)
             batch_verified = True
             break
         except (OpenAIResponseError, OSError, TimeoutError, RuntimeError) as exc:
@@ -2387,14 +2464,18 @@ def _verify_cross_platform_batch(batch_index: int, batch: list, clients: list) -
                 }
             )
     if not batch_verified:
-        errors.append(
-            {
-                "batch_size": len(batch),
-                "batch_index": batch_index,
-                "error_type": "all_providers_failed",
-                "message": "all configured cross-platform verifier providers failed",
-            }
-        )
+        if last_rows:
+            verifications.extend(last_rows)
+            batch_verified = True
+        else:
+            errors.append(
+                {
+                    "batch_size": len(batch),
+                    "batch_index": batch_index,
+                    "error_type": "all_providers_failed",
+                    "message": "all configured cross-platform verifier providers failed",
+                }
+            )
     return {
         "batch_index": batch_index,
         "verifications": verifications,
@@ -2402,6 +2483,21 @@ def _verify_cross_platform_batch(batch_index: int, batch: list, clients: list) -
         "provider_attempts": provider_attempts,
         "failed": not batch_verified,
     }
+
+
+def _should_semantic_escalate_cross_platform(provider_label: str, rows: list, batch: list, remaining_clients: list) -> bool:
+    if provider_label == "semantic" or not any(label == "semantic" for label, _ in remaining_clients):
+        return False
+    tradeable_pairs = {
+        (str(row.get("polymarket_market_id") or ""), str(row.get("kalshi_ticker") or ""))
+        for row in rows
+        if row.get("trade_allowed") and row.get("verified_same_binary_event", True)
+    }
+    batch_pairs = {
+        (str(match.get("polymarket_market_id") or ""), str(match.get("kalshi_ticker") or ""))
+        for match in batch
+    }
+    return not batch_pairs.issubset(tradeable_pairs)
 
 
 def _capital_capped_opportunity(opportunity, max_capital: float) -> dict:

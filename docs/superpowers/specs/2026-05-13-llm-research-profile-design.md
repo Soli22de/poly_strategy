@@ -36,6 +36,7 @@ Provider order:
 | primary | `windhub/deepseek-v3-2-251201` | `https://windhub.cc/v1` | `messages` | Best balance of strict recall and latency among stable candidates |
 | secondary | `secondary/gemini-3.1-pro-preview` | `https://api.xn--chy-js0fk50c.top/v1` | `chat` | Formal CLI smoke passed; lower semantic strength but fast |
 | backup | `elysiver/longcat-flash-chat` | `https://elysiver.h-e.top/v1` | `chat` | Best stable elysiver result, good recall and moderate latency |
+| semantic | `windhub/doubao-seed-1-8-251228` | `https://windhub.cc/v1` | `messages` | Slow high-recall second pass for important empty/rejected cases |
 | fallback | `gpt-5.4-mini` on the original responses endpoint | `https://api.wwcloud.app` | `responses` | Lower-cost responses-compatible last resort |
 
 Optional profile: `semantic`
@@ -56,6 +57,7 @@ Responsibilities:
 - Default to `LLM_RESEARCH_PROFILE=balanced`.
 - Never define API keys directly.
 - Only assign provider roles whose matching key variables are already present.
+- Expose a separate `OPENAI_SEMANTIC_*` role when either `OPENAI_SEMANTIC_API_KEY` or the primary windhub `OPENAI_API_KEY` is present.
 - Preserve explicit user overrides unless `LLM_RESEARCH_PROFILE_FORCE=1`.
 - Print a sanitized provider summary when `LLM_RESEARCH_PROFILE_VERBOSE=1`.
 
@@ -66,6 +68,7 @@ Key mapping:
 | primary/windhub | `OPENAI_API_KEY` |
 | secondary/new middle provider | `OPENAI_SECONDARY_API_KEY` |
 | backup/elysiver | `OPENAI_BACKUP_API_KEY` |
+| semantic/windhub high recall | `OPENAI_SEMANTIC_API_KEY` or `OPENAI_API_KEY` |
 | fallback/original responses endpoint | `OPENAI_FALLBACK_API_KEY` |
 
 The loader should set models, modes, and base URLs but leave key values untouched.
@@ -87,12 +90,18 @@ Default run:
 1. `.env.local` loads secrets and base endpoint values.
 2. `load_llm_research_profile.sh` fills missing model/mode/base-url values from the benchmark profile.
 3. Existing provider health checks and retry/fallback behavior remain responsible for runtime failures.
-4. The scripts continue to write current logs such as `discover_provider label=...` and `rule_promotion_provider label=...`.
+4. Important cases get semantic second-pass recognition before the final fallback path:
+   - discovery retries empty high-liquidity/high-volume or neg-risk batches with `OPENAI_SEMANTIC_MODEL`
+   - rule promotion rechecks non-tradeable near-miss groups with the semantic verifier before caching rejection
+   - cross-platform verification continues to semantic when a parsed provider response does not verify every candidate in the batch
+5. The scripts continue to write current logs such as `discover_provider label=...` and `rule_promotion_provider label=...`.
 
 Override examples:
 
 - Set `OPENAI_MODEL=...` to override only the primary model.
 - Set `LLM_RESEARCH_PROFILE=semantic` for the slow high-recall primary.
+- Set `LLM_SEMANTIC_SECOND_PASS=0` to disable semantic second-pass calls in the shell workflows.
+- Tune discovery importance with `LLM_SEMANTIC_MIN_LIQUIDITY` and `LLM_SEMANTIC_MIN_VOLUME_24H` (defaults: `1000` each).
 - Set `LLM_RESEARCH_PROFILE_FORCE=1` to replace all profile-managed model/mode/base-url values.
 - Set `LLM_RESEARCH_PROFILE=off` to disable the loader.
 

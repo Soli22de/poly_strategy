@@ -21,6 +21,8 @@ class MarketText:
     neg_risk_market_id: str = ""
     group_item_title: str = ""
     group_item_threshold: str = ""
+    liquidity: float = 0.0
+    volume_24h: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,11 @@ def discover_rules(
     fallback_client=None,
     fallback_retry_failed_batches: int = 0,
     fallback_retry_failed_batch_size: int = 1,
+    semantic_client=None,
+    semantic_retry_empty_batches: bool = False,
+    semantic_min_liquidity: float = 0.0,
+    semantic_min_volume_24h: float = 0.0,
+    semantic_include_neg_risk: bool = True,
     topic_cluster: bool = False,
     max_new_markets: Optional[int] = None,
 ) -> DiscoveryResult:
@@ -217,6 +224,10 @@ def discover_rules(
         raise ValueError("fallback_retry_failed_batches must be non-negative")
     if fallback_retry_failed_batch_size < 1:
         raise ValueError("fallback_retry_failed_batch_size must be at least 1")
+    if semantic_min_liquidity < 0:
+        raise ValueError("semantic_min_liquidity must be non-negative")
+    if semantic_min_volume_24h < 0:
+        raise ValueError("semantic_min_volume_24h must be non-negative")
     if max_new_markets is not None and max_new_markets < 1:
         raise ValueError("max_new_markets must be at least 1")
 
@@ -239,7 +250,21 @@ def discover_rules(
 
     def discover_batch(batch_index: int, batch_markets: Sequence[MarketText], batch_client) -> List[RelationCandidate]:
         discovery_batch = _batch_with_context(batch_markets, markets, context_market_limit)
-        return secondary_verify_candidates(batch_client.discover_relations(discovery_batch), market_map)
+        candidates = secondary_verify_candidates(batch_client.discover_relations(discovery_batch), market_map)
+        if (
+            semantic_client is not None
+            and semantic_retry_empty_batches
+            and not candidates
+            and _semantic_batch_is_important(
+                batch_markets,
+                min_liquidity=semantic_min_liquidity,
+                min_volume_24h=semantic_min_volume_24h,
+                include_neg_risk=semantic_include_neg_risk,
+            )
+        ):
+            semantic_candidates = semantic_client.discover_relations(discovery_batch)
+            return secondary_verify_candidates(semantic_candidates, market_map)
+        return candidates
 
     def checkpoint() -> None:
         _write_rules_checkpoint(
@@ -585,7 +610,40 @@ def _market_text_from_row(row: dict) -> Optional[MarketText]:
         neg_risk_market_id=str(raw.get("negRiskMarketID") or "").strip(),
         group_item_title=str(raw.get("groupItemTitle") or "").strip(),
         group_item_threshold=group_item_threshold,
+        liquidity=_float_raw(raw, "liquidityNum", "liquidityClob", "liquidity"),
+        volume_24h=_float_raw(raw, "volume24hrClob", "volume24hr", "volume24h"),
     )
+
+
+def _float_raw(raw: dict, *keys: str) -> float:
+    for key in keys:
+        value = raw.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _semantic_batch_is_important(
+    batch: Sequence[MarketText],
+    min_liquidity: float,
+    min_volume_24h: float,
+    include_neg_risk: bool,
+) -> bool:
+    thresholds_disabled = min_liquidity == 0 and min_volume_24h == 0
+    for market in batch:
+        if thresholds_disabled:
+            return True
+        if include_neg_risk and market.neg_risk_market_id:
+            return True
+        if min_liquidity > 0 and market.liquidity >= min_liquidity:
+            return True
+        if min_volume_24h > 0 and market.volume_24h >= min_volume_24h:
+            return True
+    return False
 
 
 def market_ids_from_rule_row(row: Optional[dict]) -> Set[str]:

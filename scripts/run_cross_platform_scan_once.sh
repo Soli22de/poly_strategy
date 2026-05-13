@@ -36,6 +36,8 @@ FINAL_KALSHI_ORDERBOOKS="${CROSS_PLATFORM_FINAL_KALSHI_ORDERBOOKS:-data/cross-pl
 SIGNALS="${CROSS_PLATFORM_SIGNALS:-data/cross-platform-signals-expanded.ndjson}"
 CROSS_PLATFORM_CAPITAL="${CROSS_PLATFORM_MAX_CAPITAL_PER_TRADE:-${BANKROLL:-100}}"
 STEP_TIMEOUT="${CROSS_PLATFORM_STEP_TIMEOUT:-300}"
+CROSS_PLATFORM_SEMANTIC_SECOND_PASS="${CROSS_PLATFORM_SEMANTIC_SECOND_PASS:-1}"
+CROSS_PLATFORM_SEMANTIC_TIMEOUT="${CROSS_PLATFORM_SEMANTIC_TIMEOUT:-${OPENAI_SEMANTIC_TIMEOUT:-120}}"
 
 PROXY_ARG=()
 if [[ -n "${PROXY:-}" ]]; then
@@ -107,8 +109,8 @@ run_with_timeout "$STEP_TIMEOUT" \
   --top "${CROSS_PLATFORM_VERIFY_TOP:-60}" \
   --min-net-edge "${CROSS_PLATFORM_PREVERIFY_MIN_EDGE:-0.005}"
 
-run_with_timeout "${CROSS_PLATFORM_VERIFY_COMMAND_TIMEOUT:-900}" \
-  "$PYTHON_BIN" -m poly_strategy.cli verify-cross-platform-matches \
+VERIFY_ARGS=(
+  verify-cross-platform-matches
   --matches "$OPPORTUNITY_CANDIDATES" \
   --out "$VERIFIED_MATCHES" \
   --signals-out "$SIGNALS" \
@@ -123,6 +125,19 @@ run_with_timeout "${CROSS_PLATFORM_VERIFY_COMMAND_TIMEOUT:-900}" \
   --reasoning-effort "${CROSS_PLATFORM_REASONING_EFFORT:-high}" \
   --verified-only \
   --continue-on-error
+)
+if [[ "$CROSS_PLATFORM_SEMANTIC_SECOND_PASS" == "1" && -n "${OPENAI_SEMANTIC_MODEL:-}" ]]; then
+  VERIFY_ARGS+=(--semantic-model "$OPENAI_SEMANTIC_MODEL" --semantic-timeout "$CROSS_PLATFORM_SEMANTIC_TIMEOUT")
+  if [[ -n "${OPENAI_SEMANTIC_BASE_URL:-}" ]]; then
+    VERIFY_ARGS+=(--semantic-base-url "$OPENAI_SEMANTIC_BASE_URL")
+  fi
+  if [[ -n "${OPENAI_SEMANTIC_API_MODE:-}" ]]; then
+    VERIFY_ARGS+=(--semantic-api-mode "$OPENAI_SEMANTIC_API_MODE")
+  fi
+fi
+
+run_with_timeout "${CROSS_PLATFORM_VERIFY_COMMAND_TIMEOUT:-900}" \
+  "$PYTHON_BIN" -m poly_strategy.cli "${VERIFY_ARGS[@]}"
 
 run_with_timeout "$STEP_TIMEOUT" \
   "$PYTHON_BIN" -m poly_strategy.cli scan-cross-platform-once \

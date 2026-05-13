@@ -20,6 +20,9 @@ def run_loader(env):
         "printf 'OPENAI_BACKUP_MODEL=%s\\n' \"${OPENAI_BACKUP_MODEL-}\"; "
         "printf 'OPENAI_BACKUP_BASE_URL=%s\\n' \"${OPENAI_BACKUP_BASE_URL-}\"; "
         "printf 'OPENAI_BACKUP_API_MODE=%s\\n' \"${OPENAI_BACKUP_API_MODE-}\"; "
+        "printf 'OPENAI_SEMANTIC_MODEL=%s\\n' \"${OPENAI_SEMANTIC_MODEL-}\"; "
+        "printf 'OPENAI_SEMANTIC_BASE_URL=%s\\n' \"${OPENAI_SEMANTIC_BASE_URL-}\"; "
+        "printf 'OPENAI_SEMANTIC_API_MODE=%s\\n' \"${OPENAI_SEMANTIC_API_MODE-}\"; "
         "printf 'OPENAI_FALLBACK_MODEL=%s\\n' \"${OPENAI_FALLBACK_MODEL-}\"; "
         "printf 'OPENAI_FALLBACK_BASE_URL=%s\\n' \"${OPENAI_FALLBACK_BASE_URL-}\"; "
         "printf 'OPENAI_FALLBACK_API_MODE=%s\\n' \"${OPENAI_FALLBACK_API_MODE-}\""
@@ -55,6 +58,9 @@ def test_balanced_profile_exports_benchmark_provider_order():
     assert values["OPENAI_BACKUP_MODEL"] == "longcat-flash-chat"
     assert values["OPENAI_BACKUP_BASE_URL"] == "https://elysiver.h-e.top/v1"
     assert values["OPENAI_BACKUP_API_MODE"] == "chat"
+    assert values["OPENAI_SEMANTIC_MODEL"] == "doubao-seed-1-8-251228"
+    assert values["OPENAI_SEMANTIC_BASE_URL"] == "https://windhub.cc/v1"
+    assert values["OPENAI_SEMANTIC_API_MODE"] == "messages"
     assert values["OPENAI_FALLBACK_MODEL"] == "gpt-5.4-mini"
     assert values["OPENAI_FALLBACK_BASE_URL"] == "https://api.wwcloud.app"
     assert values["OPENAI_FALLBACK_API_MODE"] == "responses"
@@ -66,6 +72,7 @@ def test_semantic_profile_uses_high_recall_primary_only():
     assert values["OPENAI_MODEL"] == "doubao-seed-1-8-251228"
     assert values["OPENAI_BASE_URL"] == "https://windhub.cc/v1"
     assert values["OPENAI_API_MODE"] == "messages"
+    assert values["OPENAI_SEMANTIC_MODEL"] == "doubao-seed-1-8-251228"
     assert values["OPENAI_BACKUP_MODEL"] == "longcat-flash-chat"
 
 
@@ -113,6 +120,13 @@ def test_missing_role_key_skips_that_role():
     assert values["OPENAI_BACKUP_API_MODE"] == ""
 
 
+def test_semantic_role_uses_primary_windhub_key_availability():
+    values = run_loader({"OPENAI_API_KEY": "", "OPENAI_SEMANTIC_API_KEY": ""})
+
+    assert values["OPENAI_MODEL"] == ""
+    assert values["OPENAI_SEMANTIC_MODEL"] == ""
+
+
 def test_verbose_output_does_not_print_keys():
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -137,6 +151,7 @@ def test_verbose_output_does_not_print_keys():
     assert "backup-secret" not in combined
     assert "fallback-secret" not in combined
     assert "deepseek-v3-2-251201" in combined
+    assert "doubao-seed-1-8-251228" in combined
 
 
 def test_mainline_scripts_source_research_profile_loader():
@@ -149,3 +164,4 @@ def test_mainline_scripts_source_research_profile_loader():
     for script in scripts:
         text = script.read_text(encoding="utf-8")
         assert "source scripts/load_llm_research_profile.sh" in text
+        assert "OPENAI_SEMANTIC_MODEL" in text

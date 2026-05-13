@@ -33,6 +33,7 @@ def promote_exhaustive_groups(
     state_path: Optional[Path] = None,
     recheck_hours: float = 24.0,
     now: Optional[datetime] = None,
+    semantic_client=None,
 ) -> ExhaustiveGroupPromotionResult:
     if top_n < 0:
         raise ValueError("top_n must be non-negative")
@@ -107,8 +108,14 @@ def promote_exhaustive_groups(
             report_rows.append(report_row)
             continue
 
-        verification = client.verify_group(markets)
+        verification, verification_provider = _verify_group_with_semantic(
+            client,
+            semantic_client,
+            markets,
+            min_confidence,
+        )
         report_row["verification"] = verification
+        report_row["verification_provider"] = verification_provider
         if _verification_is_tradeable(verification, min_confidence):
             verified_count += 1
             added_rows.append(_rule_row_from_verification(market_ids, verification))
@@ -138,6 +145,23 @@ def promote_exhaustive_groups(
         out_path=rules_out_path,
         rows=report_rows,
     )
+
+
+def _verify_group_with_semantic(client, semantic_client, markets: List[MarketText], min_confidence: float) -> Tuple[dict, str]:
+    try:
+        primary_verification = client.verify_group(markets)
+    except Exception as primary_error:
+        if semantic_client is None:
+            raise
+        try:
+            return semantic_client.verify_group(markets), "semantic"
+        except Exception as semantic_error:
+            raise semantic_error from primary_error
+
+    if semantic_client is None or _verification_is_tradeable(primary_verification, min_confidence):
+        return primary_verification, "primary"
+
+    return semantic_client.verify_group(markets), "semantic"
 
 
 def potential_exhaustive_group_candidates(

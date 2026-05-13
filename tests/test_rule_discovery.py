@@ -666,6 +666,165 @@ class RuleDiscoveryTests(unittest.TestCase):
             {("a", "c"), ("b", "c")},
         )
 
+    def test_discover_rules_uses_semantic_client_for_empty_important_batch(self):
+        class PrimaryClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                self.calls.append([market.market_id for market in markets])
+                return []
+
+        class SemanticClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                ids = [market.market_id for market in markets]
+                self.calls.append(ids)
+                return [RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "semantic")]
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "a",
+                "raw": {
+                    "question": "Will Bitcoin hit 100k in 2026?",
+                    "outcomes": ["Yes", "No"],
+                    "liquidityNum": 5000,
+                    "volume24hr": 100,
+                },
+            },
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": "b",
+                "raw": {
+                    "question": "Will Bitcoin hit 150k in 2026?",
+                    "outcomes": ["Yes", "No"],
+                    "liquidityNum": 5000,
+                    "volume24hr": 100,
+                },
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            primary = PrimaryClient()
+            semantic = SemanticClient()
+
+            result = discover_rules(
+                raw,
+                out,
+                primary,
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                semantic_client=semantic,
+                semantic_retry_empty_batches=True,
+                semantic_min_liquidity=1000,
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(primary.calls, [["a", "b"]])
+        self.assertEqual(semantic.calls, [["a", "b"]])
+        self.assertEqual(result.implications_written, 1)
+        self.assertEqual(written["implications"][0]["antecedent"], "a")
+
+    def test_discover_rules_does_not_semantic_retry_empty_unimportant_batch(self):
+        class PrimaryClient:
+            def discover_relations(self, markets):
+                return []
+
+        class SemanticClient:
+            def __init__(self):
+                self.calls = []
+
+            def discover_relations(self, markets):
+                self.calls.append([market.market_id for market in markets])
+                return [RelationCandidate("implies", "a", "b", "a_implies_b", 0.99, True, [], "semantic")]
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {"question": f"Will {market_id} happen?", "outcomes": ["Yes", "No"], "liquidityNum": 5},
+            }
+            for market_id in ["a", "b"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            semantic = SemanticClient()
+
+            result = discover_rules(
+                raw,
+                out,
+                PrimaryClient(),
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                semantic_client=semantic,
+                semantic_retry_empty_batches=True,
+                semantic_min_liquidity=1000,
+            )
+
+        self.assertEqual(semantic.calls, [])
+        self.assertEqual(result.implications_written, 0)
+
+    def test_discover_rules_keeps_important_empty_batch_pending_when_semantic_fails(self):
+        class PrimaryClient:
+            def discover_relations(self, markets):
+                return []
+
+        class SemanticClient:
+            def discover_relations(self, markets):
+                raise TimeoutError("semantic timeout")
+
+        rows = [
+            {
+                "type": "raw_polymarket_gamma_market",
+                "market_id": market_id,
+                "raw": {
+                    "question": f"Will Bitcoin hit {market_id} in 2026?",
+                    "outcomes": ["Yes", "No"],
+                    "liquidityNum": 5000,
+                },
+            }
+            for market_id in ["a", "b"]
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "gamma.ndjson"
+            out = Path(tmp) / "rules.json"
+            raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            result = discover_rules(
+                raw,
+                out,
+                PrimaryClient(),
+                batch_size=2,
+                min_confidence=0.95,
+                context_market_limit=0,
+                generated_at="2026-05-08T00:00:00Z",
+                continue_on_client_error=True,
+                semantic_client=SemanticClient(),
+                semantic_retry_empty_batches=True,
+                semantic_min_liquidity=1000,
+            )
+            written = json.loads(out.read_text())
+
+        self.assertEqual(result.failed_batches, 2)
+        self.assertEqual(written["processed_market_ids"], [])
+        self.assertEqual({tuple(row["market_ids"]) for row in written["discovery_errors"]}, {("a",), ("b",)})
+        self.assertEqual(written["discovery_errors"][0]["client"], "primary")
+        self.assertIn("semantic timeout", written["discovery_errors"][0]["error"])
+
     def test_discover_rules_cache_tracks_markets_with_no_relations(self):
         rows = [
             {

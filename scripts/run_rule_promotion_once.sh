@@ -37,6 +37,10 @@ BACKUP_MODEL="${OPENAI_BACKUP_MODEL:-}"
 BACKUP_BASE_URL="${OPENAI_BACKUP_BASE_URL:-}"
 BACKUP_API_MODE="${OPENAI_BACKUP_API_MODE:-}"
 BACKUP_API_KEY="${OPENAI_BACKUP_API_KEY:-}"
+SEMANTIC_MODEL="${OPENAI_SEMANTIC_MODEL:-}"
+SEMANTIC_BASE_URL="${OPENAI_SEMANTIC_BASE_URL:-${OPENAI_BASE_URL:-}}"
+SEMANTIC_API_MODE="${OPENAI_SEMANTIC_API_MODE:-${OPENAI_API_MODE:-}}"
+SEMANTIC_API_KEY="${OPENAI_SEMANTIC_API_KEY:-${OPENAI_API_KEY:-}}"
 FALLBACK_MODEL="${OPENAI_FALLBACK_MODEL:-${LLM_FALLBACK_MODEL:-}}"
 FALLBACK_BASE_URL="${OPENAI_FALLBACK_BASE_URL:-${OPENAI_BASE_URL:-}}"
 FALLBACK_API_MODE="${OPENAI_FALLBACK_API_MODE:-${OPENAI_API_MODE:-}}"
@@ -53,6 +57,8 @@ REASONING_EFFORT="${REASONING_EFFORT:-high}"
 VERBOSITY="${VERBOSITY:-}"
 ALLOW_PROMOTION_FAILURE="${ALLOW_PROMOTION_FAILURE:-1}"
 REBUILD_WATCHLIST_ON_ADD="${REBUILD_WATCHLIST_ON_ADD:-1}"
+LLM_SEMANTIC_SECOND_PASS="${LLM_SEMANTIC_SECOND_PASS:-1}"
+LLM_SEMANTIC_TIMEOUT="${LLM_SEMANTIC_TIMEOUT:-120}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -143,11 +149,20 @@ run_verifier() {
   if [[ -n "$VERBOSITY" ]]; then
     args+=(--verbosity "$VERBOSITY")
   fi
+  if [[ "$LLM_SEMANTIC_SECOND_PASS" == "1" && -n "$SEMANTIC_MODEL" ]]; then
+    args+=(--semantic-model "$SEMANTIC_MODEL" --semantic-timeout "$LLM_SEMANTIC_TIMEOUT")
+    if [[ -n "$SEMANTIC_BASE_URL" ]]; then
+      args+=(--semantic-base-url "$SEMANTIC_BASE_URL")
+    fi
+    if [[ -n "$SEMANTIC_API_MODE" ]]; then
+      args+=(--semantic-api-mode "$SEMANTIC_API_MODE")
+    fi
+  fi
   echo "rule_promotion_provider label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default}"
   if [[ -n "$api_key" ]]; then
-    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+    OPENAI_SEMANTIC_API_KEY="$SEMANTIC_API_KEY" OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   else
-    "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+    OPENAI_SEMANTIC_API_KEY="$SEMANTIC_API_KEY" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   fi
 }
 

@@ -85,6 +85,81 @@ class ExhaustiveGroupTests(unittest.TestCase):
         self.assertEqual(result.rejected_count, 1)
         self.assertEqual(row["exhaustive_groups"], [])
 
+    def test_promote_exhaustive_groups_uses_semantic_client_after_non_tradeable_primary(self):
+        primary = FakeVerifier(
+            {
+                "verdict": "uncertain",
+                "confidence": 0.80,
+                "trade_allowed": False,
+                "risk_flags": ["insufficient_information"],
+                "reason": "primary could not prove completeness",
+            }
+        )
+        semantic = FakeVerifier(
+            {
+                "verdict": "exhaustive_group",
+                "confidence": 0.99,
+                "trade_allowed": True,
+                "risk_flags": [],
+                "reason": "semantic pass verified the full outcome set",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path, rules_path, gamma_path = _write_candidate_fixture(Path(tmp))
+            out_path = Path(tmp) / "rules-with-groups.json"
+
+            result = promote_exhaustive_groups(
+                gamma_path,
+                rules_path,
+                out_path,
+                snapshots_path,
+                primary,
+                min_net_edge=0.0,
+                top_n=5,
+                min_confidence=0.95,
+                semantic_client=semantic,
+            )
+            row = json.loads(out_path.read_text())
+
+        self.assertEqual(primary.market_ids_seen, [["a", "b", "c"]])
+        self.assertEqual(semantic.market_ids_seen, [["a", "b", "c"]])
+        self.assertEqual(result.added_count, 1)
+        self.assertEqual(result.rejected_count, 0)
+        self.assertEqual(result.rows[0]["verification_provider"], "semantic")
+        self.assertEqual(row["exhaustive_groups"][0]["market_ids"], ["a", "b", "c"])
+
+    def test_promote_exhaustive_groups_keeps_primary_rejection_uncached_when_semantic_fails(self):
+        primary = FakeVerifier(
+            {
+                "verdict": "uncertain",
+                "confidence": 0.80,
+                "trade_allowed": False,
+                "risk_flags": ["insufficient_information"],
+                "reason": "primary could not prove completeness",
+            }
+        )
+        semantic = FailingVerifier(TimeoutError("semantic timeout"))
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots_path, rules_path, gamma_path = _write_candidate_fixture(Path(tmp))
+            out_path = Path(tmp) / "rules-with-groups.json"
+            state_path = Path(tmp) / "promotion-state.json"
+
+            with self.assertRaisesRegex(TimeoutError, "semantic timeout"):
+                promote_exhaustive_groups(
+                    gamma_path,
+                    rules_path,
+                    out_path,
+                    snapshots_path,
+                    primary,
+                    min_net_edge=0.0,
+                    top_n=5,
+                    min_confidence=0.95,
+                    state_path=state_path,
+                    semantic_client=semantic,
+                )
+
+        self.assertFalse(state_path.exists())
+
     def test_promote_exhaustive_groups_rejects_incomplete_known_neg_risk_group(self):
         client = FakeVerifier(
             {
@@ -300,6 +375,16 @@ class FakeVerifier:
     def verify_group(self, markets):
         self.market_ids_seen.append([market.market_id for market in markets])
         return dict(self.response)
+
+
+class FailingVerifier:
+    def __init__(self, exc):
+        self.exc = exc
+        self.market_ids_seen = []
+
+    def verify_group(self, markets):
+        self.market_ids_seen.append([market.market_id for market in markets])
+        raise self.exc
 
 
 def _write_candidate_fixture(root: Path):

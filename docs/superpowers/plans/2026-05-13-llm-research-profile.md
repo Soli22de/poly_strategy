@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the tested LLM provider order the default for discovery, rule promotion, and cross-platform verification without committing secrets or changing trading behavior.
+**Goal:** Make the tested LLM provider order the default for discovery, rule promotion, and cross-platform verification without committing secrets or changing trading behavior. Add a high-recall semantic second pass for important cases where the normal path returns empty or non-tradeable recognition.
 
-**Architecture:** Add one shell profile loader that fills missing `OPENAI_*` provider settings from the benchmark-derived profile. Source it from the three mainline LLM scripts after `.env.local` loads and before they snapshot provider variables. Keep all keys external and preserve explicit user overrides unless force mode is enabled.
+**Architecture:** Add one shell profile loader that fills missing `OPENAI_*` provider settings from the benchmark-derived profile. Source it from the three mainline LLM scripts after `.env.local` loads and before they snapshot provider variables. Keep all keys external and preserve explicit user overrides unless force mode is enabled. The loader also exposes `OPENAI_SEMANTIC_*` for `doubao-seed-1-8-251228/messages`; scripts use it only as a second pass for important discovery batches, near-miss promotion candidates, and cross-platform opportunity candidates.
 
 **Tech Stack:** Bash shell scripts, Python `pytest`, existing OpenAI-compatible client in `poly_strategy/openai_rules.py`.
 
@@ -22,6 +22,12 @@
   - Same loader source position.
 - Modify: `scripts/run_cross_platform_scan_once.sh`
   - Same loader source position before cross-platform verifier command.
+- Modify: `poly_strategy/rule_discovery.py`
+  - Retry empty important discovery batches with a semantic client.
+- Modify: `poly_strategy/exhaustive_groups.py`
+  - Recheck non-tradeable near-miss group verification before caching rejection.
+- Modify: `poly_strategy/cli.py`
+  - Wire semantic clients into discovery, exhaustive group promotion, and cross-platform verification.
 
 ## Task 1: Add Loader Tests First
 

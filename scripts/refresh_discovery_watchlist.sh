@@ -75,10 +75,19 @@ BACKUP_MODEL="${OPENAI_BACKUP_MODEL:-}"
 BACKUP_BASE_URL="${OPENAI_BACKUP_BASE_URL:-}"
 BACKUP_API_MODE="${OPENAI_BACKUP_API_MODE:-}"
 BACKUP_API_KEY="${OPENAI_BACKUP_API_KEY:-}"
+SEMANTIC_MODEL="${OPENAI_SEMANTIC_MODEL:-}"
+SEMANTIC_BASE_URL="${OPENAI_SEMANTIC_BASE_URL:-${OPENAI_BASE_URL:-}}"
+SEMANTIC_API_MODE="${OPENAI_SEMANTIC_API_MODE:-${OPENAI_API_MODE:-}}"
+SEMANTIC_API_KEY="${OPENAI_SEMANTIC_API_KEY:-${OPENAI_API_KEY:-}}"
 FALLBACK_MODEL="${OPENAI_FALLBACK_MODEL:-${LLM_FALLBACK_MODEL:-}}"
 FALLBACK_BASE_URL="${OPENAI_FALLBACK_BASE_URL:-${OPENAI_BASE_URL:-}}"
 FALLBACK_API_MODE="${OPENAI_FALLBACK_API_MODE:-${OPENAI_API_MODE:-}}"
 FALLBACK_API_KEY="${OPENAI_FALLBACK_API_KEY:-${OPENAI_API_KEY:-}}"
+LLM_SEMANTIC_SECOND_PASS="${LLM_SEMANTIC_SECOND_PASS:-1}"
+LLM_SEMANTIC_DISCOVERY_EMPTY_RETRY="${LLM_SEMANTIC_DISCOVERY_EMPTY_RETRY:-1}"
+LLM_SEMANTIC_TIMEOUT="${LLM_SEMANTIC_TIMEOUT:-120}"
+LLM_SEMANTIC_MIN_LIQUIDITY="${LLM_SEMANTIC_MIN_LIQUIDITY:-1000}"
+LLM_SEMANTIC_MIN_VOLUME_24H="${LLM_SEMANTIC_MIN_VOLUME_24H:-1000}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python: $PYTHON_BIN" >&2
@@ -346,11 +355,26 @@ run_discovery_provider() {
   if [[ -n "$LLM_MAX_NEW_MARKETS_PER_REFRESH" && "$LLM_MAX_NEW_MARKETS_PER_REFRESH" != "0" ]]; then
     args+=(--max-new-markets "$LLM_MAX_NEW_MARKETS_PER_REFRESH")
   fi
+  if [[ "$LLM_SEMANTIC_SECOND_PASS" == "1" && "$LLM_SEMANTIC_DISCOVERY_EMPTY_RETRY" == "1" && -n "$SEMANTIC_MODEL" ]]; then
+    args+=(
+      --semantic-model "$SEMANTIC_MODEL"
+      --semantic-timeout "$LLM_SEMANTIC_TIMEOUT"
+      --semantic-retry-empty-batches
+      --semantic-min-liquidity "$LLM_SEMANTIC_MIN_LIQUIDITY"
+      --semantic-min-volume-24h "$LLM_SEMANTIC_MIN_VOLUME_24H"
+    )
+    if [[ -n "$SEMANTIC_BASE_URL" ]]; then
+      args+=(--semantic-base-url "$SEMANTIC_BASE_URL")
+    fi
+    if [[ -n "$SEMANTIC_API_MODE" ]]; then
+      args+=(--semantic-api-mode "$SEMANTIC_API_MODE")
+    fi
+  fi
   echo "discover_provider label=$label model=$model api_mode=${api_mode:-default} base_url=${base_url:-default} cache=$cache_path out=$out_path"
   if [[ -n "$api_key" ]]; then
-    OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+    OPENAI_SEMANTIC_API_KEY="$SEMANTIC_API_KEY" OPENAI_API_KEY="$api_key" OPENAI_BASE_URL="$base_url" OPENAI_API_MODE="$api_mode" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   else
-    "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
+    OPENAI_SEMANTIC_API_KEY="$SEMANTIC_API_KEY" "$PYTHON_BIN" -m poly_strategy.cli "${args[@]}"
   fi
 }
 
