@@ -166,29 +166,39 @@ def main() -> int:
 
     size_rows = []
     for size in sizes:
+        # First pass: find max fillable basket size = min of per-leg fillable
+        per_leg_fillable = []
+        for b in book_data:
+            filled, _ = simulate_buy(b["asks"], size)
+            per_leg_fillable.append(filled)
+        max_fillable = min(min(per_leg_fillable), size) if per_leg_fillable else 0.0
+
+        # FIX (per WW review): basket can only buy `max_fillable` units of EACH leg
+        # (to stay balanced). Recompute per-leg cost at the actual buyable size.
+        actual_units = max_fillable
         total_cost = 0.0
         total_fee = 0.0
-        max_fillable = float("inf")
         for b in book_data:
-            filled, avg_px = simulate_buy(b["asks"], size)
-            max_fillable = min(max_fillable, filled)
-            cost = avg_px * size
-            fee = b["member"]["fee_rate"] * avg_px * (1 - avg_px) * size
+            sub_filled, sub_avg = simulate_buy(b["asks"], actual_units)
+            cost = sub_avg * actual_units
+            fee = b["member"]["fee_rate"] * sub_avg * (1 - sub_avg) * actual_units
             total_cost += cost
             total_fee += fee
-        edge_dollars = size - total_cost - total_fee
-        edge_pct = (edge_dollars / size) if size > 0 else 0.0
+        edge_dollars = actual_units - total_cost - total_fee
+        edge_pct = (edge_dollars / actual_units) if actual_units > 0 else 0.0
         size_rows.append({
-            "size": size,
-            "max_fillable_units": max_fillable,
+            "intended_size": size,
+            "actual_basket_units": actual_units,
             "total_cost": total_cost,
             "total_fee": total_fee,
             "edge_dollars": edge_dollars,
             "edge_pct": edge_pct,
         })
-        print(f"  size={size:>5.0f}u : avg_basket_cost={total_cost/size:.4f}  "
-              f"fee={total_fee:.4f}  edge=${edge_dollars:+,.2f} ({edge_pct*100:+.2f}%)  "
-              f"max_fillable={max_fillable:.0f}u")
+        cap_flag = "" if actual_units >= size else f"  [CAPPED: book has only {actual_units:.0f}u]"
+        avg_px_per_unit = total_cost / actual_units if actual_units > 0 else 0.0
+        print(f"  intended={size:>5.0f}u  actual={actual_units:>5.1f}u : "
+              f"avg_cost/u={avg_px_per_unit:.4f}  fee=${total_fee:.4f}  "
+              f"edge=${edge_dollars:+,.2f} ({edge_pct*100:+.2f}%){cap_flag}")
 
     now = datetime.now(tz=timezone.utc)
     iso = now.isoformat()
@@ -228,19 +238,21 @@ def main() -> int:
         f"- marginal fee: {marginal_fee:.5f}",
         f"- marginal edge_after_fee: **{1.0 - bestAsk_sum - marginal_fee:+.4f}**",
         "",
-        "## Fill simulation",
+        "## Fill simulation (fix: cost & edge computed at ACTUAL fillable size, not intended)",
         "",
-        "| Basket size (units) | Avg basket cost | Total fee | Edge $ | Edge % | Max fillable |",
+        "| Intended size | Actual fillable | Avg cost/unit | Total fee | Edge $ | Edge % |",
         "|---:|---:|---:|---:|---:|---:|",
     ]
     for r in size_rows:
+        avg_cost_per_unit = (r['total_cost'] / r['actual_basket_units']) if r['actual_basket_units'] > 0 else 0.0
+        capped = " ⚠️" if r['actual_basket_units'] < r['intended_size'] else ""
         lines.append(
-            f"| {r['size']:.0f} "
-            f"| {r['total_cost']/r['size']:.4f} "
+            f"| {r['intended_size']:.0f} "
+            f"| {r['actual_basket_units']:.1f}{capped} "
+            f"| {avg_cost_per_unit:.4f} "
             f"| ${r['total_fee']:.2f} "
             f"| ${r['edge_dollars']:+,.2f} "
-            f"| {r['edge_pct']*100:+.2f}% "
-            f"| {r['max_fillable_units']:.0f} |"
+            f"| {r['edge_pct']*100:+.2f}% |"
         )
 
     lines += [

@@ -1,4 +1,4 @@
-# Group Book Validation: will-the-democrats-win-the (2026-05-13T03:20:27.443159+00:00)
+# Group Book Validation: will-the-democrats-win-the (2026-05-13T06:27:27.152124+00:00)
 
 Real-orderbook depth check of basket arb candidate.
 Group: `0xa8574c0caacc...`  (members=2)
@@ -7,8 +7,8 @@ Group: `0xa8574c0caacc...`  (members=2)
 
 | # | Question | bestAsk | depth @ bestAsk | bestBid | gamma_ask | fee | vol24hr | liq |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| 1 | Will the Democrats win the South Carolina governor race | 0.059 | 77 | 0.031 | 0.0590 | 0.040 | $0 | $7,244 |
-| 2 | Will the Republicans win the South Carolina governor ra | 0.91 | 4 | 0.9 | 0.9100 | 0.040 | $1 | $3,402 |
+| 1 | Will the Democrats win the South Carolina governor race | 0.059 | 77 | 0.022 | 0.0590 | 0.040 | $0 | $4,664 |
+| 2 | Will the Republicans win the South Carolina governor ra | 0.91 | 4 | 0.89 | 0.9100 | 0.040 | $1 | $5,585 |
 
 ## Marginal (1-unit) edge
 
@@ -16,16 +16,16 @@ Group: `0xa8574c0caacc...`  (members=2)
 - marginal fee: 0.00550
 - marginal edge_after_fee: **+0.0255**
 
-## Fill simulation
+## Fill simulation (fix: cost & edge computed at ACTUAL fillable size, not intended)
 
-| Basket size (units) | Avg basket cost | Total fee | Edge $ | Edge % | Max fillable |
+| Intended size | Actual fillable | Avg cost/unit | Total fee | Edge $ | Edge % |
 |---:|---:|---:|---:|---:|---:|
-| 50 | 0.9846 | $0.25 | $+0.52 | +1.04% | 50 |
-| 200 | 0.9934 | $1.01 | $+0.31 | +0.15% | 200 |
-| 500 | 1.0371 | $2.88 | $-21.44 | -4.29% | 500 |
-| 1000 | 1.0644 | $5.75 | $-70.15 | -7.01% | 870 |
-| 2000 | 1.0987 | $13.53 | $-211.00 | -10.55% | 870 |
-| 5000 | 1.3646 | $57.38 | $-1,880.37 | -37.61% | 870 |
+| 50 | 50.0 | 0.9782 | $0.26 | $+0.83 | +1.66% |
+| 200 | 200.0 | 0.9845 | $1.07 | $+2.02 | +1.01% |
+| 500 | 500.0 | 1.0178 | $3.24 | $-12.12 | -2.42% |
+| 1000 | 1000.0 | 1.0430 | $6.53 | $-49.48 | -4.95% |
+| 2000 | 1303.9 ⚠️ | 1.0566 | $8.26 | $-82.06 | -6.29% |
+| 5000 | 1303.9 ⚠️ | 1.0566 | $8.26 | $-82.06 | -6.29% |
 
 ---
-*Snapshot: 2026-05-13T03:20:27.443159+00:00*
+*Snapshot: 2026-05-13T06:27:27.152124+00:00*

@@ -20,10 +20,11 @@
 1. mid-price 给出的"持续 edge"和 bestAsk 实际可成交 edge 是两个东西（§3.4）
 2. TAKER 一次性吃光 bestAsk 在 2 个测试组（James Bond + SC Gov）下死亡（§2 + §3.7）
 3. 我据此说"thesis 死了" —— 用户当场质疑（§3.9）
-4. 补做 MAKER 模拟：v1 mid-touch 给 $15k/yr 假象，v2 trade tape 给 $918/yr 真值
-5. 修正后预期：**$200-500/yr @ $100 basket，或 $2-5k/yr @ $1000 basket**（capital 占用 $144k）
+4. 补做 MAKER 模拟：v1 mid-touch 给 $15k/yr 假象，v2 trade tape 给 $918/yr 真值（§3.9）
+5. **WW review 抓 4 个 bug，修完跑 v3**（§3.10）
+6. **最终修正**：naive 跨 72 组 = **−$263/yr**；cherry-pick 18 个正期望组 = **+$117/yr**（§3.11）
 
-**今天 Claude 的判决（修正后）**：**Taker 死，Maker 活在 hobby 规模。最严重的教训是 §3.9：我用 1 个角度的测试做了全局结论，错了。用户的"不信邪" 把这份报告从错误里拉了回来**。
+**今天 Claude 的判决（最终 v3 修正）**：**长尾 D-vs-R spread 不是 alpha，是市场摩擦**。普通投资者做不到 net positive。3 次大错：(a) 用 2 个 snapshot 推全局死亡 (b) v1/v2 maker 模拟带 bug 估出 $918/yr 假象 (c) 公式没按真实成交量封顶。每次都靠外部 review（用户 + WW）拉回。**最有支撑的当前判决是 §3.11**。
 
 ---
 
@@ -223,6 +224,78 @@ scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,50
 **两条 TAKER 分支都被同一个结构性事实杀死**：Polymarket 长尾市场 bestAsk 处深度只有 \$5-80。我们看到的 "edge" 都是真的存在，但它们的存在恰恰因为**没人来 \$5 的资金把它吃掉**。
 
 也就是说，整个 thesis 的逻辑链是反的：**我们以为"长尾持续 edge = 别人没注意"，实际上"长尾持续 edge = 别人不愿意为了 \$3 折腾这一套订单流"**。市场是有效率的，只是有效率的定价区间只对应"值得做"的回报。
+
+### 3.10 WW review 后再次大修（v3，正确数字）
+
+> **阅读顺序提示**：§3.10 + §3.11 是 Day 3 **最新** 的修正，supersede 下面的 §3.9（中间过渡的 v1/v2 结果，被 WW 4 条 bug review 推翻）。先读 3.10 + 3.11 拿到最终 verdict，再读 3.9 看演变历史。
+
+WW 当面查 v2 代码，挑出 4 个 bug：
+
+1. **收益没按真实成交量封顶** —— v2 公式 `fill_rate × avg_edge × $100` 假设每次都 fill 满 $100 basket。但 avg sell size 大量是 3-9 单位。**这单一 bug 把 v2 高估 5-20×**
+2. **Maker target 可能越过 bestAsk** —— `max(t, bestBid+0.001)` 在 narrow spread 下可能让 target = bestAsk = crossing order
+3. **Taker partial-fill 计算错** —— `verify_group_book.py:173` `cost = avg_px * size` 应为 `avg_px * filled`。书空了时的负收益被夸大
+4. **报告已发但用错误公式** —— PR 里的 $918 / $200-500 都不能信
+
+修完三个 bug 后重跑 v3：
+
+| Version | 方法 | 年化 |
+|---|---|---:|
+| v1 mid-touch | mid 是否 touch target | +$15,546 |
+| v2 trade tape（有 bug）| sum SELL-Yes sizes regardless of target | +$918 |
+| **v3 size-capped + no-crossing** | 真实 trade size 封顶 + 严格 maker 约束 | **−$263** |
+
+是的，**v3 总期望负数**。在 72 组上 naive 部署做市策略 → 平均每年亏 $263。
+
+更细的 markup 表：
+
+| Markup | Avg fill rate | Avg edge/unit | Avg 实际成交单位 | 正期望组 | 总日 $ |
+|---:|---:|---:|---:|---:|---:|
+| $0.005 | 5.9% | -1.27% | 19.7 | 7/72 | -$2.09 |
+| $0.010 | 5.8% | -0.38% | 19.8 | 13/72 | -$1.04 |
+| $0.020 | 5.7% | +0.24% | 20.1 | 15/72 | -$0.88 |
+| $0.030 | 5.6% | +0.66% | 19.4 | 16/72 | -$0.78 |
+| $0.050 | 5.4% | +0.90% | 20.0 | 15/72 | -$0.75 |
+
+**关键发现**：avg edge/unit 在小 markup 时负 —— 即使我们填满，**fee 吃掉了 spread 捕获**。只有挂到 $0.02 以上才正期望。
+
+**Cherry-pick 那 18 个正期望组**（用 hindsight bias risk）：约 +$0.32/day → **+$117/yr @ $100 basket**。但这需要知道哪些组会赚 —— 真实部署没有这个 oracle。
+
+#### Taker partial-fill 修正后
+
+SC Gov D/R 重跑（用修正后的 verify_group_book.py）：
+
+| Intended | Actual | Edge $ | Edge % | Note |
+|---:|---:|---:|---:|---|
+| 50u | 50 | +$0.83 | +1.66% | |
+| **200u** | **200** | **+$2.02** | **+1.01%** | ← max dollar |
+| 500u | 500 | -$12.12 | -2.42% | |
+| 2000u | **1304** ⚠️ | -$82 | -6.29% | book capped at 1304 |
+| 5000u | 1304 ⚠️ | -$82 | -6.29% | same |
+
+数字比 buggy 版本（200u: +$0.31）实际**更好**（200u: +$2.02），但这是因为今天市场动了一点。Taker peak per-event = $2，1 次性，不是 daily。
+
+### 3.11 最终修正后的 verdict
+
+| 策略 | 实际预期 $/yr | 状态 |
+|---|---:|---|
+| **Taker basket arb** | $0-200 一次性 | ❌ 死，深度太薄 |
+| **Maker v1 mid-sim** | $15k 幻觉 | ❌ 方法错 |
+| **Maker v2 size-uncapped** | $918 错误号 | ❌ 没按 trade size 封顶 |
+| **Maker v3（修正版）naive 部署** | **−$263/yr** | ❌ 平均亏钱 |
+| **Maker v3 cherry-pick 18 个正期望组** | **+$117/yr @ $100** | ⚠️ 需要 oracle |
+
+**最诚实的结论**：长尾 D-vs-R 通选的 spread 不是 alpha，只是**正常市场摩擦**。fee + spread + 队列优先级 + gas 综合下来，普通投资者做不到 net positive。这不是"thesis 死了"，是"thesis 从来就不是 alpha，只是看上去像 alpha"。
+
+#### 教训层级
+
+| Day | 错误 | WW 反馈 | 我学到 |
+|---|---|---|---|
+| Day 1 | 没读 fees.py 就说"代码错" | WW push commit 证伪 | 先读代码 |
+| Day 2 | 数字算术不一致（4 人 × 25 ≠ 200） | WW 直接 fix | inline 算术 |
+| Day 3 早 | 用 2 个 snapshot 推"thesis 死了" | 用户当面质疑 | 多视角测试 |
+| Day 3 晚 | v1/v2 maker 模拟 high-cited bug | WW 4 条点评 | 公式正确性 vs 表面合理 |
+
+**今天最重要的进步**：从"过度乐观"和"过度悲观"两个方向都犯了错。WW 的 fix 让数字第三次稳定下来 —— 这次的 $-263/yr naive / $117 cherry-pick 是迄今最有支撑的判决。
 
 ### 3.9 我之前判错了 —— MAKER thesis 是活的（小规模）
 
