@@ -48,6 +48,13 @@
    - median latency: `9.71s`
    - 语义弱于 `gemini-2.5-flash-nothinking/messages`，但正式 CLI smoke 通过，适合作为当前 secondary 默认备份。
 
+7. `fallback / gpt-5.4-mini / responses`
+   - pass recall: `7/8`
+   - perfect: `3/8`
+   - avg recall: `0.90`
+   - median latency: `11.03s`
+   - 通过原 responses 端点实测，速度明显优于 windhub 主路径，语义接近 `deepseek-v3-2-251201/messages`；适合作为低成本 fallback。
+
 ## 不推荐路径
 
 - `gpt-5.5-web-auto/messages` 在 elysiver 上被 moderation 直接拦截。
@@ -62,6 +69,7 @@
 - 低延迟语义候选：`secondary/gemini-2.5-flash-nothinking/messages`
 - 当前 secondary 默认备份：`secondary/gemini-3.1-pro-preview/chat`
 - 第三备份：`elysiver/longcat-flash-chat/chat`
+- 最后兜底：原 responses 端点 `gpt-5.4-mini/responses`
 
 ## 正式链路 smoke
 
@@ -69,6 +77,15 @@
 - `secondary/gemini-2.5-flash-nothinking/messages`: 未通过，返回 `HTTP 554`。
 - `secondary/gemini-3.1-pro-preview/chat`: 通过，2-market threshold 样本发现 `1` 个 implication。
 - `elysiver/longcat-flash-chat/chat`: 通过，2-market threshold 样本发现 `1` 个 implication。
+- `gpt-5.4-mini/responses` on original fallback endpoint: 通过，2-market threshold 样本发现 `1` 个 implication，confidence `0.99`。
+
+## Fallback gpt-5.4-mini 实测
+
+- 完整复杂识别 benchmark：`8/8` 成功、schema `8/8`、grounding `8/8`。
+- pass recall：`7/8`；perfect：`3/8`；avg recall：`0.90`；min recall：`0.71`。
+- median latency：`11.03s`。
+- 弱点：`ipo_openai_bracket` 漏掉 `threshold_lt_500b` 和 `interruption_next_trading_day`；若用于资金相关判断，仍需 deterministic/二次验证。
+- 详细报告：`reports/experiment-llm-complex-recognition-gpt54-mini-fallback-2026-05-13.md`。
 
 ## 说明
 
