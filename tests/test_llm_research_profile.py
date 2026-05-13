@@ -55,7 +55,7 @@ def test_balanced_profile_exports_benchmark_provider_order():
     assert values["OPENAI_BACKUP_MODEL"] == "longcat-flash-chat"
     assert values["OPENAI_BACKUP_BASE_URL"] == "https://elysiver.h-e.top/v1"
     assert values["OPENAI_BACKUP_API_MODE"] == "chat"
-    assert values["OPENAI_FALLBACK_MODEL"] == "gpt-5.4"
+    assert values["OPENAI_FALLBACK_MODEL"] == "gpt-5.4-mini"
     assert values["OPENAI_FALLBACK_BASE_URL"] == "https://api.wwcloud.app"
     assert values["OPENAI_FALLBACK_API_MODE"] == "responses"
 

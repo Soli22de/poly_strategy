@@ -90,7 +90,7 @@ def test_balanced_profile_exports_benchmark_provider_order():
     assert values["OPENAI_BACKUP_MODEL"] == "longcat-flash-chat"
     assert values["OPENAI_BACKUP_BASE_URL"] == "https://elysiver.h-e.top/v1"
     assert values["OPENAI_BACKUP_API_MODE"] == "chat"
-    assert values["OPENAI_FALLBACK_MODEL"] == "gpt-5.4"
+    assert values["OPENAI_FALLBACK_MODEL"] == "gpt-5.4-mini"
     assert values["OPENAI_FALLBACK_BASE_URL"] == "https://api.wwcloud.app"
     assert values["OPENAI_FALLBACK_API_MODE"] == "responses"
 
@@ -260,7 +260,7 @@ llm_profile_set_role OPENAI_SECONDARY_API_KEY OPENAI_SECONDARY_MODEL OPENAI_SECO
 llm_profile_set_role OPENAI_BACKUP_API_KEY OPENAI_BACKUP_MODEL OPENAI_BACKUP_BASE_URL OPENAI_BACKUP_API_MODE \
   "longcat-flash-chat" "https://elysiver.h-e.top/v1" "chat"
 llm_profile_set_role OPENAI_FALLBACK_API_KEY OPENAI_FALLBACK_MODEL OPENAI_FALLBACK_BASE_URL OPENAI_FALLBACK_API_MODE \
-  "gpt-5.4" "https://api.wwcloud.app" "responses"
+  "gpt-5.4-mini" "https://api.wwcloud.app" "responses"
 
 llm_profile_print_summary
 ```

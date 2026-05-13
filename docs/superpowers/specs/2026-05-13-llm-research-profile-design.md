@@ -36,7 +36,7 @@ Provider order:
 | primary | `windhub/deepseek-v3-2-251201` | `https://windhub.cc/v1` | `messages` | Best balance of strict recall and latency among stable candidates |
 | secondary | `secondary/gemini-3.1-pro-preview` | `https://api.xn--chy-js0fk50c.top/v1` | `chat` | Formal CLI smoke passed; lower semantic strength but fast |
 | backup | `elysiver/longcat-flash-chat` | `https://elysiver.h-e.top/v1` | `chat` | Best stable elysiver result, good recall and moderate latency |
-| fallback | `gpt-5.4` on the original responses endpoint | `https://api.wwcloud.app` | `responses` | More expensive high-capability last resort |
+| fallback | `gpt-5.4-mini` on the original responses endpoint | `https://api.wwcloud.app` | `responses` | Lower-cost responses-compatible last resort |
 
 Optional profile: `semantic`
 
