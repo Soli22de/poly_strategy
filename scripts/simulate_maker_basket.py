@@ -53,6 +53,8 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from research_simulation_utils import maker_target_price, zero_maker_stats
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
@@ -232,13 +234,17 @@ def main() -> int:
         # For each markup level, compute basket fill rate + avg basket edge
         markup_stats: dict[float, dict] = {}
         for markup in markups:
-            # Maker target price per leg = today's bestAsk - markup (clamped >= bestBid)
+            # Maker target price per leg must stay inside the spread and below bestAsk.
             targets: list[float] = []
             for m in members:
-                t = m["best_ask"] - markup
-                # Don't go below today's bestBid (would never realistically fill)
-                t = max(t, m["best_bid"] + 0.001)
+                t = maker_target_price(m["best_bid"], m["best_ask"], markup)
+                if t is None:
+                    targets = []
+                    break
                 targets.append(t)
+            if not targets:
+                markup_stats[markup] = zero_maker_stats(len(all_days), "no_non_crossing_maker_quote")
+                continue
 
             filled_days: list[dict] = []
             for d in all_days:
@@ -314,7 +320,8 @@ def main() -> int:
         f"# Maker-strategy Basket Simulation ({iso})",
         "",
         f"**Method**: for each (group, UTC-day, markup-level), check if every leg's "
-        f"mid-price touched (today's bestAsk - markup) at some point during the day. "
+        f"mid-price touched a non-crossing maker target derived from today's bestAsk - markup "
+        f"at some point during the day. "
         f"If ALL legs filled, compute basket cost at maker target prices + fee. "
         f"Aggregate fill_rate * avg_edge as proxy for expected daily $income.",
         "",

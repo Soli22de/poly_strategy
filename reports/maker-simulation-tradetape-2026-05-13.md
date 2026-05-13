@@ -1,5 +1,7 @@
 # Maker Simulation v2 — Trade Tape (2026-05-13T03:50:03.951692+00:00)
 
+> **Post-review correction (2026-05-13)**: this report was generated before the simulator capped PnL by the thinnest at-or-below-target leg trade size and before maker quotes were forced to stay strictly below bestAsk. Treat the dollar figures below as a stale upper bound. Re-run `scripts/simulate_maker_basket_v2.py` with the corrected code before making any trade/no-trade decision.
+
 **Method**: real Polymarket trade tape. For each (group, day, markup), check if any SELL Yes trade at price <= target occurred on each leg that day. If ALL legs had a qualifying trade, basket fills.
 
 **Window**: 14 days (2026-04-29 -> 2026-05-13)

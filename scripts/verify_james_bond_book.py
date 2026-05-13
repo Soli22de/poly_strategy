@@ -31,6 +31,8 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from research_simulation_utils import simulate_basket_fill
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 CLOB_BOOK_URL = "https://clob.polymarket.com/book"
@@ -162,31 +164,14 @@ def main() -> int:
 
     size_rows = []
     for size in sizes:
-        total_cost = 0.0
-        total_fee = 0.0
-        max_fillable = float("inf")
-        per_member: list[dict] = []
-        for b in book_data:
-            filled, avg_px = simulate_buy(b["asks"], size)
-            max_fillable = min(max_fillable, filled)
-            cost = avg_px * size  # buy `size` units at avg_px (capped by available depth)
-            fee = b["member"]["fee_rate"] * avg_px * (1 - avg_px) * size
-            total_cost += cost
-            total_fee += fee
-            per_member.append({"member": b["member"]["question"][:40], "filled": filled, "avg_px": avg_px})
-
-        edge_dollars = size - total_cost - total_fee
-        edge_pct = (edge_dollars / size) if size > 0 else 0.0
-        size_rows.append({
-            "size": size,
-            "max_fillable_units": max_fillable,
-            "total_cost": total_cost,
-            "total_fee": total_fee,
-            "edge_dollars": edge_dollars,
-            "edge_pct": edge_pct,
-            "per_member": per_member,
-        })
-        print(f"  size={size:>5.0f}u : avg_basket_cost={total_cost/size:.4f}  fee={total_fee:.4f}  edge=${edge_dollars:+,.2f} ({edge_pct*100:+.2f}%)  max_fillable={max_fillable:.0f}u")
+        row = simulate_basket_fill(book_data, size)
+        size_rows.append(row)
+        executable = row["effective_size"]
+        avg_cost = row["total_cost"] / executable if executable > 0 else 0.0
+        status = "full" if row["is_full_size_fillable"] else "capped"
+        print(f"  size={size:>5.0f}u : executable={executable:.2f}u  "
+              f"avg_basket_cost={avg_cost:.4f}  fee={row['total_fee']:.4f}  "
+              f"edge=${row['edge_dollars']:+,.2f} ({row['edge_pct']*100:+.2f}%)  {status}")
 
     # Render report
     now = datetime.now(tz=timezone.utc)
@@ -232,20 +217,23 @@ def main() -> int:
         "",
         "## Fill simulation",
         "",
-        "Buy `size` units of EACH member (so basket payout = size when one wins). "
-        "Avg basket cost walks up each ask ladder. Edge after fee is the realized dollar profit.",
+        "Buy up to the requested units of EACH member. Executable size is capped by "
+        "the thinnest leg's ask depth, because incomplete baskets do not pay the requested notional.",
         "",
-        "| Basket size (units = $payout) | Avg basket cost | Total fee | Edge $ | Edge % | Max fillable units |",
-        "|---:|---:|---:|---:|---:|---:|",
+        "| Requested size | Executable size | Avg basket cost | Total fee | Edge $ | Edge % | Full size? |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in size_rows:
+        executable = r["effective_size"]
+        avg_cost = r["total_cost"] / executable if executable > 0 else 0.0
         lines.append(
-            f"| {r['size']:.0f} "
-            f"| {r['total_cost']/r['size']:.4f} "
+            f"| {r['requested_size']:.0f} "
+            f"| {executable:.2f} "
+            f"| {avg_cost:.4f} "
             f"| ${r['total_fee']:.2f} "
             f"| ${r['edge_dollars']:+,.2f} "
             f"| {r['edge_pct']*100:+.2f}% "
-            f"| {r['max_fillable_units']:.0f} |"
+            f"| {'yes' if r['is_full_size_fillable'] else 'no'} |"
         )
 
     lines += [

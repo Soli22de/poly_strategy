@@ -35,6 +35,13 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from research_simulation_utils import (
+    capped_expected_daily_edge,
+    maker_target_price,
+    qualifying_trade_size,
+    zero_maker_stats,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 TRADES_URL = "https://data-api.polymarket.com/trades"
@@ -214,20 +221,13 @@ def main() -> int:
         end = now_dt.strftime("%Y-%m-%d")
         all_days = sorted({cur, end})
 
-    # Build per-leg per-day min trade price
-    leg_day_min_price: dict[str, dict[str, float]] = {}
-    leg_day_total_sell_size: dict[str, dict[str, float]] = {}
+    # Build per-leg per-day trade lists; target-specific size is computed later.
+    leg_day_trades: dict[str, dict[str, list[dict]]] = {}
     for cond_id, trades in filtered_trades.items():
-        d_min: dict[str, float] = {}
-        d_size: dict[str, float] = defaultdict(float)
+        by_day: dict[str, list[dict]] = defaultdict(list)
         for t in trades:
-            d = day_of_ts(t["timestamp"])
-            p = float(t["price"])
-            if d not in d_min or p < d_min[d]:
-                d_min[d] = p
-            d_size[d] += float(t["size"])
-        leg_day_min_price[cond_id] = d_min
-        leg_day_total_sell_size[cond_id] = dict(d_size)
+            by_day[day_of_ts(t["timestamp"])].append(t)
+        leg_day_trades[cond_id] = dict(by_day)
 
     results: dict[str, dict] = {}
     for gid, members in target_groups.items():
@@ -235,22 +235,28 @@ def main() -> int:
         for markup in markups:
             targets: list[float] = []
             for m in members:
-                t = m["best_ask"] - markup
-                t = max(t, m["best_bid"] + 0.001)
+                t = maker_target_price(m["best_bid"], m["best_ask"], markup)
+                if t is None:
+                    targets = []
+                    break
                 targets.append(t)
+            if not targets:
+                markup_stats[markup] = zero_maker_stats(len(all_days), "no_non_crossing_maker_quote")
+                continue
             filled_days: list[dict] = []
             for d in all_days:
                 fills = []
                 sizes = []
                 for m, target in zip(members, targets):
                     cond = m["condition_id"]
-                    min_p = leg_day_min_price.get(cond, {}).get(d)
-                    if min_p is None or min_p > target:
+                    day_trades = leg_day_trades.get(cond, {}).get(d, [])
+                    target_size = qualifying_trade_size(day_trades, target)
+                    if target_size <= 0:
                         fills.append(False)
                         sizes.append(0.0)
                     else:
                         fills.append(True)
-                        sizes.append(leg_day_total_sell_size.get(cond, {}).get(d, 0.0))
+                        sizes.append(target_size)
                 if all(fills):
                     basket_cost = sum(targets)
                     fee = sum(
@@ -270,9 +276,7 @@ def main() -> int:
             avg_edge = statistics.mean(edges) if edges else 0.0
             median_edge = statistics.median(edges) if edges else 0.0
             avg_min_sell_size = statistics.mean([f["min_leg_sell_size"] for f in filled_days]) if filled_days else 0.0
-            expected_daily_edge_dollars = (
-                fill_rate * avg_edge * args.basket_size if edges else 0.0
-            )
+            size_capped = capped_expected_daily_edge(filled_days, n_total, args.basket_size)
             markup_stats[markup] = {
                 "targets": [round(t, 4) for t in targets],
                 "n_filled_days": n_filled,
@@ -280,8 +284,10 @@ def main() -> int:
                 "fill_rate": fill_rate,
                 "avg_edge_given_fill": avg_edge,
                 "median_edge_given_fill": median_edge,
-                "expected_daily_edge_dollars": expected_daily_edge_dollars,
+                "expected_daily_edge_dollars": size_capped["expected_daily_edge_dollars"],
                 "avg_min_leg_sell_size": avg_min_sell_size,
+                "avg_effective_basket_size": size_capped["avg_effective_basket_size"],
+                "max_effective_basket_size": size_capped["max_effective_basket_size"],
                 "n_positive_edge_days": sum(1 for e in edges if e > 0),
                 "n_negative_edge_days": sum(1 for e in edges if e <= 0),
             }
@@ -314,7 +320,7 @@ def main() -> int:
     lines = [
         f"# Maker Simulation v2 — Trade Tape ({iso})",
         "",
-        f"**Method**: real Polymarket trade tape. For each (group, day, markup), check if any SELL Yes trade at price <= target occurred on each leg that day. If ALL legs had a qualifying trade, basket fills.",
+        f"**Method**: real Polymarket trade tape. For each (group, day, markup), check if any SELL Yes trade at price <= target occurred on each leg that day. If ALL legs had a qualifying trade, basket fills up to the smallest at-or-below-target leg trade size.",
         "",
         f"**Window**: {args.days} days ({datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime('%Y-%m-%d')} -> {now.strftime('%Y-%m-%d')})",
         f"**Basket size**: ${args.basket_size:.0f}",
@@ -330,14 +336,14 @@ def main() -> int:
         "",
         "## v2 results (this run)",
         "",
-        f"- Total expected daily income: **${total_expected_daily:+,.2f}/day** across {len(results)} groups @ ${args.basket_size:.0f} basket",
+        f"- Total expected daily income: **${total_expected_daily:+,.2f}/day** across {len(results)} groups @ max ${args.basket_size:.0f} basket, capped by observed trade size",
         f"- Annualized: **${total_expected_annual:+,.0f}/yr**",
         f"- Groups with positive expected income at any markup: **{n_groups_positive}/{len(results)}**",
         "",
         "## Top 20 by best expected daily income (v2)",
         "",
-        "| Group | Q | Best markup | Fill rate | Avg edge | Avg sell size | Exp daily $ |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Group | Q | Best markup | Fill rate | Avg edge | Avg sell size | Avg exec size | Exp daily $ |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for r in sorted_groups[:20]:
         best_m = max(r["markup_stats"].items(), key=lambda kv: kv[1]["expected_daily_edge_dollars"])
@@ -350,6 +356,7 @@ def main() -> int:
             f"| {s['fill_rate']*100:.1f}% "
             f"| {s['avg_edge_given_fill']*100:+.3f}% "
             f"| {s['avg_min_leg_sell_size']:.0f} "
+            f"| {s['avg_effective_basket_size']:.0f} "
             f"| ${s['expected_daily_edge_dollars']:+,.3f} |"
         )
 
@@ -376,8 +383,9 @@ def main() -> int:
         "## Notes",
         "",
         "- This uses the REAL trade tape — every SELL Yes trade in the past 14 days at price <= target is counted as a potential fill.",
-        "- Still optimistic: assumes (a) our resting bid was first in queue, (b) our size was always available, (c) per-leg fills are independent within a day.",
-        "- avg_min_leg_sell_size = avg of (min sell-size across legs on filled days). If this is < intended basket size, we couldn't have filled in full.",
+        "- Still optimistic: assumes (a) our resting bid was first in queue, (b) same-day per-leg fills can be assembled into a completed basket, (c) per-leg fills are independent within a day.",
+        "- Expected daily dollars are now capped by min(intended basket size, thinnest at-or-below-target leg sell size) on each filled day.",
+        "- avg_min_leg_sell_size = avg of (min at-or-below-target sell-size across legs on filled days); avg_exec_size is the size actually used in PnL.",
         "- Maker fee assumed equal to taker fee_rate from feeSchedule. Polymarket maker fees may be lower or rebated — actual income could be HIGHER.",
         "- v2 vs v1 mismatch: v2 < v1 means mid-touch over-counts (less real trade activity at target); v2 > v1 means mid-touch under-counts (trades happened that mid-snapshot didn't capture).",
         "",

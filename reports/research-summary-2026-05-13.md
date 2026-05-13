@@ -4,6 +4,8 @@
 **面向读者**：同学 WW
 **与昨日报告 (`research-summary-2026-05-12.md`) 的关系**：昨日是一次 06:13 UTC snapshot 的普查结果（"有 1 个 strict 候选 James Bond, edge +8.93%"）。今日把数据量扩到 14 天 × 15 分钟 granularity，并且对 strict 候选做了真实 orderbook 深度检查。**结论从「thesis 待验证」推到「thesis 在当前深度下商业死亡」**。
 
+> **Post-review correction（2026-05-13）**：§3.9 的 maker v2 dollar 结论是旧 simulator 产物；旧公式按目标 basket size 计收益，没有按每条腿真实 at-or-below-target SELL-Yes 成交量封顶，也没有强制 maker quote 严格低于 bestAsk。代码已修正，下面涉及 `$918/yr`、`$200-500/yr`、`$2-5k/yr` 的数字只能视为 stale upper bound，必须重跑 `scripts/simulate_maker_basket_v2.py` 后再决策。
+
 ---
 
 ## TL;DR —— 30 秒结论（vs 昨日）
@@ -20,10 +22,10 @@
 1. mid-price 给出的"持续 edge"和 bestAsk 实际可成交 edge 是两个东西（§3.4）
 2. TAKER 一次性吃光 bestAsk 在 2 个测试组（James Bond + SC Gov）下死亡（§2 + §3.7）
 3. 我据此说"thesis 死了" —— 用户当场质疑（§3.9）
-4. 补做 MAKER 模拟：v1 mid-touch 给 $15k/yr 假象，v2 trade tape 给 $918/yr 真值
-5. 修正后预期：**$200-500/yr @ $100 basket，或 $2-5k/yr @ $1000 basket**（capital 占用 $144k）
+4. 补做 MAKER 模拟：v1 mid-touch 给 $15k/yr 假象，v2 trade tape 旧公式给 $918/yr 上界
+5. Post-review 修正：maker v2 需要按真实成交量封顶后重跑；**旧 `$200-500/yr @ $100 basket` 不再作为最终结论**
 
-**今天 Claude 的判决（修正后）**：**Taker 死，Maker 活在 hobby 规模。最严重的教训是 §3.9：我用 1 个角度的测试做了全局结论，错了。用户的"不信邪" 把这份报告从错误里拉了回来**。
+**Post-review 后的判决**：**Taker 基本死；Maker 不能再按旧数字下结论，必须用成交量封顶版本重跑。最严重的教训是 §3.9：我用 1 个角度的测试做了全局结论，错了；但旧 maker v2 又犯了 size 上限错误。**
 
 ---
 
@@ -241,14 +243,16 @@ scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,50
 
 **警告写在脚本里：mid-touch 不等于 trade-at-target。真实 fill 率会低很多**。
 
-#### v2 (trade tape) 修正
+#### v2 (trade tape) 旧公式结果（post-review 后需重跑）
 
 `scripts/simulate_maker_basket_v2.py`：从 `data-api.polymarket.com/trades` 拉了真实成交记录。48,030 raw trades → 1,602 个 SELL Yes 在窗口内（只有 **3.3%** 的成交是 SELL-Yes，即"会触发我们 maker bid 的那种"）。
 
-| Metric | v1 (mid-touch) | v2 (trade tape) |
+Post-review 发现旧公式仍把每次 fill 乘以目标 basket size，没有按最薄腿真实 at-or-below-target 成交量封顶；因此本节数字只能作为旧版上界。
+
+| Metric | v1 (mid-touch) | v2 (trade tape, pre-fix upper bound) |
 |---|---:|---:|
 | 总日 $ | $42.59 | **$2.51** |
-| 年化 | $15,546 | **$918** |
+| 年化 | $15,546 | **$918（旧上界）** |
 | 正期望组 | 49/72 | **17/72** |
 | 平均 fill rate | 23-69% | **5-6%** |
 
@@ -262,9 +266,9 @@ scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,50
 | D/R 相关动（联合 fill 比独立 fill 难） | ×0.7 |
 | Partial fill 风险（一腿成 一腿没成 → 持仓不对冲） | -10% |
 | Polygon gas / 多笔交易成本 | -20% |
-| **现实估计** | **$200-500/yr @ $100 basket** |
+| **旧现实估计** | **无效，需按成交量封顶后重跑** |
 
-如果放大到 $1000 basket：~$2-5k/yr，但资金占用 $144k（72 组 × 2 腿 × $1000）。
+旧版 "$1000 basket → ~$2-5k/yr" 线性外推同样无效，因为真实成交量通常远低于目标 basket size。
 
 #### 修正后的两层 verdict
 
@@ -272,11 +276,11 @@ scripts/verify_group_book.py --group-id 0xa8574c0caacc --basket-sizes "50,200,50
 |---|---:|---|
 | Taker basket arb | \$0-200 | 被深度杀死，verified |
 | Maker basket arb（mid-sim 错估） | \$15k 假象 | 方法错 |
-| **Maker basket arb（trade tape）** | **\$200-500 @ \$100 / \$2-5k @ \$1000** | 方法学上可辩护 |
+| **Maker basket arb（trade tape）** | **需重跑** | 代码已改成成交量封顶 + 非 crossing maker quote |
 
 #### 我学到的最严肃的教训
 
-我前两天说 "thesis 已死" 是**过度推论**。我只测了 1 个视角（TAKER 一次性吃光 bestAsk），用 2 个组的单次 snapshot 就下了"整条 thesis 死亡"的判决。**用户当面质疑后做的真测试（trade tape v2）证明 thesis 活着，只是商业规模上接近 hobby**。
+我前两天说 "thesis 已死" 是**过度推论**。我只测了 1 个视角（TAKER 一次性吃光 bestAsk），用 2 个组的单次 snapshot 就下了"整条 thesis 死亡"的判决。**用户当面质疑后补做的 trade tape v2 提示 maker 方向仍值得验证，但 post-review 后必须用成交量封顶版本重跑，不能再把旧收益数当结论**。
 
 更广义的教训：**"测一个角度 → 推全局"** 是科研里最廉价的错误之一。Robust 测试需要至少：
 - 多种策略视角（taker / maker / hold-to-resolution）
