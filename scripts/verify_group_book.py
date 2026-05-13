@@ -26,8 +26,6 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from research_simulation_utils import simulate_basket_fill
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 CLOB_BOOK_URL = "https://clob.polymarket.com/book"
@@ -168,14 +166,39 @@ def main() -> int:
 
     size_rows = []
     for size in sizes:
-        row = simulate_basket_fill(book_data, size)
-        size_rows.append(row)
-        executable = row["effective_size"]
-        avg_cost = row["total_cost"] / executable if executable > 0 else 0.0
-        status = "full" if row["is_full_size_fillable"] else "capped"
-        print(f"  size={size:>5.0f}u : executable={executable:.2f}u  "
-              f"avg_basket_cost={avg_cost:.4f}  fee={row['total_fee']:.4f}  "
-              f"edge=${row['edge_dollars']:+,.2f} ({row['edge_pct']*100:+.2f}%)  {status}")
+        # First pass: find max fillable basket size = min of per-leg fillable
+        per_leg_fillable = []
+        for b in book_data:
+            filled, _ = simulate_buy(b["asks"], size)
+            per_leg_fillable.append(filled)
+        max_fillable = min(min(per_leg_fillable), size) if per_leg_fillable else 0.0
+
+        # FIX (per WW review): basket can only buy `max_fillable` units of EACH leg
+        # (to stay balanced). Recompute per-leg cost at the actual buyable size.
+        actual_units = max_fillable
+        total_cost = 0.0
+        total_fee = 0.0
+        for b in book_data:
+            sub_filled, sub_avg = simulate_buy(b["asks"], actual_units)
+            cost = sub_avg * actual_units
+            fee = b["member"]["fee_rate"] * sub_avg * (1 - sub_avg) * actual_units
+            total_cost += cost
+            total_fee += fee
+        edge_dollars = actual_units - total_cost - total_fee
+        edge_pct = (edge_dollars / actual_units) if actual_units > 0 else 0.0
+        size_rows.append({
+            "intended_size": size,
+            "actual_basket_units": actual_units,
+            "total_cost": total_cost,
+            "total_fee": total_fee,
+            "edge_dollars": edge_dollars,
+            "edge_pct": edge_pct,
+        })
+        cap_flag = "" if actual_units >= size else f"  [CAPPED: book has only {actual_units:.0f}u]"
+        avg_px_per_unit = total_cost / actual_units if actual_units > 0 else 0.0
+        print(f"  intended={size:>5.0f}u  actual={actual_units:>5.1f}u : "
+              f"avg_cost/u={avg_px_per_unit:.4f}  fee=${total_fee:.4f}  "
+              f"edge=${edge_dollars:+,.2f} ({edge_pct*100:+.2f}%){cap_flag}")
 
     now = datetime.now(tz=timezone.utc)
     iso = now.isoformat()
@@ -215,25 +238,21 @@ def main() -> int:
         f"- marginal fee: {marginal_fee:.5f}",
         f"- marginal edge_after_fee: **{1.0 - bestAsk_sum - marginal_fee:+.4f}**",
         "",
-        "## Fill simulation",
+        "## Fill simulation (fix: cost & edge computed at ACTUAL fillable size, not intended)",
         "",
-        "Buy up to the requested units of EACH member. Executable size is capped by "
-        "the thinnest leg's ask depth, because incomplete baskets do not pay the requested notional.",
-        "",
-        "| Requested size | Executable size | Avg basket cost | Total fee | Edge $ | Edge % | Full size? |",
-        "|---:|---:|---:|---:|---:|---:|---:|",
+        "| Intended size | Actual fillable | Avg cost/unit | Total fee | Edge $ | Edge % |",
+        "|---:|---:|---:|---:|---:|---:|",
     ]
     for r in size_rows:
-        executable = r["effective_size"]
-        avg_cost = r["total_cost"] / executable if executable > 0 else 0.0
+        avg_cost_per_unit = (r['total_cost'] / r['actual_basket_units']) if r['actual_basket_units'] > 0 else 0.0
+        capped = " ⚠️" if r['actual_basket_units'] < r['intended_size'] else ""
         lines.append(
-            f"| {r['requested_size']:.0f} "
-            f"| {executable:.2f} "
-            f"| {avg_cost:.4f} "
+            f"| {r['intended_size']:.0f} "
+            f"| {r['actual_basket_units']:.1f}{capped} "
+            f"| {avg_cost_per_unit:.4f} "
             f"| ${r['total_fee']:.2f} "
             f"| ${r['edge_dollars']:+,.2f} "
-            f"| {r['edge_pct']*100:+.2f}% "
-            f"| {'yes' if r['is_full_size_fillable'] else 'no'} |"
+            f"| {r['edge_pct']*100:+.2f}% |"
         )
 
     lines += [

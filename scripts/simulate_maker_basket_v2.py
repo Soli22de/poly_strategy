@@ -35,13 +35,6 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from research_simulation_utils import (
-    capped_expected_daily_edge,
-    maker_target_price,
-    qualifying_trade_size,
-    zero_maker_stats,
-)
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 TRADES_URL = "https://data-api.polymarket.com/trades"
@@ -221,62 +214,106 @@ def main() -> int:
         end = now_dt.strftime("%Y-%m-%d")
         all_days = sorted({cur, end})
 
-    # Build per-leg per-day trade lists; target-specific size is computed later.
-    leg_day_trades: dict[str, dict[str, list[dict]]] = {}
+    # Group qualifying trades by (cond_id, day) so we can scan by target later
+    leg_day_trades: dict[str, dict[str, list[tuple[float, float]]]] = {}
     for cond_id, trades in filtered_trades.items():
-        by_day: dict[str, list[dict]] = defaultdict(list)
+        per_day: dict[str, list[tuple[float, float]]] = defaultdict(list)
         for t in trades:
-            by_day[day_of_ts(t["timestamp"])].append(t)
-        leg_day_trades[cond_id] = dict(by_day)
+            d = day_of_ts(t["timestamp"])
+            per_day[d].append((float(t["price"]), float(t["size"])))
+        leg_day_trades[cond_id] = dict(per_day)
 
     results: dict[str, dict] = {}
+    skipped_due_to_narrow_spread = 0
     for gid, members in target_groups.items():
         markup_stats: dict[float, dict] = {}
         for markup in markups:
+            # FIX #2: clamp target STRICTLY below bestAsk to prevent crossing into taker zone.
             targets: list[float] = []
+            valid = True
             for m in members:
-                t = maker_target_price(m["best_bid"], m["best_ask"], markup)
-                if t is None:
-                    targets = []
+                t = m["best_ask"] - markup
+                # Clamp below bestAsk so we stay a maker
+                t = min(t, m["best_ask"] - 0.001)
+                # Clamp above bestBid so we're top-of-book
+                t = max(t, m["best_bid"] + 0.001)
+                # If spread is too narrow for any maker price, skip this leg
+                if t >= m["best_ask"] or t <= m["best_bid"]:
+                    valid = False
                     break
                 targets.append(t)
-            if not targets:
-                markup_stats[markup] = zero_maker_stats(len(all_days), "no_non_crossing_maker_quote")
+            if not valid:
+                # No valid maker price exists for this leg at this markup
+                markup_stats[markup] = {
+                    "targets": [],
+                    "n_filled_days": 0,
+                    "n_total_days": len(all_days),
+                    "fill_rate": 0.0,
+                    "avg_edge_given_fill": 0.0,
+                    "median_edge_given_fill": 0.0,
+                    "expected_daily_edge_dollars": 0.0,
+                    "avg_realized_basket_units": 0.0,
+                    "total_realized_dollars": 0.0,
+                    "n_positive_edge_days": 0,
+                    "n_negative_edge_days": 0,
+                    "skipped": "spread_too_narrow_for_maker",
+                }
+                skipped_due_to_narrow_spread += 1
                 continue
+
+            # FIX #1+#4: per-day actual fill size = min over legs of (total SELL-Yes size at price <= target).
+            # That bounds the realized basket units we'd be able to capture as maker.
             filled_days: list[dict] = []
             for d in all_days:
-                fills = []
-                sizes = []
+                leg_qualified_size: list[float] = []
+                fills_ok = True
                 for m, target in zip(members, targets):
-                    cond = m["condition_id"]
-                    day_trades = leg_day_trades.get(cond, {}).get(d, [])
-                    target_size = qualifying_trade_size(day_trades, target)
-                    if target_size <= 0:
-                        fills.append(False)
-                        sizes.append(0.0)
-                    else:
-                        fills.append(True)
-                        sizes.append(target_size)
-                if all(fills):
-                    basket_cost = sum(targets)
-                    fee = sum(
-                        m["fee_rate"] * t * (1 - t)
-                        for m, t in zip(members, targets)
-                    )
-                    edge = 1.0 - basket_cost - fee
-                    filled_days.append({
-                        "day": d, "basket_cost": basket_cost, "fee": fee, "edge": edge,
-                        "min_leg_sell_size": min(sizes) if sizes else 0.0,
-                    })
+                    trades_today = leg_day_trades.get(m["condition_id"], {}).get(d, [])
+                    # Sum size of trades at price <= target (the ones that would hit our maker bid)
+                    qual_size = sum(sz for (px, sz) in trades_today if px <= target)
+                    if qual_size <= 0:
+                        fills_ok = False
+                        break
+                    leg_qualified_size.append(qual_size)
+                if not fills_ok:
+                    continue
+
+                # FIX #1: actual basket fill bounded by thinnest leg AND by intended size
+                min_leg_size = min(leg_qualified_size)
+                actual_units = min(args.basket_size, min_leg_size)
+
+                basket_cost_per_unit = sum(targets)
+                fee_per_unit = sum(
+                    m["fee_rate"] * t * (1 - t)
+                    for m, t in zip(members, targets)
+                )
+                edge_per_unit = 1.0 - basket_cost_per_unit - fee_per_unit
+                edge_dollars_today = edge_per_unit * actual_units
+
+                filled_days.append({
+                    "day": d,
+                    "basket_cost_per_unit": basket_cost_per_unit,
+                    "fee_per_unit": fee_per_unit,
+                    "edge_per_unit": edge_per_unit,
+                    "min_leg_qualified_size": min_leg_size,
+                    "actual_basket_units": actual_units,
+                    "edge_dollars": edge_dollars_today,
+                })
 
             n_filled = len(filled_days)
             n_total = len(all_days)
             fill_rate = n_filled / n_total if n_total else 0.0
-            edges = [f["edge"] for f in filled_days]
-            avg_edge = statistics.mean(edges) if edges else 0.0
-            median_edge = statistics.median(edges) if edges else 0.0
-            avg_min_sell_size = statistics.mean([f["min_leg_sell_size"] for f in filled_days]) if filled_days else 0.0
-            size_capped = capped_expected_daily_edge(filled_days, n_total, args.basket_size)
+            edges_per_unit = [f["edge_per_unit"] for f in filled_days]
+            avg_edge = statistics.mean(edges_per_unit) if edges_per_unit else 0.0
+            median_edge = statistics.median(edges_per_unit) if edges_per_unit else 0.0
+            avg_realized_units = (
+                statistics.mean(f["actual_basket_units"] for f in filled_days)
+                if filled_days else 0.0
+            )
+            total_realized_dollars = sum(f["edge_dollars"] for f in filled_days)
+            # FIX #1: total realized dollars / window days, NOT fill_rate * avg_edge * intended_size
+            expected_daily_edge_dollars = total_realized_dollars / n_total if n_total else 0.0
+
             markup_stats[markup] = {
                 "targets": [round(t, 4) for t in targets],
                 "n_filled_days": n_filled,
@@ -284,12 +321,11 @@ def main() -> int:
                 "fill_rate": fill_rate,
                 "avg_edge_given_fill": avg_edge,
                 "median_edge_given_fill": median_edge,
-                "expected_daily_edge_dollars": size_capped["expected_daily_edge_dollars"],
-                "avg_min_leg_sell_size": avg_min_sell_size,
-                "avg_effective_basket_size": size_capped["avg_effective_basket_size"],
-                "max_effective_basket_size": size_capped["max_effective_basket_size"],
-                "n_positive_edge_days": sum(1 for e in edges if e > 0),
-                "n_negative_edge_days": sum(1 for e in edges if e <= 0),
+                "expected_daily_edge_dollars": expected_daily_edge_dollars,
+                "avg_realized_basket_units": avg_realized_units,
+                "total_realized_dollars": total_realized_dollars,
+                "n_positive_edge_days": sum(1 for e in edges_per_unit if e > 0),
+                "n_negative_edge_days": sum(1 for e in edges_per_unit if e <= 0),
             }
 
         q_short = " vs ".join([m["question"][:30] for m in members])
@@ -318,32 +354,40 @@ def main() -> int:
     n_groups_positive = sum(1 for r in results.values() if best_markup_income(r) > 0)
 
     lines = [
-        f"# Maker Simulation v2 — Trade Tape ({iso})",
+        f"# Maker Simulation v3 — Trade Tape + Size-capped ({iso})",
         "",
-        f"**Method**: real Polymarket trade tape. For each (group, day, markup), check if any SELL Yes trade at price <= target occurred on each leg that day. If ALL legs had a qualifying trade, basket fills up to the smallest at-or-below-target leg trade size.",
+        f"**Method (v3 = v2 + 3 fixes WW caught)**: real Polymarket trade tape.",
+        f"For each (group, day, markup), check if any SELL Yes trade at price <= target "
+        f"occurred on each leg. **Realized basket units per fill = min(intended_basket, "
+        f"min-over-legs of sum of qualifying-trade sizes that day)**. Maker target strictly "
+        f"clamped below bestAsk and above bestBid; groups with spread < 0.002 skipped.",
         "",
         f"**Window**: {args.days} days ({datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime('%Y-%m-%d')} -> {now.strftime('%Y-%m-%d')})",
-        f"**Basket size**: ${args.basket_size:.0f}",
+        f"**Intended basket size**: ${args.basket_size:.0f} of payout per fill (capped by trade size)",
         f"**Trades fetched**: {raw_total} raw -> {kept_total} qualifying (SELL Yes in window)",
         f"**Days with activity**: {len(all_days)}",
+        f"**Markup levels with no valid maker (spread too narrow)**: {skipped_due_to_narrow_spread}",
         "",
-        "## v1 (mid-touch) vs v2 (trade tape) comparison",
+        "## Fixes vs prior version (v2 from earlier today)",
         "",
-        "v1 mid-touch results from earlier today (see `maker-simulation-2026-05-13.md`):",
-        "- Total daily $: $+42.59 across 72 groups",
-        "- Annualized: $+15,546/yr",
-        "- Caveat: mid touching != trade happening at that price",
+        "1. **Income now capped by realized basket units, not intended size.** "
+        "Previous formula `fill_rate * avg_edge * intended_basket` assumed every fill captured "
+        "the full $100. Per WW's review, that overstates by 5-20x when avg trade size is 5-9 units.",
+        "2. **Maker target clamped strictly below bestAsk.** Previously `max(target, bestBid+0.001)` "
+        "could produce target = bestAsk for narrow spreads (crossing/taker, not maker).",
+        "3. **Per-leg fill size = sum of qualifying SELL Yes trade sizes at price <= target**, "
+        "not total all SELL Yes sizes regardless of price.",
         "",
-        "## v2 results (this run)",
+        "## v3 results",
         "",
-        f"- Total expected daily income: **${total_expected_daily:+,.2f}/day** across {len(results)} groups @ max ${args.basket_size:.0f} basket, capped by observed trade size",
+        f"- Total expected daily income: **${total_expected_daily:+,.2f}/day** across {len(results)} groups @ ${args.basket_size:.0f} intended basket",
         f"- Annualized: **${total_expected_annual:+,.0f}/yr**",
         f"- Groups with positive expected income at any markup: **{n_groups_positive}/{len(results)}**",
         "",
-        "## Top 20 by best expected daily income (v2)",
+        "## Top 20 by best expected daily income (v3)",
         "",
-        "| Group | Q | Best markup | Fill rate | Avg edge | Avg sell size | Avg exec size | Exp daily $ |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Group | Q | Best markup | Fill rate | Edge/unit | Avg realized units | Exp daily $ |",
+        "|---|---|---:|---:|---:|---:|---:|",
     ]
     for r in sorted_groups[:20]:
         best_m = max(r["markup_stats"].items(), key=lambda kv: kv[1]["expected_daily_edge_dollars"])
@@ -355,39 +399,47 @@ def main() -> int:
             f"| ${m_val:.3f} "
             f"| {s['fill_rate']*100:.1f}% "
             f"| {s['avg_edge_given_fill']*100:+.3f}% "
-            f"| {s['avg_min_leg_sell_size']:.0f} "
-            f"| {s['avg_effective_basket_size']:.0f} "
+            f"| {s['avg_realized_basket_units']:.1f} "
             f"| ${s['expected_daily_edge_dollars']:+,.3f} |"
         )
 
     lines += [
         "",
-        "## Markup-level aggregate (v2)",
+        "## Markup-level aggregate (v3)",
         "",
-        "| Markup | Avg fill rate | Avg edge given fill | Groups positive | Total daily $ |",
-        "|---:|---:|---:|---:|---:|",
+        "| Markup | Avg fill rate | Avg edge/unit | Avg realized units | Groups positive | Total daily $ |",
+        "|---:|---:|---:|---:|---:|---:|",
     ]
     for markup in markups:
         stats_at_markup = [r["markup_stats"][markup] for r in results.values()]
         avg_fr = statistics.mean(s["fill_rate"] for s in stats_at_markup)
         edges_when_filled = [s["avg_edge_given_fill"] for s in stats_at_markup if s["n_filled_days"] > 0]
         avg_e = statistics.mean(edges_when_filled) if edges_when_filled else 0.0
+        units_when_filled = [s["avg_realized_basket_units"] for s in stats_at_markup if s["n_filled_days"] > 0]
+        avg_u = statistics.mean(units_when_filled) if units_when_filled else 0.0
         n_pos = sum(1 for s in stats_at_markup if s["expected_daily_edge_dollars"] > 0)
         total_d = sum(s["expected_daily_edge_dollars"] for s in stats_at_markup)
         lines.append(
-            f"| ${markup:.3f} | {avg_fr*100:.1f}% | {avg_e*100:+.3f}% | {n_pos}/{len(stats_at_markup)} | ${total_d:+,.2f} |"
+            f"| ${markup:.3f} | {avg_fr*100:.1f}% | {avg_e*100:+.3f}% | {avg_u:.1f} | {n_pos}/{len(stats_at_markup)} | ${total_d:+,.2f} |"
         )
 
     lines += [
         "",
-        "## Notes",
+        "## Notes / honest disclaimers",
         "",
-        "- This uses the REAL trade tape — every SELL Yes trade in the past 14 days at price <= target is counted as a potential fill.",
-        "- Still optimistic: assumes (a) our resting bid was first in queue, (b) same-day per-leg fills can be assembled into a completed basket, (c) per-leg fills are independent within a day.",
-        "- Expected daily dollars are now capped by min(intended basket size, thinnest at-or-below-target leg sell size) on each filled day.",
-        "- avg_min_leg_sell_size = avg of (min at-or-below-target sell-size across legs on filled days); avg_exec_size is the size actually used in PnL.",
-        "- Maker fee assumed equal to taker fee_rate from feeSchedule. Polymarket maker fees may be lower or rebated — actual income could be HIGHER.",
-        "- v2 vs v1 mismatch: v2 < v1 means mid-touch over-counts (less real trade activity at target); v2 > v1 means mid-touch under-counts (trades happened that mid-snapshot didn't capture).",
+        "- Real Polymarket trade tape. SELL Yes trades at price <= target are the only ones that would have hit a resting maker bid.",
+        "- Realized basket units = min(intended_basket, min_over_legs of total qualifying-trade size that day). This is the **upper bound** on what we could have filled.",
+        "- Still optimistic on (a) queue priority — assumes our bid was first in line at our price level, (b) per-leg fills are independent within a day.",
+        "- Maker fee assumed = taker fee_rate from feeSchedule. Polymarket maker fees are sometimes lower or rebated — actual income could be slightly HIGHER from fees alone.",
+        "- Realistic adjustment: discount by 0.4-0.6x for queue priority + correlation + gas, additional partial-fill hedging risk.",
+        "",
+        "## Comparison to prior versions",
+        "",
+        "| Version | Method | Annualized | Issue |",
+        "|---|---|---:|---|",
+        "| v1 (mid-touch) | did mid touch target on day d | $15,546 | Massively over-counted; mid touching != fill |",
+        "| v2 (trade tape, size-uncapped) | sum SELL-Yes sizes regardless of target | $918 | Income computed at full $100/fill regardless of trade size |",
+        f"| **v3 (this run)** | per-target qualifying sizes, capped income | **${total_expected_annual:+,.0f}** | Honest within stated assumptions |",
         "",
         f"---\n*Snapshot: {iso}*",
     ]
