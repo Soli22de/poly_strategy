@@ -161,6 +161,19 @@ def main() -> int:
         default=None,
         help="Optional suffix for report/json filenames so multi-window runs don't overwrite each other.",
     )
+    ap.add_argument(
+        "--cohort-file",
+        type=str,
+        default=None,
+        help="Path to a cohort JSON (same schema as binary-classification.json: "
+             "{gid: {sub_tier, member_ids, questions}}). Defaults to the long-tail D-vs-R cohort.",
+    )
+    ap.add_argument(
+        "--cohort-tier",
+        type=str,
+        default="dvr",
+        help="sub_tier value to filter on within the cohort file. Default 'dvr' for backward compat.",
+    )
     args = ap.parse_args()
     markups = [float(x) for x in args.markups.split(",")]
     if args.in_sample_days < 1 or args.in_sample_days >= args.days:
@@ -185,27 +198,36 @@ def main() -> int:
     print(f"  OOS:        days {args.in_sample_days}..{args.days - 1} ({args.days - args.in_sample_days} days)")
     print(f"  maker fee mode: {args.maker_fee_mode}")
 
-    # 1. Load classification first so we know which markets to fetch
-    cls_path = REPO_ROOT / "data" / "experiments" / "2026-05-13" / "binary-classification.json"
+    # 1. Load cohort. Default = the long-tail D-vs-R cohort (back-compat with v3).
+    if args.cohort_file:
+        cls_path = Path(args.cohort_file)
+    else:
+        cls_path = REPO_ROOT / "data" / "experiments" / "2026-05-13" / "binary-classification.json"
+        if not cls_path.exists():
+            cls_path = REPO_ROOT / "data" / "experiments" / "2026-05-12" / "binary-classification.json"
     if not cls_path.exists():
-        cls_path = REPO_ROOT / "data" / "experiments" / "2026-05-12" / "binary-classification.json"
-    cls = json.loads(cls_path.read_text(encoding="utf-8")) if cls_path.exists() else {}
-    dvr_gids = {gid for gid, c in cls.items() if c.get("sub_tier") == "dvr"}
+        print(f"ERROR: cohort file {cls_path} not found", file=sys.stderr)
+        return 2
+    cls = json.loads(cls_path.read_text(encoding="utf-8"))
+    print(f"  cohort file: {cls_path}")
+    print(f"  cohort tier filter: {args.cohort_tier}")
+    dvr_gids = {gid for gid, c in cls.items() if c.get("sub_tier") == args.cohort_tier}
     member_ids_to_fetch: list[str] = []
     member_ids_by_gid: dict[str, list[str]] = {}
     for gid, c in cls.items():
-        if c.get("sub_tier") != "dvr":
+        if c.get("sub_tier") != args.cohort_tier:
             continue
         mids = c.get("member_ids") or []
         if not mids:
             continue
         member_ids_by_gid[gid] = mids
         member_ids_to_fetch.extend(mids)
-    # Include the explicit_other special-case used by v3 (Aaron Taylor-Johnson)
-    for gid, c in cls.items():
-        if gid.startswith("0xb23e25438839") and c.get("member_ids"):
-            member_ids_by_gid[gid] = c["member_ids"]
-            member_ids_to_fetch.extend(c["member_ids"])
+    # Include the explicit_other special-case used by v3 (Aaron Taylor-Johnson), DVR cohort only
+    if args.cohort_tier == "dvr":
+        for gid, c in cls.items():
+            if gid.startswith("0xb23e25438839") and c.get("member_ids"):
+                member_ids_by_gid[gid] = c["member_ids"]
+                member_ids_to_fetch.extend(c["member_ids"])
     print(f"  classification: {len(cls)} entries, {len(member_ids_by_gid)} target groups, "
           f"{len(member_ids_to_fetch)} member markets to fetch")
 

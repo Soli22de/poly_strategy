@@ -40,6 +40,12 @@ def main() -> int:
         default=18,
         help="Cherry-pick depth used in v4 runs (for reference).",
     )
+    ap.add_argument(
+        "--report-tag",
+        type=str,
+        default=None,
+        help="Suffix for output report/json filenames so multiple multi-window runs don't overwrite each other.",
+    )
     args = ap.parse_args()
 
     now = datetime.now(tz=timezone.utc)
@@ -218,12 +224,13 @@ def main() -> int:
         f"---\n*Snapshot: {iso}*",
     ]
 
-    report_path = REPO_ROOT / "reports" / f"maker-simulation-v4-multi-window-{date_tag}.md"
+    tag_suffix = f"-{args.report_tag}" if args.report_tag else ""
+    report_path = REPO_ROOT / "reports" / f"maker-simulation-v4-multi-window-{date_tag}{tag_suffix}.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
     data_dir = REPO_ROOT / "data" / "experiments" / date_tag
     data_dir.mkdir(parents=True, exist_ok=True)
-    out_json = data_dir / "maker-simulation-v4-multi-window.json"
+    out_json = data_dir / f"maker-simulation-v4-multi-window{tag_suffix}.json"
     with out_json.open("w", encoding="utf-8") as f:
         json.dump({
             "snapshot_ts": iso,

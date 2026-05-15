@@ -1,4 +1,4 @@
-# Maker Simulation v4 — Multi-Window Stability (2026-05-15T04:05:23.269350+00:00)
+# Maker Simulation v4 — Multi-Window Stability (2026-05-15T07:26:38.997558+00:00)
 
 **Method**: ran v4 (maker_fee=zero, 10 IS / 4 OOS) on 4 non-overlapping 14-day windows. Total span: 2026-03-20 -> 2026-05-15 (56 days).
 
@@ -39,4 +39,4 @@ Found 0 groups (of 64 present in all windows). Sum of their mean OOS = **$+0/yr*
 - If `naive_oos` flips sign across windows, the thesis applies only to a subset of groups, not to a naive deploy.
 
 ---
-*Snapshot: 2026-05-15T04:05:23.269350+00:00*
+*Snapshot: 2026-05-15T07:26:38.997558+00:00*
