@@ -126,25 +126,25 @@ def poly_best_ask(book: dict) -> Optional[float]:
 
 
 def kalshi_top_ask(orderbook: dict, side: str) -> Optional[float]:
-    """Return the lowest ask on Kalshi for YES or NO side.
+    """Return the synthetic lowest ask on Kalshi for YES or NO side.
 
     Kalshi /orderbook returns:
       {"orderbook_fp": {"yes_dollars": [[price_str, size_str], ...],
                         "no_dollars":  [[price_str, size_str], ...]}}
 
-    Each `_dollars` array is asks (cheapest available shares to BUY) sorted
-    ascending by price.
+    Each `_dollars` array is bids, not asks. In a binary market, a NO bid at
+    p implies a YES ask at 1-p, and vice versa.
     """
     book = orderbook.get("orderbook_fp") or {}
-    key = "yes_dollars" if side.lower() == "yes" else "no_dollars"
-    levels = book.get(key) or []
+    opposite_key = "no_dollars" if side.lower() == "yes" else "yes_dollars"
+    levels = book.get(opposite_key) or []
     if not levels:
         return None
     try:
-        # Best = lowest price = first entry
-        return float(levels[0][0])
+        best_opposite_bid = max(float(level[0]) for level in levels)
     except (TypeError, ValueError, IndexError):
         return None
+    return round(1.0 - best_opposite_bid, 6)
 
 
 def cross_platform_edge(poly_market: dict, poly_outcome: str,

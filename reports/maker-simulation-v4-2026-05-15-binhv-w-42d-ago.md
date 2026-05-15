@@ -4,7 +4,7 @@
   (A) maker fee mode = `zero` (v3 used taker_rate, which was wrong; Polymarket docs: "makers never pay fees")
   (B) 10-day in-sample / 4-day OOS split. Top 6 groups picked by IN-SAMPLE daily $; their OOS sum reported separately.
 
-**Window**: 14 days (2026-03-20 -> 2026-05-15)
+**Window**: 14 days (2026-03-20 -> 2026-04-03)
 **Basket size cap**: $100
 **Trades fetched**: 13732 raw -> 158 qualifying
 **Days with trade activity**: in-sample 10, OOS 4
@@ -47,6 +47,7 @@ OOS / in-sample ratio for top-6: -0.00
 - Queue priority: assumes we are first in line at our maker price level.
 - Per-leg fills assumed independent within a day.
 - Maker fee = 0 ignores `rebateRate` (20-25% of pool taker fees redistributed to makers). Real maker income could be modestly HIGHER. Conservative direction.
+- Builder fees are not modeled. The maker-fee-zero assumption is for direct Polymarket platform fees; orders routed through a builder with `builder_maker_fee_bps` could pay a separate builder fee.
 - 14 days is a short window; the in-sample / OOS split is *one* random partition, not k-fold. Repeat with different splits to test stability.
 - Today's bestAsk/bestBid used to compute maker target — historical spread may have differed.
 

@@ -106,6 +106,16 @@ def day_of_ts(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def window_date_label(cutoff_ts: int, window_end_dt: datetime) -> str:
+    start = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    end = window_end_dt.strftime("%Y-%m-%d")
+    return f"{start} -> {end}"
+
+
+def default_window_end(now_dt: datetime) -> datetime:
+    return datetime(now_dt.year, now_dt.month, now_dt.day, tzinfo=timezone.utc)
+
+
 def compute_maker_fee_per_share(price: float, mode: str, custom_rate: float, taker_rate: float) -> float:
     """Per-share maker fee for the simulation.
 
@@ -188,7 +198,7 @@ def main() -> int:
             print(f"ERROR: --end-date must be YYYY-MM-DD, got {args.end_date!r}", file=sys.stderr)
             return 2
     else:
-        window_end_dt = now_dt
+        window_end_dt = default_window_end(now_dt)
     cutoff_ts = int((window_end_dt - timedelta(days=args.days)).timestamp())
     end_ts = int(window_end_dt.timestamp())
     in_sample_end_ts = cutoff_ts + args.in_sample_days * 86400
@@ -211,7 +221,7 @@ def main() -> int:
     cls = json.loads(cls_path.read_text(encoding="utf-8"))
     print(f"  cohort file: {cls_path}")
     print(f"  cohort tier filter: {args.cohort_tier}")
-    dvr_gids = {gid for gid, c in cls.items() if c.get("sub_tier") == args.cohort_tier}
+    target_gids = {gid for gid, c in cls.items() if c.get("sub_tier") == args.cohort_tier}
     member_ids_to_fetch: list[str] = []
     member_ids_by_gid: dict[str, list[str]] = {}
     for gid, c in cls.items():
@@ -305,8 +315,11 @@ def main() -> int:
         members = [metas[mid] for mid in mids if mid in metas]
         if len(members) >= 2:
             target_groups[gid] = members
-    n_dvr_recovered = sum(1 for gid in target_groups if gid in dvr_gids)
-    print(f"  target groups: {len(target_groups)} (of which {n_dvr_recovered}/{len(dvr_gids)} DVR recovered)")
+    n_target_recovered = sum(1 for gid in target_groups if gid in target_gids)
+    print(
+        f"  target groups: {len(target_groups)} "
+        f"(of which {n_target_recovered}/{len(target_gids)} cohort IDs recovered)"
+    )
     print(f"  legs total: {sum(len(ms) for ms in target_groups.values())}")
 
     # 3. Parallel-fetch trades
@@ -354,7 +367,7 @@ def main() -> int:
     print(f"  {len(all_days)} distinct UTC days with qualifying trade activity")
     if not all_days:
         cur = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-        end = now_dt.strftime("%Y-%m-%d")
+        end = window_end_dt.strftime("%Y-%m-%d")
         all_days = sorted({cur, end})
 
     leg_day_trades: dict[str, dict[str, list[tuple[float, float]]]] = {}
@@ -374,6 +387,7 @@ def main() -> int:
 
     results: dict[str, dict] = {}
     skipped_narrow_spread = 0
+    total_group_markup_pairs = len(target_groups) * len(markups)
     for gid, members in target_groups.items():
         markup_stats: dict[float, dict] = {}
         for markup in markups:
@@ -520,11 +534,14 @@ def main() -> int:
         f"  (B) {args.in_sample_days}-day in-sample / {args.days - args.in_sample_days}-day OOS split. "
         f"Top {args.top_n_cherry_pick} groups picked by IN-SAMPLE daily $; their OOS sum reported separately.",
         "",
-        f"**Window**: {args.days} days ({datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime('%Y-%m-%d')} -> {now.strftime('%Y-%m-%d')})",
+        f"**Window**: {args.days} days ({window_date_label(cutoff_ts, window_end_dt)})",
         f"**Basket size cap**: ${args.basket_size:.0f}",
         f"**Trades fetched**: {raw_total} raw -> {kept_total} qualifying",
         f"**Days with trade activity**: in-sample {is_days_total}, OOS {oos_days_total}",
         f"**takerOnly distribution across our markets**: {dict(taker_only_check)}",
+        f"**Maker-quote skips**: {skipped_narrow_spread}/{total_group_markup_pairs} "
+        f"group-markup pairs ({(skipped_narrow_spread / total_group_markup_pairs * 100) if total_group_markup_pairs else 0.0:.1f}%) "
+        "skipped as `spread_too_narrow_for_maker`",
         "",
         "## Headline (with maker fee = 0)",
         "",
@@ -570,6 +587,7 @@ def main() -> int:
         "- Queue priority: assumes we are first in line at our maker price level.",
         "- Per-leg fills assumed independent within a day.",
         "- Maker fee = 0 ignores `rebateRate` (20-25% of pool taker fees redistributed to makers). Real maker income could be modestly HIGHER. Conservative direction.",
+        "- Builder fees are not modeled. The maker-fee-zero assumption is for direct Polymarket platform fees; orders routed through a builder with `builder_maker_fee_bps` could pay a separate builder fee.",
         "- 14 days is a short window; the in-sample / OOS split is *one* random partition, not k-fold. Repeat with different splits to test stability.",
         "- Today's bestAsk/bestBid used to compute maker target — historical spread may have differed.",
         "",
@@ -601,6 +619,8 @@ def main() -> int:
             "n_qualifying_trades": kept_total,
             "n_failures": len(failures),
             "taker_only_distribution": dict(taker_only_check),
+            "n_group_markup_pairs": total_group_markup_pairs,
+            "n_skipped_narrow_spread": skipped_narrow_spread,
             "naive_in_sample_daily": naive_in_sample_daily,
             "naive_oos_daily": naive_oos_daily,
             "cherry_in_sample_daily": cherry_in_sample_daily,

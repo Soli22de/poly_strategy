@@ -92,9 +92,9 @@ higher than first-pass test should cost. Move to a different research
 direction (LLM infra collaboration with WW, or single-platform thesis
 not yet tested like hold-to-resolution).
 
-The probe script's interpretation will need a quick fix to use the
-synthetic ask formula (1 - best_opposite_bid) before either Path A or B
-gives sensible numbers.
+The probe script now uses Kalshi synthetic asks (`1 - best_opposite_bid`).
+Before Path A or B gives a real verdict, it still needs hand-curated pairs
+or the existing verified-pair pipeline inputs.
 
 ---
 *Snapshot: 2026-05-15T07:50:00+00:00*

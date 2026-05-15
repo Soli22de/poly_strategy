@@ -92,7 +92,12 @@ def main() -> int:
                     help="Pagination ceiling. Today there are ~422 neg-risk groups in 4000 markets.")
     ap.add_argument("--tag", type=str, default="high-vol",
                     help="Tag for the output filename and the sub_tier label.")
-    ap.add_argument("--require-fees-enabled", action="store_true", default=True)
+    ap.add_argument(
+        "--require-fees-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require Gamma feesEnabled=True markets. Use --no-require-fees-enabled to include all markets.",
+    )
     args = ap.parse_args()
 
     now = datetime.now(tz=timezone.utc)
